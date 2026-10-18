@@ -22,12 +22,13 @@ from aistudio_api.infrastructure.utils.error_records import (
 def request_operation(scope: Scope) -> str | None:
     """Only return code-defined operation names, never raw paths or query data."""
     path = scope.get("path", "")
-    if path.startswith("/v1beta/models"):
+    if path.startswith("/v1beta/"):
         if path.endswith(":streamGenerateContent"):
             return "stream_generate_content"
         if path.endswith(":generateContent"):
             return "generate_content"
-        return "models"
+        if path == "/v1beta/models" or path.startswith("/v1beta/models/"):
+            return "models"
     if path.startswith(("/api/accounts", "/accounts")):
         if path in ("/accounts", "/accounts/") and "text/html" in dict(scope.get("headers", [])).get(b"accept", b"").decode("latin-1"):
             return None

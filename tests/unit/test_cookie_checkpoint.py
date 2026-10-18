@@ -16,6 +16,7 @@ from aistudio_api.infrastructure.account.cookie_parser import (
 )
 from aistudio_api.infrastructure.account.storage_state import atomic_write_json
 from aistudio_api.infrastructure.browser.cdp_client import CDPPage
+from aistudio_api.infrastructure.browser.scripts import ACCOUNT_IDENTITY_JS
 from aistudio_api.infrastructure.gateway.session_auth import (
     bind_auth_file,
     load_cookies_to_page,
@@ -46,7 +47,9 @@ def _page(cookies=None):
     return SimpleNamespace(
         url="https://aistudio.google.com/prompts/new_chat",
         is_closed=lambda: False,
-        evaluate=AsyncMock(return_value="owner@example.invalid"),
+        evaluate=AsyncMock(return_value={
+            "url": "https://aistudio.google.com/prompts/new_chat", "email": "owner@example.invalid",
+        }),
         get_cookies=AsyncMock(return_value=cookies or _cookies("rotated")),
         clear_cookies=AsyncMock(),
         set_cookies=AsyncMock(),
@@ -174,9 +177,10 @@ async def test_login_or_wrong_identity_cannot_replace_cookie_export(tmp_path):
     assert bind_auth_file(page, str(auth))
     before = auth.read_bytes()
     page.url = "https://accounts.google.com/signin"
+    page.evaluate.return_value = {"url": page.url, "email": "owner@example.invalid"}
     assert not await save_browser_cookies(page, str(auth))
     page.url = "https://aistudio.google.com/prompts/new_chat"
-    page.evaluate.return_value = "other@example.invalid"
+    page.evaluate.return_value = {"url": page.url, "email": "other@example.invalid"}
     assert not await save_browser_cookies(page, str(auth))
     assert auth.read_bytes() == before
 
@@ -185,9 +189,9 @@ async def test_login_or_wrong_identity_cannot_replace_cookie_export(tmp_path):
 async def test_known_email_cannot_be_verified_by_route_only(tmp_path):
     auth = _auth(tmp_path)
     page = _page()
-    page.evaluate.side_effect = [None, False]
+    page.evaluate.return_value = {"url": page.url, "email": None}
     assert not await verify_account_identity(page, str(auth))
-    assert page.evaluate.call_args.args[1]["authUser"] == ""
+    page.evaluate.assert_awaited_once_with(ACCOUNT_IDENTITY_JS, timeout_s=2.0)
 
 
 @pytest.mark.asyncio

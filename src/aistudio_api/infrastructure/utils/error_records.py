@@ -16,6 +16,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from aistudio_api.domain.errors import (
+    AccountIdentityMismatchError,
+    AccountIdentityUnavailableError,
     AuthError,
     RequestError,
     SessionExpiredError,
@@ -40,6 +42,10 @@ _CATEGORIES: dict[str, str] = {
     "upstream": "上游服务返回错误。",
     "internal": "服务内部发生错误，请参考异常类型与安全堆栈位置。",
     "cancelled": "请求已取消或客户端已断开连接。",
+}
+_IDENTITY_DETAILS: dict[str, str] = {
+    "upstream_account_mismatch": "AI Studio 当前身份与所选账号不一致，已阻止继续使用该会话。",
+    "upstream_account_unavailable": "AI Studio 账号身份暂时无法核验，浏览器可能尚未就绪；已阻止继续使用该会话。",
 }
 _BROWSER_EXCEPTIONS = {
     "InvalidRequestTemplateError", "BrowserError", "TargetClosedError", "CDPError",
@@ -122,9 +128,28 @@ def _http_status(value: object) -> int | None:
 
 
 def _unwrap(exc: BaseException) -> BaseException:
-    # AccountPreparationError carries the original failure, never its free-form message.
-    original = getattr(exc, "original_error", None)
-    return original if isinstance(original, BaseException) else exc
+    # Preserve typed failures across preparation/HTTP wrappers without looking at
+    # their messages. Follow only explicit causes, with a bound for malformed chains.
+    seen = {id(exc)}
+    for _ in range(8):
+        if isinstance(exc, (AuthError, RequestError, UsageLimitExceeded)):
+            break
+        original = getattr(exc, "original_error", None)
+        if not isinstance(original, BaseException):
+            original = exc.__cause__
+        if not isinstance(original, BaseException) or id(original) in seen:
+            break
+        seen.add(id(original))
+        exc = original
+    return exc
+
+
+def _failure_code(exc: BaseException, category: str) -> str:
+    if isinstance(exc, AccountIdentityMismatchError):
+        return "upstream_account_mismatch"
+    if isinstance(exc, AccountIdentityUnavailableError):
+        return "upstream_account_unavailable"
+    return category
 
 
 def classify_failure(exc: BaseException, http_status: int | None = None) -> tuple[int, str, str]:
@@ -154,6 +179,8 @@ def classify_failure(exc: BaseException, http_status: int | None = None) -> tupl
     else:
         category, status = "internal", status or 500
     summary = _CATEGORIES[category]
+    if isinstance(error, (AccountIdentityMismatchError, AccountIdentityUnavailableError)):
+        summary = _IDENTITY_DETAILS[_failure_code(error, category)]
     if isinstance(error, IndexError):
         summary = "服务内部出现列表索引越界，请参考安全堆栈位置。"
     return status or 500, category, summary
@@ -209,14 +236,19 @@ def _normalize_record(raw: object) -> dict[str, Any] | None:
     exception_type = _safe_token(raw.get("exception_type"), "Exception")
     source = _safe_token(raw.get("source"))
     summary = _CATEGORIES[category]
+    code = raw.get("code")
+    code = code if isinstance(code, str) and code in _IDENTITY_DETAILS and category == "authentication" else category
+    if code in _IDENTITY_DETAILS:
+        summary = _IDENTITY_DETAILS[code]
     if exception_type == "IndexError":
         summary = "服务内部出现列表索引越界，请参考安全堆栈位置。"
     if source == "management_warning":
         category = "browser"
+        code = category
         summary = "登录凭据已保存，但浏览器注入失败；实际调用时会重新尝试加载。"
     attempt = raw.get("attempt")
     return {
-        "id": event_id, "time": timestamp, "status": status, "category": category,
+        "id": event_id, "time": timestamp, "status": status, "category": category, "code": code,
         "summary": summary, "exception_type": exception_type, "frames": frames,
         "request_id": _safe_optional(raw.get("request_id"), _REQUEST),
         "source": source,
@@ -274,6 +306,7 @@ class ErrorRecordStore:
                 "id": uuid.uuid4().hex,
                 "time": self._now().isoformat(timespec="milliseconds"),
                 "status": status, "category": category,
+                "code": _failure_code(error, category),
                 "exception_type": type(error).__name__, "frames": _safe_frames(error),
                 "request_id": context.request_id if context else f"req_{uuid.uuid4().hex}",
                 "source": source, "operation": operation, "model": model,

@@ -1,77 +1,26 @@
 (() => {
     try {
-        const EMAIL_RE = /[\w.+-]+@[\w-]+\.[a-zA-Z0-9.-]+/;
-
-        // 1. Check all elements with aria-label containing @ (Google account buttons, avatars)
-        const ariaEls = document.querySelectorAll('[aria-label*="@"]');
-        for (const el of ariaEls) {
-            const label = el.getAttribute("aria-label") || "";
-            const m = label.match(EMAIL_RE);
-            if (m) return m[0].trim().toLowerCase();
-        }
-
-        // 2. Check Google Account profile button / OneGoogleBar elements
-        const profileSelectors = [
-            'a[href*="SignOutOptions"]',
-            'a[href*="accounts.google.com"]',
-            'a[aria-label*="Google"]',
-            'button[aria-label*="Google"]',
-            'div[aria-label*="Google"]',
-            '#gb',
-            '[data-email]',
-            'img[alt*="@"]',
-            '[title*="@"]'
+        // Only current account controls are identity evidence. Chooser rows,
+        // prompts, cookies and account lists can contain other signed-in users.
+        const EMAIL_RE = /[\w.+-]+@[\w-]+\.[a-zA-Z0-9.-]+/g;
+        const excluded = '[hidden], [aria-hidden="true"], [role="menu"], [role="listbox"], [role="option"], [role="menuitem"]';
+        const tiers = [
+            'ms-account-switcher button, button.account-switcher-button, ms-account-switcher .account-switcher-text, .account-switcher-button .account-switcher-text',
+            'a[href*="SignOutOptions"], #gb a[aria-label], #gb button[aria-label], a[aria-label^="Google Account:"], button[aria-label^="Google Account:"]'
         ];
-        for (const sel of profileSelectors) {
-            const els = document.querySelectorAll(sel);
-            for (const el of els) {
-                const combined = [
-                    el.getAttribute("data-email") || "",
-                    el.getAttribute("aria-label") || "",
-                    el.getAttribute("title") || "",
-                    el.getAttribute("alt") || "",
-                    el.innerText || "",
-                    el.textContent || ""
-                ].join(" ");
-                const m = combined.match(EMAIL_RE);
-                if (m) return m[0].trim().toLowerCase();
+        for (const selector of tiers) {
+            const emails = new Set();
+            for (const el of document.querySelectorAll(selector)) {
+                if (el.closest(excluded) || !el.getClientRects().length) continue;
+                const style = window.getComputedStyle(el);
+                if (style.visibility !== 'visible' || style.display === 'none') continue;
+                const text = [el.getAttribute('aria-label') || '', el.getAttribute('title') || '',
+                    el.getAttribute('data-email') || '', el.innerText || ''].join(' ');
+                for (const email of text.match(EMAIL_RE) || []) emails.add(email.trim().toLowerCase());
             }
-        }
-
-        // 3. MakerSuite / AI Studio account switcher text
-        const switcherSelectors = [
-            "ms-account-switcher .account-switcher-text",
-            ".account-switcher-button .account-switcher-text",
-            "ms-account-switcher button",
-            "button.account-switcher-button",
-            "ms-account-switcher"
-        ];
-        for (const sel of switcherSelectors) {
-            const el = document.querySelector(sel);
-            if (el) {
-                const txt = [el.getAttribute("aria-label") || "", el.innerText || "", el.textContent || ""].join(" ");
-                const m = txt.match(EMAIL_RE);
-                if (m) return m[0].trim().toLowerCase();
-            }
-        }
-
-        // 4. Check global Google account data structures
-        const globals = [
-            window.WIZ_global_data,
-            window.__ACCOUNT__,
-            window.default_MakerSuite,
-            window.IJ_values,
-            window.RAISE_data,
-            window.__INITIAL_DATA__
-        ];
-        for (const g of globals) {
-            if (g) {
-                try {
-                    const str = typeof g === "string" ? g : JSON.stringify(g);
-                    const m = str.match(EMAIL_RE);
-                    if (m) return m[0].trim().toLowerCase();
-                } catch (e) {}
-            }
+            // Conflicting current controls are unknown identity, never permission
+            // to select whichever email happens to come first.
+            if (emails.size) return emails.size === 1 ? [...emails][0] : null;
         }
     } catch (e) {}
     return null;

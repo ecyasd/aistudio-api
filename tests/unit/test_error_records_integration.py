@@ -17,7 +17,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
 
-from aistudio_api.api.error_middleware import ErrorRecordsMiddleware
+from aistudio_api.api.error_middleware import ErrorRecordsMiddleware, request_operation
 from aistudio_api.infrastructure.utils import error_records as records
 
 
@@ -124,6 +124,46 @@ async def test_unhandled_index_error_has_one_safe_internal_record(diagnostic_sto
     assert "SYNTHETIC_INTERNAL_SECRET" not in _diagnostic_payload(diagnostic_store)
 
 
+@pytest.mark.parametrize(("path", "operation"), [
+    ("/v1beta/models/gemini-test:generateContent", "generate_content"),
+    ("/v1beta/gemini-test:generateContent", "generate_content"),
+    ("/v1beta/models/gemini-test:streamGenerateContent", "stream_generate_content"),
+    ("/v1beta/gemini-test:streamGenerateContent", "stream_generate_content"),
+])
+async def test_gemini_http_wrapper_keeps_identity_diagnostics_and_request_correlation(diagnostic_store, path, operation):
+    from aistudio_api.domain.errors import AccountIdentityMismatchError
+
+    app = _application()
+
+    @app.post(path)
+    async def endpoint():
+        try:
+            raise AccountIdentityMismatchError("SYNTHETIC_EMAIL_SECRET")
+        except AccountIdentityMismatchError as original:
+            raise HTTPException(503, detail="SYNTHETIC_BODY_SECRET") from original
+
+    response = await _post(app, path)
+    assert response.status_code == 503
+    events = diagnostic_store.list_records()["items"]
+    assert len(events) == 1
+    assert events[0]["operation"] == operation
+    assert events[0]["category"] == "authentication"
+    assert events[0]["code"] == "upstream_account_mismatch"
+    assert events[0]["exception_type"] == "AccountIdentityMismatchError"
+    assert events[0]["outcome"] == "failed"
+    assert events[0]["request_id"] == response.headers["x-request-id"]
+    assert events[0]["transport_status"] == 503
+    assert "SYNTHETIC" not in _diagnostic_payload(diagnostic_store)
+
+
+def test_gemini_operation_never_contains_arbitrary_path_or_query_values():
+    assert request_operation({"path": "/v1beta/gemini-test:SYNTHETIC_SECRET"}) is None
+    assert request_operation({"path": "/v1beta/models-unrecognized"}) is None
+    assert request_operation({"path": "/v1/chat/completions"}) is None
+    assert request_operation({"path": "/v1beta/models"}) == "models"
+    assert request_operation({"path": "/v1beta/gemini-test:generateContent", "query_string": b"key=SYNTHETIC_SECRET"}) == "generate_content"
+
+
 @pytest.fixture
 def synthetic_generation(monkeypatch):
     from aistudio_api.api.schemas import GeminiGenerateContentRequest
@@ -184,6 +224,39 @@ async def test_sse_error_after_http_200_has_one_terminal_record(
     assert "SYNTHETIC_UPSTREAM_SECRET" not in _diagnostic_payload(diagnostic_store)
 
 
+async def test_bare_model_sse_identity_failure_keeps_semantic_code_after_http_200(
+    diagnostic_store, synthetic_generation,
+):
+    from aistudio_api.domain.errors import AccountIdentityUnavailableError
+
+    service, client, request = synthetic_generation
+
+    async def synthetic_stream(**kwargs):
+        yield "body", "synthetic partial output"
+        raise AccountIdentityUnavailableError("SYNTHETIC_IDENTITY_SECRET")
+
+    client.stream_generate_content.side_effect = synthetic_stream
+    app = _application()
+
+    @app.post("/v1beta/gemini-test:streamGenerateContent")
+    async def endpoint():
+        return service._build_gemini_streaming_response(
+            client=client, req=request, model_path="gemini-test",
+        )
+
+    response = await _post(app, "/v1beta/gemini-test:streamGenerateContent")
+    assert response.status_code == 200
+    events = diagnostic_store.list_records()["items"]
+    assert len(events) == 1
+    assert events[0]["code"] == "upstream_account_unavailable"
+    assert events[0]["status"] == 503
+    assert events[0]["category"] == "authentication"
+    assert events[0]["transport_status"] == 200
+    assert events[0]["outcome"] == "failed"
+    assert events[0]["request_id"] == response.headers["x-request-id"]
+    assert "SYNTHETIC_IDENTITY_SECRET" not in _diagnostic_payload(diagnostic_store)
+
+
 async def test_retry_recovered_response_updates_the_original_attempt(
     diagnostic_store, synthetic_generation
 ):
@@ -241,6 +314,43 @@ async def test_cold_start_failure_keeps_the_account_that_failed_preparation(
     assert events[0]["category"] == "session_expired"
     assert events[0]["outcome"] == "failed"
     assert "SYNTHETIC_COOKIE_SECRET" not in _diagnostic_payload(diagnostic_store)
+
+
+@pytest.mark.parametrize("unavailable", [False, True])
+async def test_identity_preparation_failure_keeps_target_account_and_one_typed_record(
+    diagnostic_store, synthetic_generation, unavailable,
+):
+    from aistudio_api.application.account_orchestrator import AccountPreparationError
+    from aistudio_api.domain.errors import (
+        AccountIdentityMismatchError,
+        AccountIdentityUnavailableError,
+    )
+
+    error_type = AccountIdentityUnavailableError if unavailable else AccountIdentityMismatchError
+    service, client, _ = synthetic_generation
+    app = _application()
+
+    @app.post("/v1beta/gemini-test:generateContent")
+    async def endpoint():
+        await service.handle_attempt_exception(
+            AccountPreparationError("acc_abcd1234", error_type("SYNTHETIC_IDENTITY_SECRET")),
+            attempt=0, model_path="gemini-test", normalized_model="gemini-test",
+            client=client, account_id="acc_1234abcd",
+        )
+
+    response = await _post(app, "/v1beta/gemini-test:generateContent")
+    assert response.status_code == 503
+    events = diagnostic_store.list_records()["items"]
+    assert len(events) == 1, "HTTP conversion must not add an untyped 500 after the identity failure"
+    assert events[0]["account_id"] == "acc_abcd1234"
+    assert events[0]["exception_type"] == error_type.__name__
+    assert events[0]["category"] == "authentication"
+    assert events[0]["code"] == error_type.code
+    assert events[0]["status"] == 503
+    assert events[0]["transport_status"] == 503
+    assert events[0]["outcome"] == "failed"
+    assert events[0]["request_id"] == response.headers["x-request-id"]
+    assert "SYNTHETIC_IDENTITY_SECRET" not in _diagnostic_payload(diagnostic_store)
 
 
 async def test_client_cancel_is_a_499_record_without_replacing_cancellation(diagnostic_store):

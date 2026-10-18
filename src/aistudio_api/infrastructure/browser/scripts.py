@@ -24,6 +24,11 @@ CHECK_IDENTITY_JS = _load_js("check_identity.js")
 STOP_GENERATION_JS = _load_js("stop_generation.js")
 DOM_GC_CLEANUP_JS = _load_js("dom_gc_cleanup.js")
 EXTRACT_EMAIL_JS = _load_js("extract_email.js")
+# Read routing and identity in one document evaluation, including SPA URL changes
+# which need not emit Page.frameNavigated (and leave CDPPage.url stale).
+ACCOUNT_IDENTITY_JS = (
+    "() => ({url: window.location.href, email: " + EXTRACT_EMAIL_JS.strip() + "})"
+)
 
 
 def build_streaming_init_args(

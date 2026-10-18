@@ -211,6 +211,28 @@ assert.match(html, /响应开始后的失败/)
 assert.match(html, /SyntheticBrowserError/)
 checks.push('details expose sanitized stack locations, request correlation and actual SSE HTTP status')
 
+const identityRecord = record({
+  status: 503, transport_status: 503, category: 'authentication',
+  code: 'upstream_account_mismatch', summary: 'AI Studio 当前身份与所选账号不一致，已阻止请求。',
+  exception_type: 'AccountIdentityMismatchError',
+  frames: [{ file: 'aistudio_api/infrastructure/gateway/session_auth.py', line: 407, function: '_prepare_auth' }],
+})
+requestImpl = async () => response([identityRecord])
+await store.refresh()
+html = await render()
+assert.match(html, /身份验证/)
+assert.match(html, /身份与所选账号不一致/)
+assert.match(html, /upstream_account_mismatch/)
+const identityDetails = execute(compileScript(descriptor, { id: 'identity-error-details', inlineTemplate: true }).content, viewPath, {
+  vue: { ...vue, ref: value => vue.ref(value === null ? identityRecord : value) },
+}).default
+html = await renderToString(vue.createSSRApp(identityDetails))
+assert.match(html, /诊断代码/)
+assert.match(html, /upstream_account_mismatch/)
+assert.match(html, /AccountIdentityMismatchError/)
+assert.match(html, /session_auth.py:407/)
+checks.push('account identity diagnostics show a distinct safe code, authentication category and origin location')
+
 const setupView = execute(compileScript(descriptor, { id: 'error-records-reactive-details' }).content, viewPath, {
   vue: { ...vue, onUnmounted() {} },
 }).default

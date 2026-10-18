@@ -11,6 +11,7 @@ export interface ErrorRecord {
   status: number
   transport_status: number | null
   category: string
+  code?: string
   summary: string
   exception_type?: string | null
   frames: ErrorFrame[]
