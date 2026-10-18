@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import secrets
+from collections.abc import Iterable
 
 from fastapi import HTTPException, Request
 
@@ -13,6 +14,22 @@ from aistudio_api.infrastructure.utils.logger import get_logger
 from .state import runtime_state
 
 logger = get_logger("auth")
+
+_SENSITIVE_QUERY_NAMES = frozenset({
+    "key", "api_key", "api-key", "apikey", "x-api-key", "x-goog-api-key",
+    "authorization", "token", "access_token", "password", "admin_password",
+    "web_password", "secret",
+})
+
+
+def _constant_match(token: str | None, candidates: Iterable[str]) -> bool:
+    if not token or len(token) > 4096:
+        return False
+    matched = False
+    for candidate in candidates:
+        if candidate and len(candidate) <= 4096:
+            matched |= secrets.compare_digest(token.encode("utf-8"), candidate.encode("utf-8"))
+    return matched
 
 
 def _extract_request_token(request: Request) -> str | None:
@@ -49,12 +66,15 @@ def require_web_auth(request: Request) -> None:
     if not settings.auth_enabled:
         return
 
-    token = _extract_request_token(request)
+    # Management credentials must never be accepted in URLs or API-key headers.
+    authorization = (request.headers.get("authorization") or "").strip()
+    scheme, _, bearer = authorization.partition(" ")
+    token = bearer.strip() if scheme.lower() == "bearer" else ""
     if (
-        token
+        not any(name.lower() in _SENSITIVE_QUERY_NAMES for name in request.query_params)
         and settings.web_password
         and settings.web_password.strip()
-        and secrets.compare_digest(token, settings.web_password)
+        and _constant_match(token, {settings.web_password})
     ):
         return
     client_ip = request.client.host if request.client else "unknown"
@@ -72,12 +92,12 @@ def require_api_key(request: Request) -> None:
         get_configured_api_keys,
     )
 
-    configured_keys = get_configured_api_keys()
-    all_valid_keys = configured_keys | settings.api_keys
-
-    # 如果 config.yaml 与环境变量均未配置任何 Key，则 API 免密开放
-    if not all_valid_keys:
-        return
+    try:
+        # Only the owner's current dynamic keys authorize inference, even when
+        # the application runs without the deployment guard or launcher.
+        all_valid_keys = get_configured_api_keys() - {settings.web_password}
+    except Exception:
+        all_valid_keys = set()
 
     token = _extract_request_token(request)
     if not token:
@@ -92,16 +112,7 @@ def require_api_key(request: Request) -> None:
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    if token in all_valid_keys:
-        return
-
-    # 匹配管理密码（管理员具备超级 API 访问权限）
-    if (
-        token
-        and settings.web_password
-        and settings.web_password.strip()
-        and secrets.compare_digest(token, settings.web_password)
-    ):
+    if _constant_match(token, all_valid_keys):
         return
     client_ip = request.client.host if request.client else "unknown"
     logger.warning("API 鉴权失败: 来自 %s 的 API Key 无效", client_ip)

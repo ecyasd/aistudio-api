@@ -2,8 +2,8 @@
 set -e
 
 CONFIG_FILE="${AISTUDIO_CONFIG_FILE:-/app/data/config.yaml}"
-TEMPLATE_FILE="/app/defaults/config.yaml"
-FALLBACK_TEMPLATE="/app/config.yaml"
+TEMPLATE_FILE="/app/defaults/config.example.yaml"
+FALLBACK_TEMPLATE="/app/config.example.yaml"
 
 if [ ! -f "$CONFIG_FILE" ]; then
     if [ -f "$TEMPLATE_FILE" ]; then

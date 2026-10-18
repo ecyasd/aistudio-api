@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 
 from aistudio_api.api.state import runtime_state
 from aistudio_api.application.account_orchestrator import (
@@ -83,7 +84,10 @@ async def test_try_switch_account_double_check_reuse():
 
 
 @pytest.mark.asyncio
-async def test_ensure_active_account_early_switch():
+@pytest.mark.parametrize("attempt", [0, 1])
+async def test_ensure_active_account_early_switch(monkeypatch, attempt):
+    from aistudio_api.application import account_orchestrator
+
     mock_rotator = MagicMock(spec=AccountRotator)
     mock_service = MagicMock(spec=AccountService)
 
@@ -94,9 +98,13 @@ async def test_ensure_active_account_early_switch():
         created_at="2026-01-01",
     )
     mock_service.get_active_account = MagicMock(return_value=active_acc)
+    mock_service.list_accounts.return_value = [active_acc]
 
     # acc_1 is NOT available for this model
     mock_rotator.is_account_available = MagicMock(return_value=False)
+    mock_rotator.get_account_stats.return_value = None
+    switch = AsyncMock(return_value=False)
+    monkeypatch.setattr(account_orchestrator, "try_switch_account", switch)
 
     orig_rotator = runtime_state.rotator
     orig_service = runtime_state.account_service
@@ -105,12 +113,13 @@ async def test_ensure_active_account_early_switch():
         runtime_state.rotator = mock_rotator
         runtime_state.account_service = mock_service
 
-        # attempt > 0 does nothing
-        await ensure_active_account(attempt=1, model="gemini-2.5-flash")
-
-        # attempt == 0 with unavailable model calls try_switch_account
-        mock_rotator.is_account_available.assert_not_called()
-        await ensure_active_account(attempt=0, model="gemini-2.5-flash")
+        # Every attempt must fail closed if selection cannot bind a usable account.
+        with pytest.raises(HTTPException) as caught:
+            await ensure_active_account(attempt=attempt, model="gemini-2.5-flash")
+        assert caught.value.status_code == 503
+        switch.assert_awaited_once_with(
+            model="gemini-2.5-flash", failed_account_id="acc_1"
+        )
         mock_rotator.is_account_available.assert_called_with(
             "acc_1", model="gemini-2.5-flash"
         )
@@ -133,6 +142,7 @@ async def test_first_request_binds_registry_account_once(
     )
     service = MagicMock(spec=AccountService)
     service.get_active_account.return_value = account
+    service.list_accounts.return_value = [account]
     service.get_account_auth_path.return_value = target_auth
     rotator = MagicMock(spec=AccountRotator)
     rotator.is_account_available.return_value = True
@@ -179,11 +189,14 @@ async def test_first_request_rejects_missing_active_account_auth(monkeypatch):
         id="missing", name="Missing", email=None, created_at="2026-10-18"
     )
     service.get_account_auth_path.return_value = None
+    service.list_accounts.return_value = [service.get_active_account.return_value]
+    rotator = MagicMock(spec=AccountRotator)
+    rotator.is_account_available.return_value = True
     client = MagicMock(spec=AIStudioClient)
     client.session = MagicMock(spec=BrowserSession)
     monkeypatch.setattr(runtime_state, "client", client)
     monkeypatch.setattr(runtime_state, "account_service", service)
-    monkeypatch.setattr(runtime_state, "rotator", None)
+    monkeypatch.setattr(runtime_state, "rotator", rotator)
 
     with pytest.raises(RuntimeError, match="credentials are unavailable"):
         await ensure_active_account(0)
@@ -199,6 +212,7 @@ async def test_cold_start_failure_keeps_attempted_account_after_registry_changes
     old = AccountMeta(id="old", name="Old", email=None, created_at="2026-10-18")
     new = AccountMeta(id="new", name="New", email=None, created_at="2026-10-18")
     service.get_active_account.return_value = old
+    service.list_accounts.return_value = [old, new]
     service.get_account_auth_path.return_value = tmp_path / "old" / "auth.json"
     session = MagicMock(spec=BrowserSession)
     session._auth_file = None
@@ -411,10 +425,6 @@ async def test_old_403_context_recovers_once_through_handler_or_pre_recorded_pat
     rotator.record_auth_error.side_effect = lambda _id, model=None: (
         stats.record_auth_error(model)
     )
-    rotator.clear_cooldown.side_effect = lambda _id, model=None: stats.clear_cooldown(
-        model
-    )
-
     def clear_auth_lockout(_id):
         stats.session_expired = False
         stats.auth_cooldown = 0.0

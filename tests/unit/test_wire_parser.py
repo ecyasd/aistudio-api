@@ -47,13 +47,17 @@ def test_iter_response_chunks():
     assert _iter_response_chunks([]) == []
     assert _iter_response_chunks(None) == []
 
-    chunk1 = [["candidate1"]]
-    chunk2 = [["candidate2"]]
+    candidate1 = [[[[None, "one"]], "model"], None]
+    candidate2 = [[[[None, "two"]], "model"], 1]
+    chunk1 = [[candidate1], None, [0, 1, 1]]
+    chunk2 = [[candidate2], None, [0, 2, 2]]
     top_level = [chunk1, chunk2]
     assert _iter_response_chunks(top_level) == [chunk1, chunk2]
 
     nested = [[chunk1, chunk2]]
     assert _iter_response_chunks(nested) == [chunk1, chunk2]
+    assert _iter_response_chunks([[chunk1], [chunk2]]) == [chunk1, chunk2]
+    assert _iter_response_chunks([[chunk1, 123]]) == []
 
 
 def test_parse_usage_metadata():
@@ -153,13 +157,16 @@ def test_parse_response_chunk_empty():
 
 
 def test_parse_text_output_fallback():
-    output = parse_text_output("invalid json")
-    assert output.text == ""
-    assert output.candidates == []
+    import pytest
+
+    from aistudio_api.domain.errors import RequestError
+
+    with pytest.raises(RequestError, match="malformed or truncated"):
+        parse_text_output("invalid json")
 
     # parse_image_output forwards to parse_text_output
-    img_output = parse_image_output("invalid json")
-    assert img_output.text == ""
+    with pytest.raises(RequestError, match="malformed or truncated"):
+        parse_image_output("invalid json")
 
 
 def test_parse_image_output_keeps_only_final_images_in_images_field():

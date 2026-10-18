@@ -69,8 +69,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_DATA_DIR = _PROJECT_ROOT / "data"
 _DEFAULT_CONFIG_PATH = _PROJECT_ROOT / "config.yaml"
 _TEMPLATE_CONFIG_PATHS = (
-    _PROJECT_ROOT / "defaults" / "config.yaml",
-    _DEFAULT_CONFIG_PATH,
+    _PROJECT_ROOT / "defaults" / "config.example.yaml",
+    _PROJECT_ROOT / "config.example.yaml",
 )
 
 

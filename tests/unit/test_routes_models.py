@@ -8,14 +8,21 @@ from aistudio_api.api.response_models import GeminiModelResponse
 from aistudio_api.api.routes_models import _to_gemini_model
 from aistudio_api.config import settings
 from aistudio_api.infrastructure.browser.cdp_client import CDPPage
+from aistudio_api.infrastructure.gateway import model_defaults
 from aistudio_api.infrastructure.gateway.model_discovery import ModelDiscoveryService
 from aistudio_api.infrastructure.gateway.session import BrowserSession
 from aistudio_api.infrastructure.gateway.session_state import SessionContext
 
 
-def _build_client() -> httpx.AsyncClient:
+@pytest.fixture(autouse=True)
+def dynamic_api_key(monkeypatch):
+    monkeypatch.setattr(model_defaults, "get_configured_api_keys", lambda: {"my-key"})
+
+
+def _build_client(*, auth=True) -> httpx.AsyncClient:
     return httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+        headers={"Authorization": "Bearer my-key"} if auth else {},
     )
 
 
@@ -60,7 +67,7 @@ async def test_v1_models_endpoint_is_removed(monkeypatch):
 @pytest.mark.asyncio
 async def test_models_endpoint_accepts_query_param_key(monkeypatch):
     monkeypatch.setattr(settings, "api_keys", frozenset({"my-key"}))
-    async with _build_client() as client:
+    async with _build_client(auth=False) as client:
         # Unauthorized without key
         res_unauth = await client.get("/v1beta/models")
         assert res_unauth.status_code == 401

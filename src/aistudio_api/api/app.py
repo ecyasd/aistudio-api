@@ -14,7 +14,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from aistudio_api.application.api_service_gemini import classify_gemini_error_payload
+from aistudio_api.application.api_service_gemini import (
+    classify_gemini_error_payload,
+    gemini_error_type,
+)
 from aistudio_api.infrastructure.gateway.client import AIStudioClient
 from aistudio_api.infrastructure.gateway.model_defaults import (
     get_configured_logging_settings,
@@ -144,6 +147,7 @@ async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONR
                 "code": code,
                 "message": msg,
                 "status": status_str,
+                **({"type": gemini_error_type(exc)} if gemini_error_type(exc) else {}),
             }
         },
         headers=getattr(exc, "headers", None),

@@ -25,6 +25,9 @@ def mock_client(monkeypatch, tmp_path) -> MagicMock:
     from aistudio_api.api.state import runtime_state
     from aistudio_api.application import api_service_gemini
     from aistudio_api.application.account_rotator import AccountStats
+    from aistudio_api.infrastructure.gateway import model_defaults
+
+    monkeypatch.setattr(model_defaults, "get_configured_api_keys", lambda: {"test-key"})
 
     client = MagicMock()
     account = SimpleNamespace(id="sdk-offline-account")
@@ -67,7 +70,7 @@ async def test_genai_sdk_aio_non_streaming(mock_client: MagicMock) -> None:
     """Test async non-streaming generation with official Google GenAI SDK."""
     mock_client.generate_content = AsyncMock(
         return_value=ModelOutput(
-            candidates=[Candidate(text="Hello from AI Studio!")],
+            candidates=[Candidate(text="Hello from AI Studio!", finish_reason=1)],
             usage={
                 "prompt_tokens": 10,
                 "completion_tokens": 20,
@@ -123,6 +126,7 @@ async def test_genai_sdk_aio_streaming(mock_client: MagicMock) -> None:
         yield ("thinking", "Thinking about the greeting...")
         yield ("body", "Hello ")
         yield ("body", "World!")
+        yield ("finish_reason", 1)
         yield (
             "usage",
             {

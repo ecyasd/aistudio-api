@@ -581,9 +581,11 @@ async def test_try_switch_account_concurrent_403_avalanche_and_in_place_recovery
     mock_rotator.record_auth_error.side_effect = lambda acc_id, model=None: (
         stats.record_auth_error(model)
     )
-    mock_rotator.clear_cooldown.side_effect = lambda acc_id, model=None: (
-        stats.clear_cooldown(model)
-    )
+    def clear_auth_lockout(_account_id):
+        stats.session_expired = False
+        stats.auth_cooldown = 0.0
+
+    mock_rotator.clear_auth_lockout.side_effect = clear_auth_lockout
 
     activate_count = 0
 

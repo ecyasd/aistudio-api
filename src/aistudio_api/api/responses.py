@@ -11,7 +11,7 @@ from aistudio_api.api.response_models import (
     GeminiPartResponse,
     GeminiUsageMetadata,
 )
-from aistudio_api.domain.models import GeneratedImage
+from aistudio_api.domain.models import ContentPart, GeneratedImage
 
 
 def _coerce_usage_int(value: object) -> int:
@@ -42,11 +42,15 @@ def to_gemini_usage_metadata(
     completion_tokens = _coerce_usage_int(usage.get("completion_tokens"))
     if completion_tokens == 0:
         completion_tokens = visible_tokens + reasoning_tokens
-    candidates_tokens = completion_tokens
+    candidates_tokens = (
+        visible_tokens
+        if "visible_tokens" in completion_details
+        else max(0, completion_tokens - reasoning_tokens)
+    )
     prompt_tokens = _coerce_usage_int(usage.get("prompt_tokens"))
     total_tokens = _coerce_usage_int(usage.get("total_tokens"))
-    if total_tokens == 0 and (prompt_tokens or candidates_tokens):
-        total_tokens = prompt_tokens + candidates_tokens
+    if total_tokens == 0 and (prompt_tokens or candidates_tokens or reasoning_tokens):
+        total_tokens = prompt_tokens + candidates_tokens + reasoning_tokens
     return GeminiUsageMetadata(
         promptTokenCount=prompt_tokens,
         candidatesTokenCount=candidates_tokens,
@@ -62,7 +66,10 @@ def to_gemini_parts(
     thinking: str = "",
     images: list[GeneratedImage] | None = None,
     reasoning_images: list[GeneratedImage] | None = None,
+    source_parts: list[ContentPart] | None = None,
 ) -> list[GeminiPartResponse]:
+    if source_parts is not None:
+        return [_to_gemini_part(part) for part in source_parts]
     parts: list[GeminiPartResponse] = []
     if thinking:
         parts.append(GeminiPartResponse(text=thinking, thought=True))
@@ -125,3 +132,26 @@ def to_gemini_parts(
     if not parts:
         parts.append(GeminiPartResponse(text=""))
     return parts
+
+
+def _to_gemini_part(part: ContentPart) -> GeminiPartResponse:
+    """Convert one Part without merging it with or borrowing from a neighbor."""
+    result = GeminiPartResponse(
+        text=part.text,
+        thought=True if part.thought else None,
+        thoughtSignature=part.thought_signature or None,
+    )
+    if part.image is not None:
+        result.inlineData = GeminiInlineDataResponse(
+            mimeType=part.image.mime,
+            data=base64.b64encode(part.image.data).decode("ascii"),
+        )
+    if part.function_call is not None:
+        result.functionCall = to_gemini_parts("", function_calls=[part.function_call])[
+            0
+        ].functionCall
+    if part.function_response is not None:
+        result.functionResponse = to_gemini_parts(
+            "", function_responses=[part.function_response]
+        )[0].functionResponse
+    return result

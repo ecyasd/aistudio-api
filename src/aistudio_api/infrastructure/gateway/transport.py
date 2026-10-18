@@ -13,7 +13,9 @@ from urllib.parse import urlsplit
 
 from aistudio_api.infrastructure.account.cookie_parser import calculate_sapisid_hash
 from aistudio_api.infrastructure.browser.scripts import (
+    HOOKED_CLEANUP_JS,
     HOOKED_REQUEST_JS,
+    STREAM_ACK_JS,
     STREAM_CLEANUP_JS,
     STREAMING_INIT_JS,
     build_hooked_request_args,
@@ -26,6 +28,17 @@ if TYPE_CHECKING:
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 logger = get_logger("transport")
+
+# Response and buffering budgets for the existing 1 GB deployment. Crossing a
+# limit aborts the request; never drop chunks and return a corrupted success.
+MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+MAX_READ_BYTES = 1024 * 1024
+MAX_CHUNK_BYTES = 64 * 1024
+MAX_STREAM_BUFFER_BYTES = 512 * 1024
+MAX_TOTAL_BUFFER_BYTES = 8 * 1024 * 1024
+MAX_STREAM_EVENTS = 32
+CONSUMER_TIMEOUT_S = 30.0
+CLEANUP_TIMEOUT_S = 2.0
 
 
 def _signing_cookies(page: CDPPage, cookies: list[dict[str, object]]) -> dict[str, str]:
@@ -46,7 +59,10 @@ def _signing_cookies(page: CDPPage, cookies: list[dict[str, object]]) -> dict[st
         ):
             continue
         path = str(cookie.get("path") or "/")
-        if not (page_path == path or page_path.startswith(path if path.endswith("/") else path + "/")):
+        if not (
+            page_path == path
+            or page_path.startswith(path if path.endswith("/") else path + "/")
+        ):
             continue
         expiry = cookie.get("expires")
         if expiry is not None and not cookie.get("session"):
@@ -103,6 +119,47 @@ class XHRStreamTransport:
 
     def __init__(self) -> None:
         self._queues: dict[str, asyncio.Queue[dict[str, object]]] = {}
+        self._queue_bytes: dict[str, int] = {}
+        self._buffered_bytes = 0
+        self._pages: dict[str, CDPPage] = {}
+        self._failed: set[str] = set()
+        self._cleanup_tasks: set[asyncio.Task[None]] = set()
+
+    async def _cleanup_browser(self, page: CDPPage, script: str, rid: str) -> None:
+        with suppress(Exception):
+            await asyncio.wait_for(
+                page.evaluate(script, rid, timeout_s=CLEANUP_TIMEOUT_S),
+                timeout=CLEANUP_TIMEOUT_S,
+            )
+
+    def _schedule_cleanup(
+        self, page: CDPPage, script: str, rid: str
+    ) -> asyncio.Task[None]:
+        task = asyncio.create_task(self._cleanup_browser(page, script, rid))
+        self._cleanup_tasks.add(task)
+        task.add_done_callback(self._cleanup_tasks.discard)
+        return task
+
+    def _clear_buffer(self, rid: str) -> None:
+        self._buffered_bytes -= self._queue_bytes.pop(rid, 0)
+        queue = self._queues.get(rid)
+        if queue is not None:
+            while not queue.empty():
+                queue.get_nowait()
+
+    def _fail_stream(self, rid: str, reason: str) -> bool:
+        queue = self._queues.get(rid)
+        if queue is None:
+            return False
+        if rid in self._failed:
+            return True
+        self._failed.add(rid)
+        self._clear_buffer(rid)
+        queue.put_nowait({"type": "error", "message": reason})
+        page = self._pages.get(rid)
+        if page is not None:
+            self._schedule_cleanup(page, STREAM_CLEANUP_JS, rid)
+        return True
 
     @property
     def in_flight_count(self) -> int:
@@ -111,22 +168,12 @@ class XHRStreamTransport:
 
     def abort_stream(self, rid: str, reason: str = "stream_aborted") -> bool:
         """Abort a specific streaming request by rid if it is active."""
-        q = self._queues.get(rid)
-        if q is not None:
-            try:
-                q.put_nowait({"type": "error", "message": reason})
-                return True
-            except asyncio.QueueFull:
-                logger.warning("Abort stream failed: queue full (rid=%s)", rid)
-                return False
-        return False
+        return self._fail_stream(rid, reason)
 
     def close(self, reason: str = "transport_closed") -> None:
         """Close transport and notify any remaining in-flight queues on process exit."""
-        for q in list(self._queues.values()):
-            with suppress(Exception):
-                q.put_nowait({"type": "error", "message": reason})
-        self._queues.clear()
+        for rid in list(self._queues):
+            self._fail_stream(rid, reason)
 
     def _ensure_page_binding(self, page: CDPPage) -> None:
         if getattr(page, "has_stream_binding", False):
@@ -139,14 +186,27 @@ class XHRStreamTransport:
                 if isinstance(data, dict):
                     rid = str(data.get("rid") or "")
                     q = self._queues.get(rid)
-                    if q is not None:
+                    if q is not None and rid not in self._failed:
+                        text = data.get("text")
+                        size = len(text.encode("utf-8")) if isinstance(text, str) else 0
+                        # A UTF-8 decoder can carry at most three previous bytes
+                        # into the next 64 KiB raw chunk.
+                        if (
+                            size > MAX_CHUNK_BYTES + 4
+                            or self._queue_bytes.get(rid, 0) + size
+                            > MAX_STREAM_BUFFER_BYTES
+                            or self._buffered_bytes + size > MAX_TOTAL_BUFFER_BYTES
+                        ):
+                            self._fail_stream(rid, "stream buffer limit exceeded")
+                            return
                         try:
                             q.put_nowait(data)
-                        except asyncio.QueueFull:
-                            logger.warning(
-                                "流式反压: 队列已满 (rid=%s)",
-                                rid,
+                            self._queue_bytes[rid] = (
+                                self._queue_bytes.get(rid, 0) + size
                             )
+                            self._buffered_bytes += size
+                        except asyncio.QueueFull:
+                            self._fail_stream(rid, "stream buffer limit exceeded")
             except Exception as e:
                 logger.debug("分发流式推送数据失败: %s", e)
 
@@ -171,24 +231,48 @@ class XHRStreamTransport:
         auth_user: str = "0",
     ) -> tuple[int, bytes]:
         """Replay request via XHR inside the browser page context."""
-        timeout_s = timeout_ms / 1000
+        timeout_s = max(timeout_ms / 1000, 0.001)
         clean_headers = await _ensure_authorization_header(
             page, headers, auth_user=auth_user
         )
+        rid = uuid.uuid4().hex
         args = build_hooked_request_args(
             url=url,
             headers=clean_headers,
             body=body,
             timeout_s=timeout_s,
+            rid=rid,
+            max_response_bytes=MAX_RESPONSE_BYTES,
+            max_read_bytes=MAX_READ_BYTES,
         )
 
-        result = await page.evaluate(HOOKED_REQUEST_JS, args, timeout_s=timeout_s + 5.0)
-        res_dict: dict[str, object] = result if isinstance(result, dict) else {}
-        status = int(str(res_dict.get("status") or 0))
-        raw_text = str(res_dict.get("body") or "")
-        if status == 0:
-            raise RuntimeError(f"replay failed: {raw_text}")
-        return status, raw_text.encode("utf-8")
+        try:
+            result = await asyncio.wait_for(
+                page.evaluate(HOOKED_REQUEST_JS, args, timeout_s=timeout_s + 1.0),
+                timeout=timeout_s + 1.0,
+            )
+            res_dict: dict[str, object] = result if isinstance(result, dict) else {}
+            status = int(str(res_dict.get("status") or 0))
+            raw_text = str(res_dict.get("body") or "")
+            if status == 0:
+                safe_reason = (
+                    raw_text
+                    if raw_text
+                    in {
+                        "timeout",
+                        "cancelled",
+                        "response read failed",
+                        "response size limit exceeded",
+                    }
+                    else "invalid browser response"
+                )
+                raise RuntimeError(f"replay failed: {safe_reason}")
+            raw_body = raw_text.encode("utf-8")
+            if len(raw_body) > MAX_RESPONSE_BYTES:
+                raise RuntimeError("replay failed: response size limit exceeded")
+            return status, raw_body
+        finally:
+            await asyncio.shield(self._schedule_cleanup(page, HOOKED_CLEANUP_JS, rid))
 
     async def send_streaming_request(
         self,
@@ -204,11 +288,11 @@ class XHRStreamTransport:
 
         Guarantees V8 window cleanup on termination/timeout and prevents silent truncation.
         """
-        timeout_s = timeout_ms / 1000
+        timeout_s = max(timeout_ms / 1000, 0.001)
         clean_headers = await _ensure_authorization_header(
             page, headers, auth_user=auth_user
         )
-        rid = uuid.uuid4().hex[:8]
+        rid = uuid.uuid4().hex
 
         # Ensure native binding on page and register local async queue
         self._ensure_page_binding(page)
@@ -221,8 +305,12 @@ class XHRStreamTransport:
                     "Runtime.addBinding", {"name": "__aistudio_stream_push__"}
                 )
 
-        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue(
+            maxsize=MAX_STREAM_EVENTS
+        )
         self._queues[rid] = queue
+        self._queue_bytes[rid] = 0
+        self._pages[rid] = page
 
         init_args = build_streaming_init_args(
             url=url,
@@ -230,6 +318,10 @@ class XHRStreamTransport:
             body=body,
             timeout_s=timeout_s,
             rid=rid,
+            max_response_bytes=MAX_RESPONSE_BYTES,
+            max_chunk_bytes=MAX_CHUNK_BYTES,
+            max_read_bytes=MAX_READ_BYTES,
+            consumer_timeout_s=min(timeout_s, CONSUMER_TIMEOUT_S),
         )
         deadline = asyncio.get_running_loop().time() + timeout_s
         status_sent = False
@@ -255,6 +347,14 @@ class XHRStreamTransport:
                         ) from None
                     continue
                 etype = str(event.get("type") or "")
+                event_text = event.get("text")
+                event_size = (
+                    len(event_text.encode("utf-8"))
+                    if isinstance(event_text, str)
+                    else 0
+                )
+                self._queue_bytes[rid] = self._queue_bytes.get(rid, 0) - event_size
+                self._buffered_bytes -= event_size
                 if etype == "status":
                     status = int(str(event.get("status") or 0))
                     yield ("status", status)
@@ -268,23 +368,28 @@ class XHRStreamTransport:
                 elif etype == "error":
                     message = str(event.get("message") or "unknown error")
                     raise RuntimeError(f"streaming request failed: {message}")
-                elif etype in ("done", "aborted"):
-                    while not queue.empty():
-                        try:
-                            remaining_event = queue.get_nowait()
-                            if str(remaining_event.get("type") or "") == "chunk":
-                                r_text = str(remaining_event.get("text") or "")
-                                if r_text:
-                                    yield ("chunk", r_text.encode("utf-8"))
-                        except asyncio.QueueEmpty:
-                            break
+                elif etype == "aborted":
+                    raise RuntimeError("streaming request failed: cancelled")
+                elif etype == "done":
                     is_terminal = True
                     break
+                seq = event.get("seq")
+                if isinstance(seq, int) and seq > 0:
+                    await asyncio.wait_for(
+                        page.evaluate(
+                            STREAM_ACK_JS,
+                            {"rid": rid, "seq": seq},
+                            timeout_s=CLEANUP_TIMEOUT_S,
+                        ),
+                        timeout=CLEANUP_TIMEOUT_S,
+                    )
             if not status_sent:
                 raise RuntimeError("streaming request timeout: no response status")
             if not is_terminal:
                 raise TimeoutError("streaming response timed out before completion")
         finally:
+            self._clear_buffer(rid)
             self._queues.pop(rid, None)
-            with suppress(Exception):
-                await page.evaluate(STREAM_CLEANUP_JS, rid)
+            self._pages.pop(rid, None)
+            self._failed.discard(rid)
+            await asyncio.shield(self._schedule_cleanup(page, STREAM_CLEANUP_JS, rid))

@@ -75,7 +75,7 @@ def _live_sse_tasks():
 
 @pytest.mark.parametrize(
     ("condition", "expected"),
-    [("invalid", 400), ("empty", 503), ("expired", 401), ("limited", 429)],
+    [("invalid", 400), ("empty", 503), ("expired", 503), ("limited", 429)],
 )
 async def test_preflight_returns_real_http_error_without_starting_browser(
     sse_env, condition, expected
@@ -267,6 +267,34 @@ async def test_disconnect_on_send_closes_upstream_in_its_original_context(
     service.runtime_state.record.assert_not_called()
 
 
+async def test_slow_client_send_timeout_releases_upstream_and_lease(sse_env, request_body, monkeypatch):
+    service = sse_env.service
+    monkeypatch.setattr(service, "SSE_SEND_TIMEOUT_SECONDS", 0.02)
+    closed = asyncio.Event()
+
+    async def upstream(**kwargs):
+        try:
+            yield ("body", "first reply")
+            await asyncio.Event().wait()
+        finally:
+            closed.set()
+
+    sse_env.client.stream_generate_content.side_effect = upstream
+    response = service._build_gemini_streaming_response(
+        client=sse_env.client, req=request_body, model_path="gemini-test"
+    )
+
+    async def stalled_send(message):
+        if message["type"] == "http.response.body":
+            await asyncio.Event().wait()
+
+    with pytest.raises(TimeoutError):
+        await response.stream_response(stalled_send)
+    assert closed.is_set()
+    assert not sse_env.leased
+    assert not _live_sse_tasks()
+
+
 async def test_asgi_disconnect_cancels_producer_before_first_model_chunk(
     sse_env, request_body
 ):
@@ -399,7 +427,7 @@ async def test_state_change_after_preflight_is_still_an_in_band_error(
 @pytest.mark.parametrize(
     ("outcome", "event", "status"),
     [("success", "success", 200), ("quota", "rate_limited", 429),
-     ("expired", "session_expired", 401), ("auth", "auth_error", 403)],
+     ("expired", "session_expired", 503), ("auth", "auth_error", 503)],
 )
 async def test_in_flight_result_is_attributed_to_its_leased_account_after_switch(
     sse_env, request_body, stream, outcome, event, status
@@ -500,7 +528,7 @@ async def test_expired_session_after_body_is_recorded_without_switching(
         "gemini-test", request_body, sse_env.client, stream=True
     )
     chunks = [chunk async for chunk in response.body_iterator]
-    assert json.loads(chunks[-1][6:])["error"]["code"] == 401
+    assert json.loads(chunks[-1][6:])["error"]["code"] == 503
     sse_env.service.record_rotator_event.assert_called_once_with(
         "session_expired", model="models/gemini-test", account_id="test-account"
     )
@@ -555,7 +583,7 @@ async def test_retry_drops_metadata_from_the_failed_attempt(sse_env, request_bod
     assert len(payloads) == 2
     assert all("responseId" not in payload for payload in payloads)
     assert "thoughtSignature" not in payloads[0]["candidates"][0]["content"]["parts"][0]
-    assert payloads[-1]["candidates"][0]["finishReason"] == "STOP"
+    assert payloads[-1]["candidates"][0]["finishReason"] == "FINISH_REASON_UNSPECIFIED"
     assert payloads[-1]["usageMetadata"]["totalTokenCount"] == 0
     assert not sse_env.leased
 
@@ -583,13 +611,13 @@ async def test_bootstrap_failure_keeps_the_attempted_account_when_active_changed
             "gemini-test", request_body, sse_env.client, stream=True
         )
         chunks = [chunk async for chunk in response.body_iterator]
-        assert json.loads(chunks[-1][6:])["error"]["code"] == 401
+        assert json.loads(chunks[-1][6:])["error"]["code"] == 503
     else:
         with pytest.raises(HTTPException) as caught:
             await service.handle_gemini_generate_content(
                 "gemini-test", request_body, sse_env.client, stream=False
             )
-        assert caught.value.status_code == 401
+        assert caught.value.status_code == 503
     service.record_rotator_event.assert_called_once_with(
         "session_expired", model="models/gemini-test", account_id="test-account"
     )
@@ -633,13 +661,13 @@ async def test_failure_while_preparing_failover_target_ends_without_recursive_sw
             "gemini-test", request_body, sse_env.client, stream=True
         )
         chunks = [chunk async for chunk in response.body_iterator]
-        assert json.loads(chunks[-1][6:])["error"]["code"] == 401
+        assert json.loads(chunks[-1][6:])["error"]["code"] == 503
     else:
         with pytest.raises(HTTPException) as caught:
             await service.handle_gemini_generate_content(
                 "gemini-test", request_body, sse_env.client, stream=False
             )
-        assert caught.value.status_code == 401
+        assert caught.value.status_code == 503
     assert service.try_switch_account.await_count == 1
     events = service.record_rotator_event.call_args_list
     assert [(call.args[0], call.kwargs["account_id"]) for call in events] == [

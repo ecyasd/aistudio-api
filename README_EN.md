@@ -1,25 +1,24 @@
 # aistudio-api
 
 Based on [DeconstructedCube/aistudio-api](https://github.com/DeconstructedCube/aistudio-api).
+This fork is maintained at [ecyasd/aistudio-api](https://github.com/ecyasd/aistudio-api).
 
 This fork includes browser startup and first-request recovery, isolated account
 sessions, refreshed Cookie checkpointing, persistent API key configuration, and a
 real-time error page. Error records stay in memory for ten minutes (up to 100
 records), refresh every five seconds while the page is visible, and clear on
 restart. A revoked or expired Google login still requires valid credentials to be
-reimported. See [deploy/README.md](deploy/README.md) for the optional hardened
-HTTPS launcher. The upstream Docker Hub image does not include this fork's
+reimported; existing API keys remain unchanged. See [deploy/README.md](deploy/README.md)
+for HTTPS operations and automated releases. The upstream Docker Hub image does not include this fork's
 changes; build this checkout with `docker build -t aistudio-api:local .` to use
 the included frontend and backend.
 
 <p align="center">
   <a href="https://github.com/DeconstructedCube/aistudio-api"><img src="https://img.shields.io/badge/API-Gemini%20v1beta-4285F4?style=flat-square&logo=google" alt="Gemini API"></a>
-  <a href="https://hub.docker.com/r/bedrockblock/aistudio-api"><img src="https://img.shields.io/badge/Docker-bedrockblock%2Faistudio--api-2496ED?style=flat-square&logo=docker" alt="Docker Hub"></a>
   <a href="https://deepwiki.com/DeconstructedCube/aistudio-api"><img src="https://img.shields.io/badge/DeepWiki-DeconstructedCube%2Faistudio--api-5B68E4?style=flat-square&logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACwAAAAyCAYAAAAnWDnqAAAAAXNSR0IArs4c6QAAA05JREFUaEPtmUtyEzEQhtWTQyQLHNak2AB7ZnyXZMEjXMGeK/AIi+QuHrMnbChYY7MIh8g01fJoopFb0uhhEqqcbWTp06/uv1saEDv4O3n3dV60RfP947Mm9/SQc0ICFQgzfc4CYZoTPAswgSJCCUJUnAAoRHOAUOcATwbmVLWdGoH//PB8mnKqScAhsD0kYP3j/Yt5LPQe2KvcXmGvRHcDnpxfL2zOYJ1mFwrryWTz0advv1Ut4CJgf5uhDuDj5eUcAUoahrdY/56ebRWeraTjMt/00Sh3UDtjgHtQNHwcRGOC98BJEAEymycmYcWwOprTgcB6VZ5JK5TAJ+fXGLBm3FDAmn6oPPjR4rKCAoJCal2eAiQp2x0vxTPB3ALO2CRkwmDy5WohzBDwSEFKRwPbknEggCPB/imwrycgxX2NzoMCHhPkDwqYMr9tRcP5qNrMZHkVnOjRMWwLCcr8ohBVb1OMjxLwGCvjTikrsBOiA6fNyCrm8V1rP93iVPpwaE+gO0SsWmPiXB+jikdf6SizrT5qKasx5j8ABbHpFTx+vFXp9EnYQmLx02h1QTTrl6eDqxLnGjporxl3NL3agEvXdT0WmEost648sQOYAeJS9Q7bfUVoMGnjo4AZdUMQku50McDcMWcBPvr0SzbTAFDfvJqwLzgxwATnCgnp4wDl6Aa+Ax283gghmj+vj7feE2KBBRMW3FzOpLOADl0Isb5587h/U4gGvkt5v60Z1VLG8BhYjbzRwyQZemwAd6cCR5/XFWLYZRIMpX39AR0tjaGGiGzLVyhse5C9RKC6ai42ppWPKiBagOvaYk8lO7DajerabOZP46Lby5wKjw1HCRx7p9sVMOWGzb/vA1hwiWc6jm3MvQDTogQkiqIhJV0nBQBTU+3okKCFDy9WwferkHjtxib7t3xIUQtHxnIwtx4mpg26/HfwVNVDb4oI9RHmx5WGelRVlrtiw43zboCLaxv46AZeB3IlTkwouebTr1y2NjSpHz68WNFjHvupy3q8TFn3Hos2IAk4Ju5dCo8B3wP7VPr/FGaKiG+T+v+TQqIrOqMTL1VdWV1DdmcbO8KXBz6esmYWYKPwDL5b5FA1a0hwapHiom0r/cKaoqr+27/XcrS5UwSMbQAAAABJRU5ErkJggg==" alt="DeepWiki"></a>
   <a href="https://fastapi.tiangolo.com/"><img src="https://img.shields.io/badge/Framework-FastAPI-009688?style=flat-square&logo=fastapi" alt="FastAPI"></a>
   <a href="https://vuejs.org/"><img src="https://img.shields.io/badge/Frontend-Vue%203%20%2B%20Vite-4FC08D?style=flat-square&logo=vuedotjs" alt="Vue 3"></a>
   <a href="https://docs.astral.sh/uv/"><img src="https://img.shields.io/badge/Python-3.11%2B%20%7C%20uv-261230?style=flat-square&logo=python" alt="Python uv"></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License"></a>
 </p>
 
 <p align="center">
@@ -48,7 +47,6 @@ the included frontend and backend.
   - [Function Calling](#function-calling)
 - [Web Management Console](#web-management-console)
 - [Development & Testing](#development--testing)
-- [License](#license)
 
 ---
 
@@ -65,6 +63,8 @@ the included frontend and backend.
 | **Built-in Tools** | Supports official tools such as Google Search, Google Maps, and Code Execution sandbox |
 | **Pure Python CDP** | Direct Chrome DevTools Protocol communication over asynchronous WebSockets without Node.js, Playwright, or Selenium |
 | **Web Management Console** | Built-in web dashboard for account management (supporting text and JSON bundle file imports), live request metrics, and runtime `config.yaml` hot reloading |
+| **Separate Credentials** | Management passwords and API calling keys are independent; model-setting saves and account reimports or activation preserve existing API keys |
+| **Real-time Errors** | `/error-records` shows sanitized errors held only in memory for ten minutes, up to 100 entries; restarting clears them |
 | **Android Companion App** | Native Android app (`android/`) built with Jetpack Compose, featuring isolated multi-profile management, on-demand WebView, Bitwarden autofill, and one-click bundle export |
 > [!NOTE]
 > **Memory Footprint**: The standalone Python backend consumes ~35 - 45 MB RAM. With a single controlled Chromium instance, total actual system memory (PSS) is ~350 - 450 MB on Termux proot (~250 - 350 MB on native Linux). On Android Termux, ≥ 1 GB free RAM is recommended.
@@ -98,11 +98,20 @@ Technical reference documentation:
 - [System Architecture Specification (ARCHITECTURE.md)](./docs/ARCHITECTURE.md): Layered architecture, request lifecycle, wire codec, and concurrency model.
 - [Wire Protocol Reverse Engineering Specification (WIRE_SPECIFICATION.md)](./docs/WIRE_SPECIFICATION.md): Protobuf-JSON array mappings, field indices, multimodal Part structures, and Schema encoding.
 - [BotGuard Verification Chain (BOTGUARD_VERIFICATION_CHAIN.md)](./docs/BOTGUARD_VERIFICATION_CHAIN.md): WAA challenge handshake, dynamic Wasm signing, content hashing, and upstream validation.
-- [Agent & Engineering Conventions (AGENT.md)](./AGENT.md): Strict type specifications, testing standards, and development guidelines.
+- [Engineering Rules (AGENTS.md)](./AGENTS.md): Code layout, state protection, protocol requirements, and verification.
+- [Deployment Runbook](./deploy/README.md): HTTPS, authentication, releases, rollback, and troubleshooting.
 
 ---
 
 ## Quick Start
+
+These examples are for local development. Import an authorized Google session in
+the management console, then create a calling key in **Settings → API keys**.
+Set the independent management password through `AISTUDIO_WEB_PASSWORD`.
+For public access, follow the [deployment runbook](deploy/README.md), use HTTPS,
+and keep backend and browser debugging ports private.
+Only `config.example.yaml` is tracked. Copy it to `config.yaml` for a new checkout;
+preserve an existing runtime configuration.
 
 ### Android (Termux)
 
@@ -118,6 +127,7 @@ pkg update -y && pkg install -y git
 # Step 2: Clone repository and enter directory
 git clone https://github.com/ecyasd/aistudio-api.git
 cd aistudio-api
+cp config.example.yaml config.yaml
 
 # Step 3: Initialize Python environment & sync dependencies (auto-resolves prebuilt Android wheels)
 bash scripts/setup-env.sh
@@ -150,6 +160,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 # Step 2: Clone repository and enter directory
 git clone https://github.com/ecyasd/aistudio-api.git
 cd aistudio-api
+Copy-Item config.example.yaml config.yaml
 
 # Step 3: Sync dependencies
 uv sync
@@ -176,6 +187,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # Step 2: Clone repository and enter directory
 git clone https://github.com/ecyasd/aistudio-api.git
 cd aistudio-api
+cp config.example.yaml config.yaml
 
 # Step 3: Sync dependencies
 uv sync
@@ -193,24 +205,31 @@ Open **`http://localhost:8080`** in your browser to access the Web Console.
 
 ### Docker Deployment
 
-CloakBrowser is bundled in the container image for immediate use:
+Build this fork's backend, frontend, and CloakBrowser into a local image:
 
 ```bash
+docker build -t aistudio-api:local .
 docker run -d \
   --name aistudio-api \
   --restart unless-stopped \
-  -p 8080:8080 \
+  -p 127.0.0.1:8080:8080 \
   -v aistudio-api-data:/app/data \
-  ghcr.io/deconstructedcube/aistudio-api:latest
+  aistudio-api:local
 ```
 
 Or run with Docker Compose:
 
 ```bash
-docker compose up -d
+test -f config.yaml || cp config.example.yaml config.yaml
+test -f .env || cp .env.example .env
+docker compose up -d --build
 ```
 
 Open **`http://localhost:8080`** in your browser to access the Web Console.
+
+Upstream images do not automatically include this fork's changes. Automated
+server releases use this repository's CI artifacts; see the
+[deployment runbook](deploy/README.md).
 
 ---
 
@@ -222,7 +241,7 @@ Open `http://localhost:8080` in your browser to access the Web Console.
 | Variable | Type | Default | Description |
 |---|---|---|---|
 | `AISTUDIO_PORT` | int | `8080` | HTTP service listening port |
-| `AISTUDIO_WEB_PASSWORD` | string | `""` | Web Console access password (also checks `AISTUDIO_ADMIN_PASSWORD`) |
+| `AISTUDIO_WEB_PASSWORD` | string | `""` | Independent management password (also checks `AISTUDIO_ADMIN_PASSWORD`); does not authorize API calls |
 | `AISTUDIO_PROXY` | string | `""` | Outbound proxy URL (`http://`, `https://`, or `socks5://`) |
 | `AISTUDIO_DATA_DIR` | string | `data/` | Main data directory for persistent files (`/app/data` in Docker) |
 | `AISTUDIO_ACCOUNTS_DIR` | string | `data/accounts` | Directory for storing account credentials |
@@ -248,9 +267,14 @@ Open `http://localhost:8080` in your browser to access the Web Console.
 
 ## API Usage Examples
 
-Supported authentication methods:
+After creating a calling key in the management console, supported API authentication methods are:
 - Query param: `?key=YOUR_API_KEY`
 - Header: `x-goog-api-key: YOUR_API_KEY`, `x-api-key: YOUR_API_KEY`, or `Authorization: Bearer YOUR_API_KEY`
+
+API access fails closed when no calling keys are configured. Management endpoints
+accept the management password through Bearer authentication only; calling keys
+cannot read management configuration, accounts, or error records. Query keys
+remain supported for Gemini clients; omit query strings from reverse proxy logs.
 
 ### cURL
 
@@ -393,22 +417,25 @@ The service includes a built-in static Web Console served at `http://localhost:8
 
 - **Dashboard**: Real-time view of service health, per-model request stats, success rates, and rate-limit cooldown status.
 - **Accounts**: Import Cookie credentials (single text or bundle files), auto-probe multiple accounts, switch the active account, or reset rate limits.
-- **Settings**: Online editor for `config.yaml` with instant hot-reloading on save.
-- **Access Control**: Enable authentication by setting `AISTUDIO_WEB_PASSWORD`.
+- **Settings**: Edit model rules and manage API keys. Ordinary model-setting saves preserve current keys; only dedicated key management changes them.
+- **Real-time Errors**: Refreshes every five seconds while visible, showing sanitized summaries, categories, and request IDs. Records are never written to disk and clear on restart.
+- **Access Control**: Management passwords and API calling keys are independent. Expired Google sessions return `503 / upstream_auth_expired` and require a fresh Google-session import; invalid calling keys return `401 / authentication_error`.
 
 ---
 
 ## Development & Testing
 
-Frontend code is located in `web/` (Vue 3 + TypeScript + Vite + Tailwind CSS):
+Frontend code is located in `web/` (Vue 3 + TypeScript + Vite + Tailwind CSS).
+Use Node.js 24.22.0 and the committed npm lock, matching CI:
 
 ```bash
 cd web
-bun install
-bun run dev          # Start local Vite dev server (localhost:3000 -> 8080)
-bun run type-check   # Run TypeScript type check
-bun run lint         # Run ESLint check
-bun run build        # Build production assets into src/aistudio_api/static
+npm ci
+npm run dev            # Start local Vite dev server (localhost:3000 -> 8080)
+npm run type-check     # Run TypeScript type check
+npm run lint           # Run ESLint check
+npm run test:frontend  # Offline browser and page behavior regressions
+npm run build          # Build production assets into src/aistudio_api/static
 ```
 
 Python quality checks and tests:
@@ -429,9 +456,3 @@ Android companion app code style checks:
 # Run Kotlin code style check (configured via ~/.zshrc)
 ktlint "android/app/src/main/java/**/*.kt"
 ```
-
----
-
-## License
-
-This project is licensed under the [MIT License](./LICENSE).

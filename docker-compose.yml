@@ -4,11 +4,17 @@ services:
     container_name: aistudio-api
     restart: unless-stopped
     ports:
-      - "8080:8080"    # API server
+      - "127.0.0.1:8080:8080"    # Put an HTTPS proxy in front of the private API
       # - "9222:9222"  # Optional: expose only when debugging browser
     volumes:
       - ./data:/app/data           # Account data, stats.json and rotator_state.json persistence
-      - ./config.yaml:/app/config.yaml  # Model configuration file
+      # Initialize once with: cp config.example.yaml config.yaml
+      # Existing runtime configuration remains mounted and is never replaced.
+      - type: bind
+        source: ./config.yaml
+        target: /app/config.yaml
+        bind:
+          create_host_path: false
       - ./.env:/app/.env:ro        # Environment config (read-only)
     environment:
       - AISTUDIO_PORT=8080
@@ -20,7 +26,7 @@ services:
       - AISTUDIO_ROTATOR_STATE_FILE=/app/data/rotator_state.json
       - AISTUDIO_CONFIG_FILE=/app/config.yaml
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/v1beta/models"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       start_period: 10s

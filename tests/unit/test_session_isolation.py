@@ -452,7 +452,11 @@ async def test_closing_client_stream_closes_nested_generators_before_releasing_l
             finalized.set()
 
     session._transport.send_streaming_request = transport
+    from aistudio_api.domain.models import ContentPart
+
+    content_part = ContentPart(text="fake piece")
     candidate = SimpleNamespace(
+        parts=[content_part],
         finish_reason=None,
         thinking=None,
         reasoning_images=None,
@@ -474,7 +478,7 @@ async def test_closing_client_stream_closes_nested_generators_before_releasing_l
         events = client.stream_generate_content(
             model="models/fake", capture_prompt="fake"
         )
-        assert await anext(events) == ("body", "fake piece")
+        assert await anext(events) == ("parts", [content_part])
         assert context.in_flight == 1
         await events.aclose()
     assert finalized.is_set()

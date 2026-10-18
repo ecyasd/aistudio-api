@@ -16,7 +16,9 @@ INSTALL_HOOKS_JS = _load_js("install_hooks.js")
 DIALOG_CLEANUP_JS = _load_js("dialog_cleanup.js")
 STREAMING_INIT_JS = _load_js("streaming_init.js")
 STREAM_CLEANUP_JS = _load_js("stream_cleanup.js")
+STREAM_ACK_JS = _load_js("stream_ack.js")
 HOOKED_REQUEST_JS = _load_js("hooked_request.js")
+HOOKED_CLEANUP_JS = _load_js("hooked_cleanup.js")
 SNAPSHOT_GENERATE_JS = _load_js("snapshot_generate.js")
 CHECK_IDENTITY_JS = _load_js("check_identity.js")
 STOP_GENERATION_JS = _load_js("stop_generation.js")
@@ -25,7 +27,16 @@ EXTRACT_EMAIL_JS = _load_js("extract_email.js")
 
 
 def build_streaming_init_args(
-    *, url: str, headers: dict[str, str], body: str, timeout_s: float, rid: str
+    *,
+    url: str,
+    headers: dict[str, str],
+    body: str,
+    timeout_s: float,
+    rid: str,
+    max_response_bytes: int,
+    max_chunk_bytes: int,
+    max_read_bytes: int,
+    consumer_timeout_s: float,
 ) -> dict[str, object]:
     """Prepare argument object for STREAMING_INIT_JS evaluation."""
     return {
@@ -34,11 +45,22 @@ def build_streaming_init_args(
         "body": body,
         "timeout": timeout_s,
         "rid": rid,
+        "maxResponseBytes": max_response_bytes,
+        "maxChunkBytes": max_chunk_bytes,
+        "maxReadBytes": max_read_bytes,
+        "consumerTimeout": consumer_timeout_s,
     }
 
 
 def build_hooked_request_args(
-    *, url: str, headers: dict[str, str], body: str, timeout_s: float
+    *,
+    url: str,
+    headers: dict[str, str],
+    body: str,
+    timeout_s: float,
+    rid: str,
+    max_response_bytes: int,
+    max_read_bytes: int,
 ) -> dict[str, object]:
     """Prepare argument object for HOOKED_REQUEST_JS evaluation."""
     return {
@@ -46,7 +68,12 @@ def build_hooked_request_args(
         "headers": headers,
         "body": body,
         "timeout": timeout_s,
+        "rid": rid,
+        "maxResponseBytes": max_response_bytes,
+        "maxReadBytes": max_read_bytes,
     }
+
+
 def build_selector_match_js(selector: str) -> str:
     """Generate in-page element query snippet for standard CSS, text=, or :has-text() selector."""
     return f"""(() => {{

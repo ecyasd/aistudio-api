@@ -8,14 +8,13 @@ import re
 import traceback
 from collections.abc import AsyncGenerator
 from contextlib import aclosing, suppress
-from copy import deepcopy
 from typing import cast
 
 from anyio import CancelScope
 from fastapi import HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
-from starlette.types import Send
+from starlette.types import Message, Send
 
 from aistudio_api.api.response_models import (
     GeminiCandidateResponse,
@@ -32,11 +31,13 @@ from aistudio_api.application.account_orchestrator import (
     ensure_active_account,
     record_rotator_event,
     try_switch_account,
+    validate_account_availability,
 )
 from aistudio_api.application.chat_service import (
     NormalizedGeminiRequest,
     normalize_gemini_request,
 )
+from aistudio_api.application.inference_limits import inference_limiter
 from aistudio_api.domain.errors import (
     AistudioError,
     AuthError,
@@ -57,6 +58,7 @@ from aistudio_api.infrastructure.utils.logger import get_logger
 
 logger = get_logger("api.gemini")
 SSE_HEARTBEAT_INTERVAL_SECONDS = 15.0
+SSE_SEND_TIMEOUT_SECONDS = 30.0
 
 
 WIRE_TO_GEMINI_FINISH_REASON: dict[int, str] = {
@@ -83,7 +85,7 @@ WIRE_TO_GEMINI_FINISH_REASON: dict[int, str] = {
 
 def to_gemini_finish_reason(wire_code: int | None) -> str:
     if wire_code is None:
-        return "STOP"
+        return "FINISH_REASON_UNSPECIFIED"
     return WIRE_TO_GEMINI_FINISH_REASON.get(wire_code, "FINISH_REASON_UNSPECIFIED")
 
 
@@ -108,12 +110,13 @@ def classify_gemini_error_payload(exc: Exception) -> tuple[int, str, str]:
     """Extract standard Gemini HTTP status code, message, and status string from an exception."""
     if isinstance(exc, SessionExpiredError):
         return (
-            401,
-            "All accounts have expired sessions. Please import fresh cookies.",
-            "UNAUTHENTICATED",
+            503,
+            ("The API key is valid, but upstream Google sessions have expired. "
+             "Re-import Google cookies on the management page; keep your API key."),
+            "UNAVAILABLE",
         )
     if isinstance(exc, AuthError):
-        return 403, str(exc), "PERMISSION_DENIED"
+        return 503, "Upstream Google authentication failed. Check accounts on the management page; keep your API key.", "UNAVAILABLE"
     if isinstance(exc, UsageLimitExceeded):
         return 429, str(exc), "RESOURCE_EXHAUSTED"
     if isinstance(exc, (ValueError, RequestValidationError)):
@@ -282,10 +285,10 @@ async def _handle_attempt_exception(
             )
             return True
         raise HTTPException(
-            401,
+            503,
             detail={
-                "message": "All accounts encountered login redirect or expired sessions. Please import fresh cookies.",
-                "type": "auth_error",
+                "message": "The API key is valid, but upstream Google sessions have expired. Re-import Google cookies on the management page; keep your API key.",
+                "type": "upstream_auth_expired",
             },
         ) from exc
 
@@ -306,7 +309,7 @@ async def _handle_attempt_exception(
         else:
             record_rotator_event("auth_error", model=target_model, account_id=account_id)
         raise HTTPException(
-            403, detail={"message": str(exc), "type": "auth_error"}
+            503, detail={"message": "Upstream Google authentication failed. Check accounts on the management page; keep your API key.", "type": "upstream_auth_failed"}
         ) from exc
 
     if isinstance(exc, UsageLimitExceeded):
@@ -424,6 +427,14 @@ async def handle_gemini_generate_content(
             client=client, req=req, model_path=model_path, prepared_request=normalized
         )
 
+    async with inference_limiter.slot():
+        return await _generate_non_streaming(model_path, req, client)
+
+
+async def _generate_non_streaming(
+    model_path: str, req: GeminiGenerateContentRequest, client: AIStudioClient
+):
+
     last_error: Exception | None = None
     for attempt in range(MAX_RETRIES):
         normalized = None
@@ -481,6 +492,8 @@ async def handle_gemini_generate_content(
                                 thinking=output.thinking,
                                 images=output.images,
                                 reasoning_images=output.reasoning_images,
+                                source_parts=(output.candidates[0].parts or None)
+                                if output.candidates else None,
                             ),
                         ),
                         finishReason=to_gemini_finish_reason(
@@ -543,7 +556,14 @@ def format_sse_event(
         return None
 
     parts: list[dict[str, object]] = []
-    if event_type == "body":
+    if event_type == "parts":
+        parts = [
+            part.model_dump(mode="json", exclude_none=True)
+            for part in to_gemini_parts("", source_parts=text if isinstance(text, list) else [])
+        ]
+    elif event_type == "thought_signature":
+        parts.append({"text": "", "thoughtSignature": str(text)})
+    elif event_type == "body":
         p: dict[str, object] = {"text": str(text)}
         if thought_signature:
             p["thoughtSignature"] = thought_signature
@@ -560,7 +580,7 @@ def format_sse_event(
             for part in to_gemini_parts("", function_calls=fc_list)
         ]
         if thought_signature and parts:
-            parts[0]["thoughtSignature"] = thought_signature
+            parts[0].setdefault("thoughtSignature", thought_signature)
     elif event_type == "images":
         img_list = text if isinstance(text, list) else []
         parts = [
@@ -568,7 +588,7 @@ def format_sse_event(
             for part in to_gemini_parts("", images=img_list)
         ]
         if thought_signature and parts:
-            parts[0]["thoughtSignature"] = thought_signature
+            parts[0].setdefault("thoughtSignature", thought_signature)
     elif event_type == "reasoning_images":
         r_img_list = text if isinstance(text, list) else []
         parts = [
@@ -576,7 +596,7 @@ def format_sse_event(
             for part in to_gemini_parts("", reasoning_images=r_img_list)
         ]
         if thought_signature and parts:
-            parts[0]["thoughtSignature"] = thought_signature
+            parts[0].setdefault("thoughtSignature", thought_signature)
     else:
         return None
 
@@ -623,6 +643,19 @@ def format_sse_usage(
     return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
 
 
+def gemini_error_type(exc: Exception) -> str | None:
+    """Expose only fixed service-auth categories, never upstream error data."""
+    if isinstance(exc, SessionExpiredError):
+        return "upstream_auth_expired"
+    if isinstance(exc, AuthError):
+        return "upstream_auth_failed"
+    if isinstance(exc, HTTPException) and isinstance(exc.detail, dict):
+        value = exc.detail.get("type")
+        if value in ("upstream_auth_expired", "upstream_auth_failed"):
+            return value
+    return None
+
+
 def format_sse_error(exc: Exception) -> str:
     """Format exception into standard Gemini SSE error chunk."""
     code, msg, status_str = classify_gemini_error_payload(exc)
@@ -634,6 +667,7 @@ def format_sse_error(exc: Exception) -> str:
                     "code": code,
                     "message": msg,
                     "status": status_str,
+                    **({"type": gemini_error_type(exc)} if gemini_error_type(exc) else {}),
                 }
             },
             ensure_ascii=False,
@@ -655,31 +689,8 @@ def _preflight_gemini_stream(
     except (ValueError, RequestValidationError) as exc:
         raise HTTPException(400, detail={"message": str(exc)}) from exc
 
-    account_service = runtime_state.account_service
-    rotator = runtime_state.rotator
-    if account_service is None or rotator is None:
-        raise HTTPException(503, detail="Account service is not ready")
-    accounts = account_service.list_accounts()
-    if not accounts:
-        raise HTTPException(503, detail="No accounts configured. Please import an account.")
-
-    stats = [rotator.get_account_stats(account.id) for account in accounts]
-    # The scheduler also permits a recovery attempt when only the temporary
-    # auth cooldown is active. Do not reject that existing recovery path.
-    # is_available resets expired daily quotas, so evaluate copies to keep this
-    # preflight from changing counters/cooldowns or selecting an account twice.
-    if any(
-        item is None
-        or deepcopy(item).is_available(normalized.model, ignore_auth_cooldown=True)
-        for item in stats
-    ):
-        return normalized
-    if all(item is not None and item.session_expired for item in stats):
-        raise HTTPException(401, detail="All accounts have expired sessions. Please import fresh cookies.")
-    raise HTTPException(
-        429,
-        detail=f"No accounts are currently available for model '{normalized.model}'.",
-    )
+    validate_account_availability(normalized.model)
+    return normalized
 
 
 async def _sse_with_heartbeats(
@@ -745,8 +756,12 @@ async def _sse_with_heartbeats(
 
 class _GeminiStreamingResponse(StreamingResponse):
     async def stream_response(self, send: Send) -> None:
+        async def bounded_send(message: Message) -> None:
+            async with asyncio.timeout(SSE_SEND_TIMEOUT_SECONDS):
+                await send(message)
+
         try:
-            await super().stream_response(send)
+            await super().stream_response(bounded_send)
         finally:
             # A failed ASGI send can stop between iterator yields without closing
             # the iterator. Always cancel its producer and close upstream scopes.
@@ -771,9 +786,8 @@ def _build_gemini_streaming_response(
                 len(req.contents),
             )
             final_usage: dict[str, object] | None = None
-            final_finish_reason: str = "STOP"
+            final_finish_reason: str = "FINISH_REASON_UNSPECIFIED"
             latest_response_id: str | None = None
-            buffered_thought_sig: str | None = None
             for stream_attempt in range(MAX_RETRIES):
                 has_yielded_data = False
                 account_id = None
@@ -781,9 +795,8 @@ def _build_gemini_streaming_response(
                 # Metadata from an attempt that emitted no body belongs to that
                 # attempt only, including signatures and any partial usage.
                 final_usage = None
-                final_finish_reason = "STOP"
+                final_finish_reason = "FINISH_REASON_UNSPECIFIED"
                 latest_response_id = None
-                buffered_thought_sig = None
                 try:
                     normalized = prepared_request or normalize_gemini_request(req, model_path)
                     await ensure_active_account(stream_attempt, model=model_path)
@@ -819,16 +832,25 @@ def _build_gemini_streaming_response(
                                 elif event_type == "response_id":
                                     latest_response_id = str(text)
                                 elif event_type == "thought_signature":
-                                    buffered_thought_sig = str(text)
+                                    # Legacy metadata-only events cannot be assigned
+                                    # to another Part. The gateway emits full Parts.
+                                    # Retain standalone signatures only after data;
+                                    # pre-output metadata must not suppress retries.
+                                    if has_yielded_data:
+                                        signature_chunk = format_sse_event(
+                                            event_type, text,
+                                            model_version=normalized.model,
+                                            response_id=latest_response_id,
+                                        )
+                                        if signature_chunk:
+                                            yield signature_chunk
                                 else:
                                     chunk = format_sse_event(
                                         event_type,
                                         text,
                                         model_version=normalized.model,
                                         response_id=latest_response_id,
-                                        thought_signature=buffered_thought_sig,
                                     )
-                                    buffered_thought_sig = None
                                     if chunk:
                                         has_yielded_data = True
                                         yield chunk
@@ -873,9 +895,19 @@ def _build_gemini_streaming_response(
             yield format_sse_error(exc)
 
 
+    async def admitted_stream():
+        try:
+            async with inference_limiter.slot(), aclosing(stream_response()) as chunks:
+                async for chunk in chunks:
+                    yield chunk
+        except HTTPException as exc:
+            record_failure(exc, source="gemini_stream", operation="inference_admission",
+                           http_status=exc.status_code)
+            yield format_sse_error(exc)
+
     return _GeminiStreamingResponse(
         _sse_with_heartbeats(
-            stream_response(), interval=SSE_HEARTBEAT_INTERVAL_SECONDS
+            admitted_stream(), interval=SSE_HEARTBEAT_INTERVAL_SECONDS
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},

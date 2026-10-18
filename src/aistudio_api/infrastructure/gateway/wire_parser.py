@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import json
 
-from aistudio_api.domain.models import Candidate, GeneratedImage, ModelOutput
-from aistudio_api.infrastructure.utils.common import (
-    decode_base64_images,
-    extract_outer_json,
+from aistudio_api.domain.errors import RequestError
+from aistudio_api.domain.models import (
+    Candidate,
+    ContentPart,
+    GeneratedImage,
+    ModelOutput,
 )
+from aistudio_api.infrastructure.utils.common import decode_base64_images
 
 # ==============================================================================
 # Google Protobuf-over-JSON Wire Array Specifications (docs/WIRE_SPECIFICATION.md)
@@ -57,32 +60,40 @@ WIRE_CANDIDATE_SAFETY_RATINGS = 4  # Field 5 safety ratings array
 
 
 def _looks_like_response_chunk(value: object) -> bool:
-    return isinstance(value, list) and len(value) > 0 and isinstance(value[0], list)
+    if not isinstance(value, list) or not value or not isinstance(value[0], list):
+        return False
+    candidates = value[0]
+    if not candidates:
+        return len(value) >= 3  # An independent usage/response-ID trailer.
+    if not all(isinstance(item, list) for item in candidates):
+        return False
+    candidate = candidates[0]
+    if len(candidate) > 1 and type(candidate[1]) is int:
+        return True  # Includes a blocked generation with no content.
+    content = candidate[0] if candidate else None
+    return (
+        isinstance(content, list)
+        and len(content) > 1
+        and isinstance(content[0], list)
+        and isinstance(content[1], str)
+    )
 
 
 def _iter_response_chunks(outer: object) -> list[list[object]]:
-    if isinstance(outer, list) and outer:
-        if len(outer) == 1 and isinstance(outer[0], list):
-            inner = outer[0]
-            nested_chunks = [
-                item
-                for item in inner
-                if _looks_like_response_chunk(item) and isinstance(item, list)
-            ]
-            if nested_chunks:
-                return nested_chunks
-        top_level_chunks = [
-            item
-            for item in outer
-            if _looks_like_response_chunk(item) and isinstance(item, list)
-        ]
-        if len(top_level_chunks) > 1:
-            return top_level_chunks
+    def collect(value: object) -> list[list[object]] | None:
+        if _looks_like_response_chunk(value) and isinstance(value, list):
+            return [value]
+        if not isinstance(value, list):
+            return None
+        chunks: list[list[object]] = []
+        for child in value:
+            nested = collect(child)
+            if nested is None:
+                return None  # Do not silently drop a malformed sibling.
+            chunks.extend(nested)
+        return chunks
 
-    if _looks_like_response_chunk(outer) and isinstance(outer, list):
-        return [outer]
-
-    return []
+    return collect(outer) or []
 
 
 def _coerce_int(value: object) -> int | None:
@@ -257,7 +268,9 @@ def _coerce_wire_payload(
         if len(raw_value) > 2 and isinstance(raw_value[2], str):
             list_payload["call_id"] = raw_value[2]
         return list_payload
-    return {"type": payload_type, "raw": raw_value}
+    # Alternative tool-call slots also carry scalar flags (for example the
+    # boolean thought flag). They are not function payloads.
+    return None
 
 
 def _is_wire_value(val: object) -> bool:
@@ -337,6 +350,7 @@ def _decode_wire_value(value: object) -> object:
     if len(value) >= 3 and value[2] is not None:
         return value[2]
     return [_decode_wire_value(item) for item in value]
+
 
 def parse_usage_metadata(raw_usage: object) -> dict[str, object]:
     if not isinstance(raw_usage, list):
@@ -439,6 +453,19 @@ def parse_response_chunk(chunk: list[object]) -> Candidate:
 
     for raw_part in raw_parts if isinstance(raw_parts, list) else []:
         part = parse_response_part(raw_part)
+        content_part = ContentPart(
+            text=(
+                part.text
+                if isinstance(raw_part, list)
+                and len(raw_part) > WIRE_PART_TEXT_INDEX
+                and isinstance(raw_part[WIRE_PART_TEXT_INDEX], str)
+                else None
+            ),
+            thought=part.thought,
+            function_call=part.function_call,
+            function_response=part.function_response,
+            thought_signature=part.thought_signature,
+        )
         if part.inline_data:
             decoded = decode_base64_images(
                 [{"mime": part.inline_data[0], "data": part.inline_data[1]}]
@@ -463,6 +490,23 @@ def parse_response_chunk(chunk: list[object]) -> Candidate:
                 reasoning_images.extend(decoded_images)
             else:
                 images.extend(decoded_images)
+            if decoded_images:
+                content_part.image = decoded_images[0]
+        if (
+            content_part.text is not None
+            or content_part.image is not None
+            or content_part.function_call is not None
+            or content_part.function_response is not None
+            or content_part.thought_signature
+        ):
+            if (
+                content_part.text is None
+                and content_part.image is None
+                and content_part.function_call is None
+                and content_part.function_response is None
+            ):
+                content_part.text = ""
+            candidate.parts.append(content_part)
         if part.executable_code:
             code_outputs.append(str(part.executable_code))
         if part.code_execution_result:
@@ -490,7 +534,7 @@ def parse_response_chunk(chunk: list[object]) -> Candidate:
     candidate.finish_reason = (
         raw_candidate[WIRE_CANDIDATE_FINISH_REASON]
         if len(raw_candidate) > WIRE_CANDIDATE_FINISH_REASON
-        and isinstance(raw_candidate[WIRE_CANDIDATE_FINISH_REASON], int)
+        and type(raw_candidate[WIRE_CANDIDATE_FINISH_REASON]) is int
         else None
     )
     candidate.finish_message = (
@@ -511,18 +555,21 @@ def parse_response_chunk(chunk: list[object]) -> Candidate:
 def parse_text_output(raw: str) -> ModelOutput:
     output = ModelOutput(raw_response=raw)
 
-    parts = extract_outer_json(raw)
-    if not parts:
-        return output
-
-    outer = parts[0]
+    text = raw.strip()
+    if text.startswith(")]}'"):
+        text = text[4:].lstrip()
+    try:
+        outer = json.loads(text)
+    except (json.JSONDecodeError, RecursionError) as exc:
+        raise RequestError(502, "Upstream response is malformed or truncated") from exc
     chunks = _iter_response_chunks(outer)
     if not chunks:
-        return output
+        raise RequestError(502, "Upstream response contains no generation chunks")
 
     merged = Candidate()
     for chunk in chunks:
         parsed = parse_response_chunk(chunk)
+        merged.parts.extend(parsed.parts)
         if parsed.text:
             merged.text += parsed.text
         if parsed.thinking:
@@ -547,19 +594,18 @@ def parse_text_output(raw: str) -> ModelOutput:
             merged.finish_message = parsed.finish_message
         if parsed.safety_ratings:
             merged.safety_ratings = parsed.safety_ratings
-
-    last_chunk = chunks[-1]
-    output.usage = parse_usage_metadata(
-        last_chunk[WIRE_CHUNK_USAGE_INDEX]
-        if len(last_chunk) > WIRE_CHUNK_USAGE_INDEX
-        else None
-    )
-    raw_rid = (
-        last_chunk[WIRE_RESPONSE_ID_INDEX]
-        if len(last_chunk) > WIRE_RESPONSE_ID_INDEX
-        else None
-    )
-    output.response_id = str(raw_rid) if isinstance(raw_rid, str) else ""
+        usage = parse_chunk_usage(chunk)
+        if usage:
+            output.usage = usage
+        raw_rid = (
+            chunk[WIRE_RESPONSE_ID_INDEX]
+            if len(chunk) > WIRE_RESPONSE_ID_INDEX
+            else None
+        )
+        if isinstance(raw_rid, str) and raw_rid:
+            output.response_id = raw_rid
+    if merged.finish_reason is None or merged.finish_reason <= 0:
+        raise RequestError(502, "Upstream response ended without a completion marker")
     output.candidates = [merged]
     return output
 

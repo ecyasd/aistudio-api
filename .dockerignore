@@ -20,6 +20,14 @@ build
 # Environment (use .env.example as reference, mount .env at runtime)
 .env
 .env.local
+config.yaml
+data/
+data2/
+accounts/
+node_modules/
+web/node_modules/
+web/*.tsbuildinfo
+src/aistudio_api/static/
 
 # Logs
 *.log

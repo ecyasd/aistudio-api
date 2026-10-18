@@ -1,3 +1,10 @@
+FROM node:24.22.0-bookworm-slim AS frontend
+WORKDIR /build/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web/ ./
+RUN npm run build
+
 # Use Debian 12 (bookworm) explicitly so package names stay stable.
 FROM python:3.11-slim-bookworm
 
@@ -88,9 +95,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code and default configuration template
 COPY src/ src/
+COPY --from=frontend /build/src/aistudio_api/static/ /app/src/aistudio_api/static/
 COPY main.py .
-COPY config.yaml /app/defaults/config.yaml
-COPY config.yaml /app/config.yaml
+COPY config.example.yaml /app/defaults/config.example.yaml
+COPY config.example.yaml /app/config.example.yaml
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 
 # Create necessary directories
@@ -106,7 +114,7 @@ EXPOSE 8080 9222
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8080/v1beta/models || exit 1
+    CMD curl -f http://localhost:8080/health || exit 1
 
 # Container entrypoint and default command
 ENTRYPOINT ["/app/docker-entrypoint.sh"]

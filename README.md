@@ -1,23 +1,22 @@
 # aistudio-api
 
-基于 [DeconstructedCube/aistudio-api](https://github.com/DeconstructedCube/aistudio-api)。
+基于 [DeconstructedCube/aistudio-api](https://github.com/DeconstructedCube/aistudio-api)，
+本分支维护于 [ecyasd/aistudio-api](https://github.com/ecyasd/aistudio-api)。
 
 本分支包含浏览器启动与首次调用恢复、账号会话隔离、Cookie 刷新保存、API Key
 配置持久化，以及前端「实时错误」页面。错误仅保留在内存中，最近 10 分钟最多
 100 条，页面可见时每 5 秒刷新，重启后清空。Cookie 被 Google 撤销或登录过期时，
-仍需重新导入有效登录状态。可选的公开 HTTPS 加固启动方式见
+仍需重新导入有效登录状态，现有调用密钥保持不变。公开 HTTPS 运行与自动发布说明见
 [deploy/README.md](deploy/README.md)。
 上游 Docker Hub 镜像不包含本分支修复；使用
 `docker build -t aistudio-api:local .` 从本仓库构建，才能使用对应的前后端。
 
 <p align="center">
   <a href="https://github.com/DeconstructedCube/aistudio-api"><img src="https://img.shields.io/badge/API-Gemini%20v1beta-4285F4?style=flat-square&logo=google" alt="Gemini API"></a>
-  <a href="https://hub.docker.com/r/bedrockblock/aistudio-api"><img src="https://img.shields.io/badge/Docker-bedrockblock%2Faistudio--api-2496ED?style=flat-square&logo=docker" alt="Docker Hub"></a>
   <a href="https://deepwiki.com/DeconstructedCube/aistudio-api"><img src="https://img.shields.io/badge/DeepWiki-DeconstructedCube%2Faistudio--api-5B68E4?style=flat-square&logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACwAAAAyCAYAAAAnWDnqAAAAAXNSR0IArs4c6QAAA05JREFUaEPtmUtyEzEQhtWTQyQLHNak2AB7ZnyXZMEjXMGeK/AIi+QuHrMnbChYY7MIh8g01fJoopFb0uhhEqqcbWTp06/uv1saEDv4O3n3dV60RfP947Mm9/SQc0ICFQgzfc4CYZoTPAswgSJCCUJUnAAoRHOAUOcATwbmVLWdGoH//PB8mnKqScAhsD0kYP3j/Yt5LPQe2KvcXmGvRHcDnpxfL2zOYJ1mFwrryWTz0advv1Ut4CJgf5uhDuDj5eUcAUoahrdY/56ebRWeraTjMt/00Sh3UDtjgHtQNHwcRGOC98BJEAEymycmYcWwOprTgcB6VZ5JK5TAJ+fXGLBm3FDAmn6oPPjR4rKCAoJCal2eAiQp2x0vxTPB3ALO2CRkwmDy5WohzBDwSEFKRwPbknEggCPB/imwrycgxX2NzoMCHhPkDwqYMr9tRcP5qNrMZHkVnOjRMWwLCcr8ohBVb1OMjxLwGCvjTikrsBOiA6fNyCrm8V1rP93iVPpwaE+gO0SsWmPiXB+jikdf6SizrT5qKasx5j8ABbHpFTx+vFXp9EnYQmLx02h1QTTrl6eDqxLnGjporxl3NL3agEvXdT0WmEost648sQOYAeJS9Q7bfUVoMGnjo4AZdUMQku50McDcMWcBPvr0SzbTAFDfvJqwLzgxwATnCgnp4wDl6Aa+Ax283gghmj+vj7feE2KBBRMW3FzOpLOADl0Isb5587h/U4gGvkt5v60Z1VLG8BhYjbzRwyQZemwAd6cCR5/XFWLYZRIMpX39AR0tjaGGiGzLVyhse5C9RKC6ai42ppWPKiBagOvaYk8lO7DajerabOZP46Lby5wKjw1HCRx7p9sVMOWGzb/vA1hwiWc6jm3MvQDTogQkiqIhJV0nBQBTU+3okKCFDy9WwferkHjtxib7t3xIUQtHxnIwtx4mpg26/HfwVNVDb4oI9RHmx5WGelRVlrtiw43zboCLaxv46AZeB3IlTkwouebTr1y2NjSpHz68WNFjHvupy3q8TFn3Hos2IAk4Ju5dCo8B3wP7VPr/FGaKiG+T+v+TQqIrOqMTL1VdWV1DdmcbO8KXBz6esmYWYKPwDL5b5FA1a0hwapHiom0r/cKaoqr+27/XcrS5UwSMbQAAAABJRU5ErkJggg==" alt="DeepWiki"></a>
   <a href="https://fastapi.tiangolo.com/"><img src="https://img.shields.io/badge/Framework-FastAPI-009688?style=flat-square&logo=fastapi" alt="FastAPI"></a>
   <a href="https://vuejs.org/"><img src="https://img.shields.io/badge/Frontend-Vue%203%20%2B%20Vite-4FC08D?style=flat-square&logo=vuedotjs" alt="Vue 3"></a>
   <a href="https://docs.astral.sh/uv/"><img src="https://img.shields.io/badge/Python-3.11%2B%20%7C%20uv-261230?style=flat-square&logo=python" alt="Python uv"></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License"></a>
 </p>
 
 <p align="center">
@@ -46,7 +45,6 @@
   - [工具调用 (Function Calling)](#工具调用-function-calling)
 - [Web 管理控制台](#web-管理控制台)
 - [开发与测试](#开发与测试)
-- [开源协议](#开源协议)
 
 ---
 
@@ -63,6 +61,8 @@
 | **内置搜索与工具** | 支持 Google Search 联网搜索、Google Maps、代码执行沙箱等官方扩展能力 |
 | **轻量 CDP 驱动** | 基于纯 Python 异步 WebSocket 直连 Chrome DevTools Protocol，无需 Node.js、Playwright 或 Selenium |
 | **Web 管理面板** | 提供 Web 管理控制台，支持账号管理（文本与 JSON 批量导入）、调用量监控、在线编辑与热重载 `config.yaml` |
+| **独立访问凭据** | 网站管理密码与 API 调用密钥分离；修改模型设置、重新导入或激活账号不会重置现有调用密钥 |
+| **实时错误** | `/error-records` 展示经过脱敏的最近错误；仅在内存保留 10 分钟、最多 100 条，重启后清空 |
 | **Android 伴侣端** | 配套 Android 原生应用（`android/`），采用 Jetpack Compose 构建，支持多 Profile 隔离登录、Bitwarden 自动填充与一键导出凭据包 |
 > [!NOTE]
 > **内存占用参考**：纯 Python 后端服务常驻内存约 35 - 45 MB；拉起单实例受控 Chromium 后总物理内存 (PSS) 约 350 - 450 MB（宿主 Linux 下约 250 - 350 MB）。Android Termux 环境建议空闲 RAM ≥ 1 GB。
@@ -96,11 +96,18 @@
 - [系统架构设计 (ARCHITECTURE.md)](./docs/ARCHITECTURE.md)：分层架构、请求生命周期、Wire Codec 编解码与并发控制模型。
 - [Wire 协议逆向技术规范 (WIRE_SPECIFICATION.md)](./docs/WIRE_SPECIFICATION.md)：Protobuf-JSON 数组映射、字段索引、多模态 Part 结构与 Schema 编码。
 - [BotGuard 验证链路机制 (BOTGUARD_VERIFICATION_CHAIN.md)](./docs/BOTGUARD_VERIFICATION_CHAIN.md)：WAA 挑战握手、Wasm 动态签名、内容哈希与服务端校验流程。
-- [智能体与协作规范 (AGENT.md)](./AGENT.md)：类型系统要求、代码质量检查与开发指南。
+- [工程协作规则 (AGENTS.md)](./AGENTS.md)：代码结构、凭据与状态保护、协议和验证要求。
+- [部署与维护说明](./deploy/README.md)：HTTPS、认证、发布、回滚与排错。
 
 ---
 
 ## 快速开始
+
+以下命令用于本机开发。首次启动后，在管理界面导入经授权的 Google 登录状态，
+再到「系统设置 → API 密钥管理」创建调用密钥。网站登录密码通过
+`AISTUDIO_WEB_PASSWORD` 设置，与调用密钥独立。公开服务按[部署说明](deploy/README.md)
+使用 HTTPS，并保持后端和浏览器调试端口私有。
+仓库只跟踪 `config.example.yaml`；首次使用复制为 `config.yaml`，已有运行配置应保留。
 
 ### Android (Termux)
 
@@ -116,6 +123,7 @@ pkg update -y && pkg install -y git
 # 步骤 2：克隆代码仓库并进入目录
 git clone https://github.com/ecyasd/aistudio-api.git
 cd aistudio-api
+cp config.example.yaml config.yaml
 
 # 步骤 3：初始化依赖环境（自动配置手机专属加速源，无需本地编译）
 bash scripts/setup-env.sh
@@ -148,6 +156,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 # 步骤 2：克隆代码仓库并进入目录
 git clone https://github.com/ecyasd/aistudio-api.git
 cd aistudio-api
+Copy-Item config.example.yaml config.yaml
 
 # 步骤 3：同步安装项目依赖
 uv sync
@@ -174,6 +183,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # 步骤 2：克隆代码仓库并进入目录
 git clone https://github.com/ecyasd/aistudio-api.git
 cd aistudio-api
+cp config.example.yaml config.yaml
 
 # 步骤 3：同步安装项目依赖
 uv sync
@@ -191,24 +201,28 @@ uv run python3 main.py server --port 8080
 
 ### Docker 部署
 
-镜像已内置 CloakBrowser 运行时，支持开箱即用：
+从本分支构建包含对应后端、前端与 CloakBrowser 的镜像：
 
 ```bash
+docker build -t aistudio-api:local .
 docker run -d \
   --name aistudio-api \
   --restart unless-stopped \
-  -p 8080:8080 \
+  -p 127.0.0.1:8080:8080 \
   -v aistudio-api-data:/app/data \
-  ghcr.io/deconstructedcube/aistudio-api:latest
+  aistudio-api:local
 ```
 
 使用 Docker Compose 启动：
 
 ```bash
-docker compose up -d
+test -f config.yaml || cp config.example.yaml config.yaml
+test -f .env || cp .env.example .env
+docker compose up -d --build
 ```
 
-启动后访问 **`http://localhost:8080`**（或服务器 IP 端口）进入管理控制台。
+启动后访问 **`http://localhost:8080`** 进入管理控制台。上游镜像不会自动包含本分支修改；
+服务器自动发布使用仓库 CI 生成的代码工件，详见[部署说明](deploy/README.md)。
 
 ---
 
@@ -221,7 +235,7 @@ docker compose up -d
 | 变量名 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `AISTUDIO_PORT` | int | `8080` | API 服务监听端口 |
-| `AISTUDIO_WEB_PASSWORD` | string | `""` | Web 控制台访问密码（亦可设置 `AISTUDIO_ADMIN_PASSWORD`） |
+| `AISTUDIO_WEB_PASSWORD` | string | `""` | 独立的网站管理密码（亦可设置 `AISTUDIO_ADMIN_PASSWORD`），不授予 API 调用权限 |
 | `AISTUDIO_PROXY` | string | `""` | 出口代理地址，支持 `http://`、`https://` 或 `socks5://` |
 | `AISTUDIO_DATA_DIR` | string | `data/` | 主数据持久化根目录（Docker 下为 `/app/data`） |
 | `AISTUDIO_ACCOUNTS_DIR` | string | `data/accounts` | 账号持久化凭据目录 |
@@ -246,9 +260,13 @@ docker compose up -d
 
 ## API 调用示例
 
-支持以下鉴权方式：
+在管理界面生成调用密钥后，支持以下 API 鉴权方式：
 - Query 参数：`?key=YOUR_API_KEY`
 - 请求头：`x-goog-api-key: YOUR_API_KEY`、`x-api-key: YOUR_API_KEY` 或 `Authorization: Bearer YOUR_API_KEY`
+
+未配置调用密钥时 API 拒绝访问。管理接口仅接受管理密码的 Bearer 认证；
+调用密钥不能读取管理配置、账号或错误记录。Query 密钥用于 Gemini 客户端兼容，
+反向代理日志应省略查询字符串。
 
 ### cURL 调用
 
@@ -391,23 +409,26 @@ if response.function_calls:
 
 - **仪表盘 (Dashboard)**：实时展示服务健康状况、各模型请求量、成功率及 429 冷却指标。
 - **账号管理 (Accounts)**：支持 Cookie 单条与凭据包批量导入、自动探测多账号、手动切换当前活跃账号或重置冷却状态。
-- **系统设置 (Settings)**：在线编辑 `config.yaml`（支持配置 profiles 与 models 默认规则），保存后服务端即时热重载。
-- **访问鉴权**：设置环境变量 `AISTUDIO_WEB_PASSWORD` 后自动开启登录鉴权守卫。
+- **系统设置 (Settings)**：编辑模型规则并管理 API 密钥。普通模型设置保存保留当前密钥，只有专用密钥管理操作会修改密钥。
+- **实时错误 (Real-time Errors)**：页面可见时每 5 秒刷新，显示脱敏错误摘要、分类和请求 ID；数据不写磁盘，重启后清空。
+- **访问鉴权**：网站使用独立管理密码；API 使用已配置的调用密钥。Google 登录失效返回 `503 / upstream_auth_expired`，应重新导入 Google 登录状态；调用密钥错误返回 `401 / authentication_error`。
 
 ---
 
 ## 开发与测试
 
-前端源码位于 `web/`，采用 Vue 3 + TypeScript + Vite + Tailwind CSS：
+前端源码位于 `web/`，采用 Vue 3 + TypeScript + Vite + Tailwind CSS。
+使用与 CI 一致的 Node.js 24.22.0 和已提交的 npm lock：
 
 ```bash
 # 启动前端开发调试服务
 cd web
-bun install
-bun run dev          # 启动开发服务（localhost:3000，代理至 8080）
-bun run type-check   # 执行 TypeScript 类型校验
-bun run lint         # 执行 ESLint 代码规范检查
-bun run build        # 生产构建，产物输出至 src/aistudio_api/static
+npm ci
+npm run dev            # 启动开发服务（localhost:3000，代理至 8080）
+npm run type-check     # 执行 TypeScript 类型校验
+npm run lint           # 执行 ESLint 代码规范检查
+npm run test:frontend  # 离线浏览器与页面行为回归
+npm run build          # 生产构建，产物输出至 src/aistudio_api/static
 ```
 
 Python 端质量检查与测试：
@@ -428,9 +449,3 @@ Android 伴侣端代码质量检查：
 # 执行 Kotlin 代码规范检查 (已配置于 ~/.zshrc)
 ktlint "android/app/src/main/java/**/*.kt"
 ```
-
----
-
-## 开源协议
-
-本项目基于 [MIT License](./LICENSE) 许可协议开源。

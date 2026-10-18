@@ -1,0 +1,190 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  GitHub OIDC deployment access for one existing managed node, using a fixed
+  code-only deployer instead of general shell or infrastructure permissions.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: protected GitHub branch -> short-lived role -> dedicated command -> fixed host deployer
+    must:
+      - Deploy only to the existing node in this stack's Region; create no servers.
+      - Keep application credentials, configuration, account data and statistics outside release packages and code rollback.
+      - The root-owned host deployer pins the repository and deploy-<commit>/release.tar.gz release path.
+      - Host deployer installation and updates are separately managed; release archives cannot overwrite it.
+      - Use a stack name of at most 51 characters so its IAM role name fits the 64-character limit.
+    ref:
+      - at: deploy/README.md
+        has: hardened launcher and code-only rollback constraints
+        scope: repository
+
+Parameters:
+  GitHubOwnerName:
+    Type: String
+    Default: ecyasd
+    AllowedPattern: '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$'
+    Description: GitHub repository owner name; must match the host deployer's fixed repository.
+  GitHubRepositoryName:
+    Type: String
+    Default: aistudio-api
+    AllowedPattern: '^[A-Za-z0-9_.-]{1,100}$'
+    Description: GitHub repository name; must match the host deployer's fixed repository.
+  GitHubOwnerId:
+    Type: String
+    Default: '151420095'
+    AllowedPattern: '^[1-9][0-9]{0,19}$'
+    Description: Immutable GitHub repository owner ID.
+  GitHubRepositoryId:
+    Type: String
+    Default: '1424339954'
+    AllowedPattern: '^[1-9][0-9]{0,19}$'
+    Description: Immutable GitHub repository ID.
+  DeploymentBranch:
+    Type: String
+    Default: master
+    AllowedPattern: '^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$'
+    Description: Exact branch allowed to assume the deployment role; no GitHub environment subject is used.
+  TargetManagedNodeId:
+    Type: String
+    Default: mi-0b797ec85d5957f00
+    AllowedPattern: '^mi-[0-9a-f]{17}$'
+    Description: Existing hybrid-registered managed node targeted by this stack.
+
+Resources:
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: exchange GitHub identity for temporary credentials without storing AWS access keys
+        must:
+          - Trust the GitHub token issuer and STS audience only.
+          - This account must not already have a provider for the same issuer when creating this stack.
+        mutable: change-with-constraints
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      Tags:
+        - Key: Purpose
+          Value: aistudio-code-deployment
+
+  DeployDocument:
+    Type: AWS::SSM::Document
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: root-run deployment entry point accepts only a pinned commit and artifact digest
+        must:
+          - Never add caller-supplied shell commands, URLs, paths, credentials or nested documents.
+          - Require ENV_VAR-capable SSM Agent; fail closed if variables are unavailable.
+          - Keep the host deployer and its Python interpreter outside release-controlled paths.
+          - Host deployer must verify archive digest, code allowlist, idle state, rollback and inference-free health checks.
+        mutable: review-required
+    Properties:
+      Name: !Sub '${AWS::StackName}-Deploy'
+      DocumentType: Command
+      DocumentFormat: YAML
+      TargetType: /AWS::SSM::ManagedInstance
+      UpdateMethod: NewVersion
+      Content:
+        schemaVersion: '2.2'
+        description: Deploy a digest-verified release through the fixed code-only host deployer.
+        parameters:
+          CommitSha:
+            type: String
+            description: Exact 40-character lowercase Git commit hash.
+            allowedPattern: '^[0-9a-f]{40}$'
+            interpolationType: ENV_VAR
+          ArtifactSha256:
+            type: String
+            description: Exact SHA-256 of the fixed repository's release.tar.gz asset.
+            allowedPattern: '^[0-9a-f]{64}$'
+            interpolationType: ENV_VAR
+        mainSteps:
+          - action: aws:runShellScript
+            name: deployPinnedRelease
+            precondition:
+              StringEquals:
+                - platformType
+                - Linux
+            inputs:
+              timeoutSeconds: '1800'
+              runCommand:
+                - |
+                  #!/bin/sh
+                  set -eu
+                  umask 077
+                  test -n "${SSM_CommitSha:-}"
+                  test -n "${SSM_ArtifactSha256:-}"
+                  exec /opt/aistudio-api/venv/bin/python /usr/local/sbin/aistudio-github-deploy \
+                    --commit "$SSM_CommitSha" --sha256 "$SSM_ArtifactSha256"
+      Tags:
+        - Key: Purpose
+          Value: aistudio-code-deployment
+
+  GitHubDeployRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: narrowly scoped deployment trigger; excludes general RunShellScript, document mutation and role passing
+        must:
+          - Exact immutable owner/repository IDs and branch subject; never permit a repository wildcard.
+          - SendCommand may target only this document and this one managed node.
+          - No PassRole, Session Manager, IAM mutation, resource provisioning or cross-Region command access.
+          - GetCommandInvocation requires Resource '*'; it can read other command output in this Region.
+        mutable: review-required
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-GitHubDeploy'
+      Description: Trigger the fixed code-only deployer on one existing managed node.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: GitHubImmutableBranchOnly
+            Effect: Allow
+            Principal:
+              Federated: !Ref GitHubOIDCProvider
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub >-
+                  repo:${GitHubOwnerName}@${GitHubOwnerId}/${GitHubRepositoryName}@${GitHubRepositoryId}:ref:refs/heads/${DeploymentBranch}
+      Policies:
+        - PolicyName: DeploySingleManagedNode
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: RunOnlyDedicatedDeployer
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:document/${DeployDocument}'
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:managed-instance/${TargetManagedNodeId}'
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref AWS::Region
+              - Sid: ReadRegionalInvocationResult
+                Effect: Allow
+                Action: ssm:GetCommandInvocation
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref AWS::Region
+      Tags:
+        - Key: Purpose
+          Value: aistudio-code-deployment
+
+Outputs:
+  RoleArn:
+    Description: Role assumed by the protected GitHub branch through OIDC.
+    Value: !GetAtt GitHubDeployRole.Arn
+  DocumentName:
+    Description: Dedicated SSM command accepting CommitSha and ArtifactSha256 only.
+    Value: !Ref DeployDocument
+  DeploymentRegion:
+    Description: Region containing the existing managed node and deployment document.
+    Value: !Ref AWS::Region
+  TargetManagedNodeId:
+    Description: Sole managed node to which the GitHub role may send the document.
+    Value: !Ref TargetManagedNodeId

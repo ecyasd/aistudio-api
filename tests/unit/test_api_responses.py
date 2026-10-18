@@ -34,7 +34,7 @@ def test_to_gemini_usage_metadata_uses_visible_and_reasoning_tokens():
         }
     ).model_dump(mode="json") == {
         "promptTokenCount": 9,
-        "candidatesTokenCount": 316,
+        "candidatesTokenCount": 26,
         "thoughtsTokenCount": 290,
         "totalTokenCount": 325,
     }
@@ -85,14 +85,15 @@ def test_to_gemini_parts_can_emit_inline_image_data():
 def test_classify_gemini_error_payload():
     """Verify exception mapping to Gemini HTTP status and reason code."""
     assert classify_gemini_error_payload(SessionExpiredError("expired")) == (
-        401,
-        "All accounts have expired sessions. Please import fresh cookies.",
-        "UNAUTHENTICATED",
+        503,
+        ("The API key is valid, but upstream Google sessions have expired. "
+         "Re-import Google cookies on the management page; keep your API key."),
+        "UNAVAILABLE",
     )
     assert classify_gemini_error_payload(AuthError("auth forbidden")) == (
-        403,
-        "auth forbidden",
-        "PERMISSION_DENIED",
+        503,
+        "Upstream Google authentication failed. Check accounts on the management page; keep your API key.",
+        "UNAVAILABLE",
     )
     assert classify_gemini_error_payload(UsageLimitExceeded("quota exceeded")) == (
         429,
@@ -188,8 +189,8 @@ async def test_handle_attempt_exception_retries_ambiguous_rpc_404_in_place():
         )
 
 @pytest.mark.asyncio
-async def test_build_gemini_streaming_response_passes_requested_model():
-    from unittest.mock import MagicMock
+async def test_build_gemini_streaming_response_passes_requested_model(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
 
     from aistudio_api.api.schemas import (
         GeminiContent,
@@ -202,6 +203,9 @@ async def test_build_gemini_streaming_response_passes_requested_model():
     from aistudio_api.infrastructure.gateway.client import AIStudioClient
 
     passed_model = None
+    monkeypatch.setattr(
+        "aistudio_api.application.api_service_gemini.ensure_active_account", AsyncMock()
+    )
 
     async def fake_stream_generate_content(*args, **kwargs):
         nonlocal passed_model
@@ -228,9 +232,9 @@ async def test_build_gemini_streaming_response_passes_requested_model():
 
 
 @pytest.mark.asyncio
-async def test_streaming_metadata_event_does_not_block_failover():
+async def test_streaming_metadata_event_does_not_block_failover(monkeypatch):
     """验证在仅接收到 thought_signature 等内部元数据事件时发生异常，不会误判为已发送数据而阻断重试。"""
-    from unittest.mock import MagicMock
+    from unittest.mock import AsyncMock, MagicMock
 
     from aistudio_api.api.schemas import (
         GeminiContent,
@@ -244,6 +248,9 @@ async def test_streaming_metadata_event_does_not_block_failover():
     from aistudio_api.infrastructure.gateway.client import AIStudioClient
 
     attempt_count = 0
+    monkeypatch.setattr(
+        "aistudio_api.application.api_service_gemini.ensure_active_account", AsyncMock()
+    )
 
     async def fake_stream_generate_content(*args, **kwargs):
         nonlocal attempt_count

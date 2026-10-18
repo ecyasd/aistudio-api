@@ -233,7 +233,7 @@ async def test_cold_start_failure_keeps_the_account_that_failed_preparation(
         )
 
     response = await _post(app)
-    assert response.status_code == 401
+    assert response.status_code == 503
     events = diagnostic_store.list_records()["items"]
     assert len(events) == 1
     assert events[0]["account_id"] == "acc_abcd1234"
