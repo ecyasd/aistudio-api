@@ -14,6 +14,18 @@ class GeneratedImage:
 
 
 @dataclass
+class ContentPart:
+    """A single upstream Part, with its signature and original position intact."""
+
+    text: str | None = None
+    thought: bool = False
+    image: GeneratedImage | None = None
+    function_call: dict[str, object] | None = None
+    function_response: dict[str, object] | None = None
+    thought_signature: str = ""
+
+
+@dataclass
 class Candidate:
     text: str = ""
     thinking: str = ""
@@ -27,6 +39,7 @@ class Candidate:
     finish_reason: int | None = None
     finish_message: str = ""
     safety_ratings: list[dict[str, object]] = field(default_factory=list)
+    parts: list[ContentPart] = field(default_factory=list)
 
     @property
     def has_content(self) -> bool:
@@ -86,6 +99,7 @@ class ModelOutput:
 
 __all__ = [
     "Candidate",
+    "ContentPart",
     "GeneratedImage",
     "ModelOutput",
 ]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import json
 from collections.abc import AsyncGenerator
 from contextlib import aclosing
@@ -21,6 +22,8 @@ from aistudio_api.infrastructure.gateway.wire_parser import (
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 logger = get_logger("streaming")
+MAX_ERROR_BODY_CHARS = 8192
+MAX_STREAM_DUMP_CHARS = 16 * 1024 * 1024
 
 
 def _dump_stream_exchange(
@@ -88,6 +91,13 @@ class StreamingGateway:
         latest_finish_reason: int | None = None
         latest_response_id: str | None = None
         raw_parts: list[str] = []
+        retained_chars = 0
+        retain_limit = (
+            MAX_STREAM_DUMP_CHARS
+            if settings.dump_raw_response
+            else MAX_ERROR_BODY_CHARS
+        )
+        decoder = codecs.getincrementaldecoder("utf-8")()
         status_code = 0
         async with aclosing(
             self._session.send_streaming_request(
@@ -102,10 +112,22 @@ class StreamingGateway:
                     status_code = int(str(payload))
                 elif event_type == "chunk" and payload:
                     if isinstance(payload, bytes):
-                        text_payload = payload.decode("utf-8", errors="replace")
+                        try:
+                            text_payload = decoder.decode(payload)
+                        except UnicodeDecodeError as exc:
+                            raise RequestError(
+                                502, "Upstream response contains invalid UTF-8"
+                            ) from exc
                     else:
                         text_payload = str(payload)
-                    raw_parts.append(text_payload)
+                    if (
+                        settings.dump_raw_response or status_code != 200
+                    ) and retained_chars < retain_limit:
+                        retained = text_payload[: retain_limit - retained_chars]
+                        raw_parts.append(retained)
+                        retained_chars += len(retained)
+                    if status_code != 200:
+                        continue
                     for parsed_chunk in parser.feed(text_payload):
                         usage = parse_chunk_usage(parsed_chunk)
                         if usage:
@@ -119,24 +141,13 @@ class StreamingGateway:
                             latest_response_id = parsed_chunk[7]
                             yield ("response_id", latest_response_id)
                         candidate = parse_response_chunk(parsed_chunk)
-                        if candidate.finish_reason is not None:
+                        if (
+                            candidate.finish_reason is not None
+                            and candidate.finish_reason > 0
+                        ):
                             latest_finish_reason = candidate.finish_reason
-                        if candidate.thinking:
-                            yield ("thinking", candidate.thinking)
-                        if candidate.reasoning_images:
-                            yield ("reasoning_images", candidate.reasoning_images)
-                        if candidate.function_calls:
-                            yield ("tool_calls", candidate.function_calls)
-                        if candidate.images:
-                            yield ("images", candidate.images)
-                        if candidate.text:
-                            yield ("body", candidate.text)
-                        if candidate.thought_signature:
-                            yield ("thought_signature", candidate.thought_signature)
-                        if latest_finish_reason is not None:
-                            break
-                    if latest_finish_reason is not None:
-                        break
+                        if candidate.parts:
+                            yield ("parts", candidate.parts)
         raw_response = "".join(raw_parts)
         _dump_stream_exchange(
             model=model,
@@ -153,7 +164,17 @@ class StreamingGateway:
                 raise RequestError(status_code, detail)
             raise RequestError(status_code, "")
 
-        if latest_finish_reason is not None:
-            yield ("finish_reason", latest_finish_reason)
+        try:
+            decoder.decode(b"", final=True)
+        except UnicodeDecodeError as exc:
+            raise RequestError(502, "Upstream response contains invalid UTF-8") from exc
+        # EOF validates the outer JSON envelope; a finish marker alone cannot
+        # turn a truncated document or a failed transport into success.
+        list(parser.finish())
+        if latest_finish_reason is None:
+            raise RequestError(
+                502, "Upstream response ended without a completion marker"
+            )
+        yield ("finish_reason", latest_finish_reason)
         yield ("usage", latest_usage)
         yield ("done", None)

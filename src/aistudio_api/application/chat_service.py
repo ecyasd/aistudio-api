@@ -345,15 +345,35 @@ def _normalize_gemini_thinking_config(
             "generationConfig.thinkingConfig must be an object or wire array"
         )
 
+    unsupported = {
+        "thinkingBudget", "thinking_budget", "includeThoughts", "include_thoughts"
+    }.intersection(value)
+    if unsupported:
+        # Only thinking levels have a verified AI Studio wire mapping. Do not
+        # pretend a token budget or summary preference has been applied.
+        raise ValueError(
+            "generationConfig.thinkingConfig does not support "
+            + ", ".join(sorted(unsupported))
+            + "; omit these fields and use thinkingLevel instead"
+        )
     raw_level = value.get("thinkingLevel", value.get("level", ThinkingLevel.HIGH))
     raw_mode = value.get("mode", 1)
-    if isinstance(raw_level, ThinkingLevel):
-        level = raw_level
-    elif isinstance(raw_level, int):
-        level = ThinkingLevel(raw_level)
-    else:
-        level = ThinkingLevel[str(raw_level).strip().upper()]
-    return AistudioThinkingConfig(level=level, mode=int(raw_mode)).to_wire()
+    try:
+        if isinstance(raw_level, bool) or isinstance(raw_mode, bool):
+            raise ValueError("Boolean thinking levels and modes are invalid")
+        if isinstance(raw_level, ThinkingLevel):
+            level = raw_level
+        elif isinstance(raw_level, int):
+            level = ThinkingLevel(raw_level)
+        else:
+            level = ThinkingLevel[str(raw_level).strip().upper()]
+        mode = int(raw_mode)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "generationConfig.thinkingConfig requires a valid thinkingLevel "
+            "(MINIMAL, LOW, MEDIUM or HIGH) and integer mode"
+        ) from exc
+    return AistudioThinkingConfig(level=level, mode=mode).to_wire()
 
 
 def _normalize_gemini_image_config(

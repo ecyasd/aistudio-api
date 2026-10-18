@@ -67,7 +67,9 @@ async def test_generate_image_tools_selection():
         )
 
     client.capture_request = mock_capture_request  # type: ignore[method-assign]
-    client._replay_service.replay = AsyncMock(return_value=(200, b'{"candidates": []}'))  # type: ignore[method-assign]
+    # A syntactically valid completed wire response keeps this tool-selection
+    # fixture independent from the parser's malformed-response rejection.
+    client._replay_service.replay = AsyncMock(return_value=(200, b'[[[[[[[], "model"], 1]], null, [0, 0, 0]]]]'))  # type: ignore[method-assign]
 
     # Explicit google_search=True
     await client.generate_image(

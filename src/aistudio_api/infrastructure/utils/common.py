@@ -16,10 +16,12 @@ def atomic_write_json(path: Path | str, data: object) -> None:
     target_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = target_path.with_suffix(f".tmp.{os.getpid()}_{time.time_ns()}")
     try:
-        tmp_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        descriptor = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(data, ensure_ascii=False, indent=2))
+            stream.flush()
+            os.fsync(stream.fileno())
+        tmp_path.chmod(0o600)
         tmp_path.replace(target_path)
     except Exception:
         if tmp_path.exists():

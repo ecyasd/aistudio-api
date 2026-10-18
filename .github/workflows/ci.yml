@@ -2,172 +2,158 @@ name: CI
 
 on:
   push:
-    branches:
-      - master
-      - main
+    branches: [master, main]
   pull_request:
-    branches:
-      - master
-      - main
+    branches: [master, main]
   workflow_dispatch:
+  workflow_call:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  changes:
-    name: Detect Changed Paths
-    runs-on: ubuntu-latest
-    outputs:
-      backend: ${{ steps.filter.outputs.backend }}
-      frontend: ${{ steps.filter.outputs.frontend }}
-      android: ${{ steps.filter.outputs.android }}
+  backend-check:
+    name: Full Backend and SDK Regression
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.0'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+      - name: Install exact CI dependencies
+        run: python -m pip install --requirement requirements-ci.txt
+      - name: Check dependency consistency
+        run: python -m pip check
+      - name: Lint Python
+        run: python -m ruff check .
+      - name: Type check Python
+        run: python -m pyright --pythonpath "$(command -v python)"
+      - name: Run complete isolated test suite including official SDK compatibility
+        run: python scripts/run_tests.py
 
-      - name: Path Filters
-        uses: dorny/paths-filter@v3
+  frontend-check:
+    name: Frontend Type Check, Regression and Build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.0'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install locked frontend dependencies
+        run: npm ci --prefix web --no-audit --no-fund
+      - name: Type check Vue and TypeScript
+        run: npm run --prefix web type-check
+      - name: Lint frontend
+        run: npm run --prefix web lint
+      - name: Run offline browser transport and frontend behavior regressions
+        run: npm run --prefix web test:frontend
+      - name: Build current frontend
+        run: npm run --prefix web build
+      - name: Preserve tested frontend for release assembly
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-static-${{ github.sha }}
+          path: src/aistudio_api/static/
+          if-no-files-found: error
+          retention-days: 7
+
+  build-release:
+    name: Assemble Verified Code Release
+    needs: [backend-check, frontend-check]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-static-${{ github.sha }}
+          path: dist/web-static
+      - name: Build allowlisted release and verify commit provenance
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: python scripts/build_release.py --static-dir dist/web-static --output-dir dist/release --expected-sha "$EXPECTED_SHA"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aistudio-code-${{ github.sha }}
+          path: |
+            dist/release/release.tar.gz
+            dist/release/manifest.json
+            dist/release/release.tar.gz.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  android-changes:
+    name: Detect Android Changes
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      changed: ${{ steps.filter.outputs.android }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
         id: filter
         with:
           filters: |
-            backend:
-              - 'src/aistudio_api/**'
-              - 'deploy/**'
-              - 'tests/**'
-              - 'pyproject.toml'
-              - 'uv.lock'
-              - '.github/workflows/ci.yml'
-            frontend:
-              - 'web/**'
-              - '.github/workflows/ci.yml'
             android:
               - 'android/**'
-              - '.github/workflows/ci.yml'
-
-  backend-check:
-    name: Backend Quality & Tests
-    needs: changes
-    if: ${{ needs.changes.outputs.backend == 'true' || github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          version: "latest"
-          enable-cache: true
-
-      - name: Set up Python
-        run: uv python install 3.11
-
-      - name: Install dependencies
-        run: |
-          uv venv
-          uv pip install -e ".[dev]"
-
-      - name: Run Ruff Lint
-        run: uv run --no-sync ruff check .
-
-      - name: Run Pyright Type Check
-        run: uv run --no-sync pyright
-
-      - name: Run Pytest Suite
-        run: uv run --no-sync pytest
-
-  frontend-check:
-    name: Frontend Quality & Build
-    needs: changes
-    if: ${{ needs.changes.outputs.frontend == 'true' || github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: web
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-
-      - name: Install web dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Run TypeScript Type Check
-        run: bun run type-check
-
-      - name: Run ESLint
-        run: bun run lint
-
-      - name: Verify Web Production Build
-        run: bun run build
 
   android-lint:
-    name: Android Static Analysis (Lint & ktlint)
-    needs: changes
-    if: ${{ needs.changes.outputs.android == 'true' || github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
+    name: Android Static Analysis
+    needs: android-changes
+    if: needs.android-changes.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: android
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
-          distribution: "temurin"
-          java-version: "17"
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Make gradlew executable
-        run: chmod +x gradlew
-
-      - name: Run ktlint Check
-        run: ./gradlew :app:ktlintCheck
-
-      - name: Run Android Lint
-        run: ./gradlew :app:lintDebug
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - run: chmod +x gradlew
+      - run: ./gradlew :app:ktlintCheck :app:lintDebug
 
   android-build:
     name: Android APK Build
-    needs: [changes, android-lint]
-    if: ${{ needs.changes.outputs.android == 'true' || github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
+    needs: android-lint
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: android
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
-          distribution: "temurin"
-          java-version: "17"
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Make gradlew executable
-        run: chmod +x gradlew
-
-      - name: Build Release APK
-        run: ./gradlew :app:assembleRelease
-
-      - name: Upload Release APK
-        uses: actions/upload-artifact@v4
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - run: chmod +x gradlew
+      - run: ./gradlew :app:assembleRelease
+      - uses: actions/upload-artifact@v4
         with:
           name: aistudio-extractor-apk
           path: android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
           retention-days: 7

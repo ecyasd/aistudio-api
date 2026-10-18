@@ -136,7 +136,10 @@ def test_parse_text_output_handles_double_wrapped_chunk_bundle():
         ]
     )
 
-    output = parse_text_output(raw)
+    # A full protocol response requires an explicit generation finish marker.
+    bundle = json.loads(raw)
+    bundle[0][-1][0][0].append(1)
+    output = parse_text_output(json.dumps(bundle))
 
     assert output.thinking == "先想一会儿"
     assert output.text == "答案"

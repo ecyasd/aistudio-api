@@ -3,122 +3,108 @@
     window.__AISTUDIO__ = window.__AISTUDIO__ || {};
     const streams = window.__AISTUDIO__.streams = window.__AISTUDIO__.streams || {};
     const aborts = window.__AISTUDIO__.streamAbort = window.__AISTUDIO__.streamAbort || {};
-    const existing = streams[rid];
-    if (existing && existing.abort) {
-        try { existing.abort(); } catch (e) {}
-    }
-
-    const abortController = new AbortController();
-    const state = {
-        reader: null,
-        abortController: abortController,
-    };
-    streams[rid] = state;
-
+    if (streams[rid]) streams[rid].abort();
+    const controller = new AbortController();
+    let reader = null;
+    let closed = false;
+    let timeoutId;
+    let pending = null;
+    let sequence = 0;
     function push(event) {
-        event.rid = rid;
-        if (typeof window.__aistudio_stream_push__ === 'function') {
-            try {
-                window.__aistudio_stream_push__(JSON.stringify(event));
-            } catch (e) {}
+        if (typeof window.__aistudio_stream_push__ !== 'function') {
+            throw new Error('stream binding unavailable');
         }
+        window.__aistudio_stream_push__(JSON.stringify({...event, rid}));
     }
-
-    const timeoutMs = (args.timeout || 60) * 1000;
-    let timeoutId = setTimeout(() => {
-        push({type: 'error', message: 'timeout'});
-        doAbort();
-    }, timeoutMs);
-
+    function cleanup() {
+        clearTimeout(timeoutId);
+        delete streams[rid];
+        delete aborts[rid];
+    }
+    function abort(message = 'cancelled') {
+        if (closed) return;
+        closed = true;
+        controller.abort();
+        if (reader) reader.cancel().catch(() => {});
+        if (pending) {
+            clearTimeout(pending.timer);
+            pending.reject(new Error(message));
+            pending = null;
+        }
+        try { push({type: 'error', message}); } catch (_) {}
+        cleanup();
+    }
     function resetTimeout() {
         clearTimeout(timeoutId);
-        timeoutId = setTimeout(() => {
-            push({type: 'error', message: 'timeout'});
-            doAbort();
-        }, timeoutMs);
+        timeoutId = setTimeout(() => abort('timeout'), (args.timeout || 60) * 1000);
     }
-
-    function cleanup() {
-        if (timeoutId) {
-            clearTimeout(timeoutId);
-            timeoutId = null;
-        }
-        try {
-            if (window.__AISTUDIO__?.streams) delete window.__AISTUDIO__.streams[rid];
-            if (window.__AISTUDIO__?.streamAbort) delete window.__AISTUDIO__.streamAbort[rid];
-        } catch (e) {}
+    // One unacknowledged event at a time. Python acknowledges only after its
+    // downstream consumer resumes, so a paused client also pauses reader.read.
+    function send(event) {
+        if (closed) return Promise.reject(new Error('cancelled'));
+        return new Promise((resolve, reject) => {
+            const seq = ++sequence;
+            const timer = setTimeout(() => abort('slow consumer timeout'), args.consumerTimeout * 1000);
+            pending = {seq, resolve, reject, timer};
+            try { push({...event, seq}); } catch (_) { abort('stream binding unavailable'); }
+        });
     }
-    const doAbort = function() {
-        cleanup();
-        if (state.reader) {
-            try { state.reader.cancel(); } catch (e) {}
-        }
-        if (state.abortController) {
-            try { state.abortController.abort(); } catch (e) {}
-        }
+    streams[rid] = {
+        abort,
+        ack(seq) {
+            if (!pending || pending.seq !== seq) return;
+            const current = pending;
+            pending = null;
+            clearTimeout(current.timer);
+            current.resolve();
+        },
     };
-    aborts[rid] = doAbort;
-    state.abort = doAbort;
-
-    const headers = Object.assign({}, args.headers || {});
-
-    window.fetch(args.url, {
-        method: 'POST',
-        headers: headers,
-        body: args.body,
-        credentials: 'include',
-        signal: abortController.signal,
-    }).then(response => {
-        resetTimeout();
-        push({type: 'status', status: response.status || 0});
-
-        if (!response.body) {
-            push({type: 'done'});
-            cleanup();
-            return;
-        }
-
-        const reader = response.body.getReader();
-        state.reader = reader;
-        const decoder = new TextDecoder('utf-8');
-
-        function readLoop() {
-            reader.read().then(({done, value}) => {
-                if (done) {
-                    try {
-                        const remaining = decoder.decode();
-                        if (remaining) {
-                            push({type: 'chunk', text: remaining});
-                        }
-                    } catch (e) {}
-                    push({type: 'done'});
-                    cleanup();
-                    return;
-                }
-                if (value) {
+    aborts[rid] = abort;
+    resetTimeout();
+    (async () => {
+        try {
+            const response = await window.fetch(args.url, {
+                method: 'POST',
+                headers: Object.assign({}, args.headers || {}),
+                body: args.body,
+                credentials: 'include',
+                signal: controller.signal,
+            });
+            if (closed) return;
+            resetTimeout();
+            await send({type: 'status', status: response.status || 0});
+            const decoder = new TextDecoder('utf-8', {fatal: true});
+            let size = 0;
+            if (response.body) {
+                reader = response.body.getReader();
+                while (!closed) {
+                    const {done, value} = await reader.read();
+                    if (closed) return;
+                    if (done) break;
+                    if (!value || !value.byteLength) continue;
+                    size += value.byteLength;
+                    if (value.byteLength > args.maxReadBytes || size > args.maxResponseBytes) {
+                        abort('response size limit exceeded');
+                        return;
+                    }
                     resetTimeout();
-                    const text = decoder.decode(value, {stream: true});
-                    if (text) {
-                        push({type: 'chunk', text: text});
+                    for (let offset = 0; offset < value.byteLength; offset += args.maxChunkBytes) {
+                        const text = decoder.decode(value.subarray(offset, offset + args.maxChunkBytes), {stream: true});
+                        if (text) await send({type: 'chunk', text});
                     }
                 }
-                readLoop();
-            }).catch(err => {
-                if (err && err.name === 'AbortError') {
-                    push({type: 'aborted'});
-                } else {
-                    push({type: 'error', message: (err && err.message) || 'stream read error'});
-                }
-                cleanup();
-            });
+            }
+            const remaining = decoder.decode();
+            if (remaining) await send({type: 'chunk', text: remaining});
+            if (!closed) push({type: 'done'});
+            closed = true;
+            cleanup();
+        } catch (_) {
+            abort('stream read failed');
+        } finally {
+            if (reader) {
+                try { reader.releaseLock(); } catch (_) {}
+            }
         }
-        readLoop();
-    }).catch(err => {
-        if (err && err.name === 'AbortError') {
-            push({type: 'aborted'});
-        } else {
-            push({type: 'error', message: (err && err.message) || 'network error'});
-        }
-        cleanup();
-    });
+    })();
 }

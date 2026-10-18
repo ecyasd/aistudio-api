@@ -1,0 +1,413 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [master]
+
+permissions: {}
+
+concurrency:
+  group: production
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Verify CI Provenance and Publish Immutable Release
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.repository == 'ecyasd/aistudio-api' &&
+      github.event.workflow_run.head_branch == 'master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    outputs:
+      eligible: ${{ steps.provenance.outputs.eligible }}
+      commit: ${{ steps.provenance.outputs.commit }}
+      sha256: ${{ steps.verify.outputs.sha256 }}
+    steps:
+      # No checkout: never execute code or scripts supplied by a workflow_run artifact.
+      - name: Verify the successful run and current master commit
+        id: provenance
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            core.setOutput('eligible', 'false');
+            const repo = context.repo;
+            const event = context.payload.workflow_run;
+            const name = `${repo.owner}/${repo.repo}`;
+            if (name !== 'ecyasd/aistudio-api' || !event ||
+                !/^[0-9a-f]{40}$/.test(event.head_sha)) {
+              throw new Error('Invalid deployment provenance');
+            }
+            const {data: run} = await github.rest.actions.getWorkflowRun({...repo, run_id: event.id});
+            const {data: repository} = await github.rest.repos.get(repo);
+            if (run.status !== 'completed' || run.conclusion !== 'success' ||
+                run.event !== 'push' || run.head_branch !== 'master' ||
+                run.head_repository?.full_name !== name ||
+                run.head_sha !== event.head_sha || run.path !== '.github/workflows/ci.yml' ||
+                repository.default_branch !== 'master') {
+              throw new Error('The source CI run is not an eligible master deployment');
+            }
+            const {data: branch} = await github.rest.repos.getBranch({...repo, branch: 'master'});
+            if (branch.commit.sha !== run.head_sha) {
+              await core.summary.addHeading('Deployment skipped')
+                .addRaw('A newer master commit exists; the older CI build will not be deployed.').write();
+              return;
+            }
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts,
+              {...repo, run_id: run.id, per_page: 100});
+            const matches = artifacts.filter(item => item.name === `aistudio-code-${run.head_sha}`);
+            if (matches.length !== 1 || matches[0].expired || matches[0].size_in_bytes > 80 * 1024 * 1024) {
+              throw new Error('One bounded, unexpired verified code artifact is required');
+            }
+            core.setOutput('commit', run.head_sha);
+            core.setOutput('eligible', 'true');
+            await core.summary.addHeading('Verified source')
+              .addRaw(`Commit: \`${run.head_sha}\`\n\nCI run: ${run.id}`).write();
+
+      - name: Download only the verified CI artifact
+        if: steps.provenance.outputs.eligible == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: aistudio-code-${{ steps.provenance.outputs.commit }}
+          path: ${{ runner.temp }}/aistudio-release
+          run-id: ${{ github.event.workflow_run.id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate the release checksum, manifest and code allowlist
+        id: verify
+        if: steps.provenance.outputs.eligible == 'true'
+        env:
+          DEPLOY_COMMIT: ${{ steps.provenance.outputs.commit }}
+          ARTIFACT_DIR: ${{ runner.temp }}/aistudio-release
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          import tarfile
+          from pathlib import Path, PurePosixPath
+
+          def require(condition):
+              if not condition:
+                  raise SystemExit('Release validation failed')
+
+          root = Path(os.environ['ARTIFACT_DIR'])
+          commit = os.environ['DEPLOY_COMMIT']
+          require(re.fullmatch(r'[0-9a-f]{40}', commit))
+          names = {'release.tar.gz', 'release.tar.gz.sha256', 'manifest.json'}
+          require(not root.is_symlink() and root.is_dir())
+          require({item.name for item in root.iterdir()} == names)
+          for name in names:
+              require(not (root / name).is_symlink() and (root / name).is_file())
+          archive = root / 'release.tar.gz'
+          require(archive.stat().st_size <= 64 * 1024 * 1024)
+          require((root / 'manifest.json').stat().st_size <= 2 * 1024 * 1024)
+          require((root / 'release.tar.gz.sha256').stat().st_size <= 100)
+          digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+          require((root / 'release.tar.gz.sha256').read_text(encoding='ascii') == digest + '  release.tar.gz\n')
+          manifest_bytes = (root / 'manifest.json').read_bytes()
+          manifest = json.loads(manifest_bytes)
+          require(isinstance(manifest, dict) and set(manifest) == {'version', 'commit', 'files'})
+          require(type(manifest['version']) is int and manifest['version'] == 1 and manifest['commit'] == commit)
+          require(isinstance(manifest['files'], list) and 0 < len(manifest['files']) <= 512)
+          forbidden = {'.git', 'node_modules', '__pycache__', 'accounts', 'sessions', 'data',
+                       'config.yaml', 'secrets.json', 'auth.json', 'cookies.json', 'registry.json', 'stats.json'}
+          static_suffixes = {'.html', '.js', '.css', '.svg', '.png', '.jpg', '.webp', '.ico', '.woff', '.woff2'}
+          expected = {}
+          for item in manifest['files']:
+              require(isinstance(item, dict) and set(item) == {'path', 'sha256', 'mode'})
+              name = item['path']
+              require(isinstance(name, str) and len(name) <= 200 and '\\' not in name)
+              path = PurePosixPath(name)
+              require(not path.is_absolute() and path.as_posix() == name and '..' not in path.parts)
+              require(not any(piece.casefold() in forbidden or piece.casefold().startswith('.env') for piece in path.parts))
+              allowed = (name == 'runtime/public_access_guard.py' or
+                         (name.startswith('src/aistudio_api/static/') and path.suffix in static_suffixes) or
+                         (name.startswith('src/aistudio_api/') and path.suffix in {'.py', '.js'}))
+              require(allowed and name not in expected and type(item['mode']) is int and item['mode'] == 420)
+              require(isinstance(item['sha256'], str) and re.fullmatch(r'[0-9a-f]{64}', item['sha256']))
+              expected[name] = item['sha256']
+          require({'src/aistudio_api/__init__.py', 'src/aistudio_api/static/index.html',
+                   'runtime/public_access_guard.py'} <= expected.keys())
+          seen = set()
+          total = 0
+          with tarfile.open(archive, mode='r|gz') as tar:
+              for member in tar:
+                  require(member.isfile() and member.name not in seen and not member.pax_headers)
+                  require(0 <= member.size <= 8 * 1024 * 1024)
+                  total += member.size
+                  require(total <= 64 * 1024 * 1024 and len(seen) < 513)
+                  require(member.name == 'manifest.json' or member.name in expected)
+                  require(member.mode == 420)
+                  content = tar.extractfile(member).read(8 * 1024 * 1024 + 1)
+                  require(len(content) == member.size)
+                  if member.name == 'manifest.json':
+                      require(content == manifest_bytes)
+                  else:
+                      require(hashlib.sha256(content).hexdigest() == expected[member.name])
+                  seen.add(member.name)
+          require(seen == set(expected) | {'manifest.json'})
+          with Path(os.environ['GITHUB_OUTPUT']).open('a', encoding='utf-8') as output:
+              output.write('sha256=' + digest + '\n')
+          print(json.dumps({'commit': commit, 'sha256': digest, 'files': len(expected), 'validated': True}))
+          PY
+
+      - name: Publish or verify the immutable commit release
+        id: release
+        if: steps.provenance.outputs.eligible == 'true'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        env:
+          DEPLOY_COMMIT: ${{ steps.provenance.outputs.commit }}
+          ARTIFACT_SHA256: ${{ steps.verify.outputs.sha256 }}
+          ARTIFACT_DIR: ${{ runner.temp }}/aistudio-release
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const crypto = require('crypto');
+            const sha = process.env.DEPLOY_COMMIT;
+            const digest = process.env.ARTIFACT_SHA256;
+            if (!/^[0-9a-f]{40}$/.test(sha) || !/^[0-9a-f]{64}$/.test(digest)) {
+              throw new Error('Invalid release identifiers');
+            }
+            const repo = context.repo;
+            const tag = `deploy-${sha}`;
+            let release;
+            try {
+              ({data: release} = await github.rest.repos.getReleaseByTag({...repo, tag}));
+            } catch (error) {
+              if (error.status !== 404) throw new Error('Unable to inspect the commit release');
+              ({data: release} = await github.rest.repos.createRelease({...repo, tag_name: tag,
+                target_commitish: sha, name: tag, draft: false, prerelease: false, make_latest: 'false',
+                body: `Code artifact verified by CI for commit ${sha}.\nSHA256: ${digest}`}));
+            }
+            if (release.draft || release.prerelease) throw new Error('Unexpected commit release state');
+            let {data: ref} = await github.rest.git.getRef({...repo, ref: `tags/${tag}`});
+            let target = ref.object;
+            for (let depth = 0; target.type === 'tag' && depth < 4; depth++) {
+              const {data: annotated} = await github.rest.git.getTag({...repo, tag_sha: target.sha});
+              target = annotated.object;
+            }
+            if (target.type !== 'commit' || target.sha !== sha) throw new Error('Release tag does not match the tested commit');
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets,
+              {...repo, release_id: release.id, per_page: 100});
+            const missing = [];
+            for (const name of ['release.tar.gz', 'release.tar.gz.sha256']) {
+              const local = fs.readFileSync(path.join(process.env.ARTIFACT_DIR, name));
+              const matches = assets.filter(asset => asset.name === name);
+              if (matches.length > 1) throw new Error('Duplicate release assets are forbidden');
+              if (!matches.length) { missing.push({name, data: local}); continue; }
+              if (matches[0].state !== 'uploaded' || matches[0].size !== local.length) {
+                throw new Error('Existing release asset does not match the verified artifact');
+              }
+              const response = await github.rest.repos.getReleaseAsset({...repo, asset_id: matches[0].id,
+                headers: {accept: 'application/octet-stream'}});
+              const existing = Buffer.from(response.data);
+              const hash = value => crypto.createHash('sha256').update(value).digest('hex');
+              if (hash(existing) !== hash(local)) throw new Error('Existing release asset checksum differs; refusing replacement');
+            }
+            // Verify every existing asset before uploading any missing one. Never delete or clobber.
+            for (const asset of missing) {
+              await github.rest.repos.uploadReleaseAsset({...repo, release_id: release.id,
+                name: asset.name, data: asset.data,
+                headers: {'content-type': 'application/octet-stream', 'content-length': asset.data.length}});
+            }
+            await core.summary.addHeading('Immutable release')
+              .addRaw(`Tag: \`${tag}\`\n\nSHA256: \`${digest}\``).write();
+
+      - name: Record release preparation outcome
+        if: always()
+        env:
+          PREPARATION_STATUS: ${{ job.status }}
+          PREPARATION_ELIGIBLE: ${{ steps.provenance.outputs.eligible }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          status = os.environ.get('PREPARATION_STATUS')
+          if status not in {'success', 'failure', 'cancelled'}:
+              status = 'unknown'
+          outcome = 'skipped (master advanced)' if status == 'success' and os.environ.get('PREPARATION_ELIGIBLE') != 'true' else status
+          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a', encoding='utf-8') as output:
+              output.write('\nRelease preparation: **' + outcome + '**.\n')
+          PY
+
+  deploy:
+    name: Deploy Verified Commit Through Restricted SSM Document
+    needs: publish
+    if: needs.publish.outputs.eligible == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      DEPLOY_COMMIT: ${{ needs.publish.outputs.commit }}
+      ARTIFACT_SHA256: ${{ needs.publish.outputs.sha256 }}
+      AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+      AWS_DEPLOY_DOCUMENT: ${{ vars.AWS_DEPLOY_DOCUMENT }}
+      AWS_DEPLOY_REGION: ${{ vars.AWS_DEPLOY_REGION }}
+      AWS_DEPLOY_NODE_ID: ${{ vars.AWS_DEPLOY_NODE_ID }}
+      AWS_PAGER: ''
+      AWS_CLI_AUTO_PROMPT: 'off'
+    steps:
+      - name: Recheck master freshness and required deployment configuration
+        id: ready
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            core.setOutput('current', 'false');
+            const sha = process.env.DEPLOY_COMMIT;
+            if (!/^[0-9a-f]{40}$/.test(sha) || !/^[0-9a-f]{64}$/.test(process.env.ARTIFACT_SHA256)) {
+              throw new Error('Invalid deployment identifiers');
+            }
+            const {data: branch} = await github.rest.repos.getBranch({...context.repo, branch: 'master'});
+            if (branch.commit.sha !== sha) {
+              await core.summary.addHeading('Deployment skipped')
+                .addRaw('Master advanced after release publication; no server command was sent.').write();
+              return;
+            }
+            const patterns = {
+              AWS_DEPLOY_ROLE_ARN: /^arn:aws:iam::[0-9]{12}:role\/[A-Za-z0-9+=,.@_/-]+$/,
+              AWS_DEPLOY_DOCUMENT: /^[A-Za-z0-9_.-]{3,128}$/,
+              AWS_DEPLOY_REGION: /^[a-z]{2}(?:-[a-z0-9]+)+-[0-9]$/,
+              AWS_DEPLOY_NODE_ID: /^(?:i-(?:[0-9a-f]{8}|[0-9a-f]{17})|mi-[0-9a-f]{17})$/,
+            };
+            for (const [name, pattern] of Object.entries(patterns)) {
+              if (!pattern.test(process.env[name] || '')) throw new Error(`Missing or invalid repository variable: ${name}`);
+            }
+            core.setOutput('current', 'true');
+
+      # workflow_run runs on the default branch. No Environment is used.
+      # IAM must match this repository's actual master-branch OIDC subject,
+      # including immutable owner/repository IDs when that claim format applies.
+      - name: Assume the restricted AWS deployment role through OIDC
+        if: steps.ready.outputs.current == 'true'
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_DEPLOY_REGION }}
+          role-session-name: github-deploy-${{ github.run_id }}
+          role-duration-seconds: 900
+          mask-aws-account-id: true
+          unset-current-credentials: true
+          output-credentials: false
+
+      - name: Run the fixed deployment document and wait for verified health
+        id: ssm
+        if: steps.ready.outputs.current == 'true'
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import time
+          from pathlib import Path
+
+          commit = os.environ['DEPLOY_COMMIT']
+          digest = os.environ['ARTIFACT_SHA256']
+          document = os.environ['AWS_DEPLOY_DOCUMENT']
+          node = os.environ['AWS_DEPLOY_NODE_ID']
+          region = os.environ['AWS_DEPLOY_REGION']
+          summary = Path(os.environ['GITHUB_STEP_SUMMARY'])
+
+          def note(text):
+              with summary.open('a', encoding='utf-8') as output:
+                  output.write(text + '\n\n')
+
+          def aws(operation, *arguments):
+              result = subprocess.run(
+                  ['aws', 'ssm', operation, *arguments, '--region', region, '--output', 'json',
+                   '--no-cli-pager', '--cli-connect-timeout', '10', '--cli-read-timeout', '20'],
+                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=35,
+              )
+              if result.returncode:
+                  if operation == 'get-command-invocation' and 'InvocationDoesNotExist' in result.stderr:
+                      return None
+                  raise RuntimeError('Restricted SSM API request failed')
+              return json.loads(result.stdout)
+
+          try:
+              parameters = json.dumps({'CommitSha': [commit], 'ArtifactSha256': [digest]})
+              response = aws('send-command', '--document-name', document, '--instance-ids', node,
+                             '--parameters', parameters, '--timeout-seconds', '600',
+                             '--max-concurrency', '1', '--max-errors', '0',
+                             '--comment', 'GitHub verified deployment ' + commit)
+              command_id = response['Command']['CommandId']
+              if not re.fullmatch(r'[0-9a-f-]{36}', command_id):
+                  raise RuntimeError('Unexpected SSM command identifier')
+              note('## Server deployment\n\nCommit: `' + commit + '`\n\nSSM command: `' + command_id + '`')
+              deadline = time.monotonic() + 600
+              previous = None
+              invocation = None
+              while time.monotonic() < deadline:
+                  invocation = aws('get-command-invocation', '--command-id', command_id, '--instance-id', node)
+                  if invocation is None:
+                      time.sleep(5)
+                      continue
+                  status = invocation.get('Status')
+                  if status not in {'Pending', 'InProgress', 'Delayed', 'Cancelling', 'Success', 'Cancelled', 'Failed', 'TimedOut'}:
+                      raise RuntimeError('Unexpected SSM execution status')
+                  if status != previous:
+                      print(json.dumps({'ssm_status': status}))
+                      previous = status
+                  if status in {'Success', 'Cancelled', 'Failed', 'TimedOut'}:
+                      break
+                  time.sleep(5)
+              else:
+                  raise RuntimeError('Server deployment exceeded its ten-minute result deadline')
+              if invocation.get('Status') != 'Success' or invocation.get('ResponseCode') != 0:
+                  raise RuntimeError('Server deployment did not finish successfully')
+              # Only the fixed deployer's single JSON response is accepted. Raw
+              # stdout, stderr, journal output and exception arguments are never printed.
+              content = invocation.get('StandardOutputContent', '').strip()
+              if len(content) > 8192:
+                  raise RuntimeError('Unexpected deployment result size')
+              result = json.loads(content)
+              checks = result.get('checks')
+              rollback = result.get('rollbackCommit')
+              if not (result.get('ok') is True and result.get('commit') == commit and
+                      result.get('sha256') == digest and result.get('status') in {'deployed', 'already_current'} and
+                      isinstance(checks, dict) and checks and all(value is True for value in checks.values()) and
+                      (rollback is None or (isinstance(rollback, str) and re.fullmatch(r'[0-9a-f]{40}', rollback)))):
+                  raise RuntimeError('Server result failed commit, checksum or health verification')
+              safe = {'ok': True, 'commit': commit, 'sha256': digest, 'status': result['status'],
+                      'checks': {'all_passed': True}, 'rollbackCommit': rollback}
+              print(json.dumps(safe, sort_keys=True))
+              note('Verified server result:\n```json\n' + json.dumps(safe, sort_keys=True) + '\n```')
+          except Exception:
+              note('**Deployment failed.** Inspect the SSM command status through the restricted administrative path. '
+                   'Server output and credentials were omitted from this workflow log.')
+              raise SystemExit('Deployment failed; no raw server output was disclosed') from None
+          PY
+
+      - name: Record workflow outcome
+        if: always()
+        env:
+          DEPLOY_JOB_STATUS: ${{ job.status }}
+          DEPLOY_CURRENT: ${{ steps.ready.outputs.current }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          status = os.environ.get('DEPLOY_JOB_STATUS')
+          if status not in {'success', 'failure', 'cancelled'}:
+              status = 'unknown'
+          outcome = 'skipped (master advanced)' if status == 'success' and os.environ.get('DEPLOY_CURRENT') != 'true' else status
+          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a', encoding='utf-8') as output:
+              output.write('\nWorkflow outcome: **' + outcome + '**.\n')
+          PY

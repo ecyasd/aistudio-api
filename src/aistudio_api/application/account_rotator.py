@@ -359,6 +359,11 @@ class AccountRotator:
 
     默认保持当前激活账号，直到特定模型遇到 429 配额耗尽时，
     自动切换到该模型今日仍有额度的下一个健康账号。
+
+    Owned by the application's single event-loop thread. Record mutations,
+    snapshots and atomic file writes are synchronous and contain no await;
+    they cannot interleave with another coroutine. The async selection lock
+    protects selection across callers, not a separate persistence thread.
     """
 
     def __init__(self, account_store: AccountStore) -> None:

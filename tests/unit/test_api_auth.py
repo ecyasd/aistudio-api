@@ -6,6 +6,14 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 
 from aistudio_api.api.dependencies import require_api_key, require_web_auth
 from aistudio_api.config import settings
+from aistudio_api.infrastructure.gateway import model_defaults
+
+
+@pytest.fixture(autouse=True)
+def dynamic_keys(monkeypatch):
+    keys = {"secret-token"}
+    monkeypatch.setattr(model_defaults, "get_configured_api_keys", lambda: keys)
+    return keys
 
 
 def _build_client() -> httpx.AsyncClient:
@@ -21,12 +29,12 @@ def _build_client() -> httpx.AsyncClient:
 
 
 @pytest.mark.asyncio
-async def test_auth_is_disabled_when_no_api_key_is_configured(monkeypatch):
+async def test_empty_dynamic_keys_fail_closed(monkeypatch, dynamic_keys):
+    dynamic_keys.clear()
     monkeypatch.setattr(settings, "api_keys", frozenset())
     async with _build_client() as client:
         response = await client.get("/protected")
-        assert response.status_code == 200
-        assert response.json() == {"ok": True}
+        assert response.status_code == 401
 
 
 @pytest.mark.asyncio
@@ -103,7 +111,9 @@ def test_dependencies_timing_safe_auth(monkeypatch):
     req_admin_api = MagicMock(spec=Request)
     req_admin_api.headers = {"x-api-key": "super_secret_admin_pass"}
     req_admin_api.query_params = {}
-    require_api_key(req_admin_api)
+    with pytest.raises(HTTPException) as exc_info:
+        require_api_key(req_admin_api)
+    assert exc_info.value.status_code == 401
 
     # Empty web_password guard
     monkeypatch.setattr(settings, "web_password", "")
@@ -125,3 +135,37 @@ def test_require_web_auth_rejects_html_accept_spoofing(monkeypatch):
     with pytest.raises(HTTPException) as exc_info:
         require_web_auth(req_spoof)
     assert exc_info.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_static_keys_and_admin_equal_dynamic_key_cannot_call(monkeypatch, dynamic_keys):
+    monkeypatch.setattr(settings, "api_keys", frozenset({"old-static"}))
+    monkeypatch.setattr(settings, "web_password", "admin-only")
+    dynamic_keys.add("admin-only")
+    async with _build_client() as client:
+        for value in ("old-static", "admin-only", "错误密钥"):
+            response = await client.get("/protected", params={"key": value})
+            assert response.status_code == 401
+
+
+def test_management_only_accepts_bearer_without_sensitive_query(monkeypatch):
+    monkeypatch.setattr(settings, "web_password", "admin-only")
+    for headers, query in (
+        ({"x-api-key": "admin-only"}, {}),
+        ({}, {"key": "admin-only"}),
+        ({"authorization": "Bearer admin-only"}, {"password": "anything"}),
+    ):
+        req = MagicMock(spec=Request, headers=headers, query_params=query)
+        with pytest.raises(HTTPException) as error:
+            require_web_auth(req)
+        assert error.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_dynamic_configuration_failure_fails_closed(monkeypatch):
+    def failed():
+        raise OSError("synthetic configuration read failure")
+    monkeypatch.setattr(model_defaults, "get_configured_api_keys", failed)
+    async with _build_client() as client:
+        response = await client.get("/protected", params={"key": "secret-token"})
+        assert response.status_code == 401

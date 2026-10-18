@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import time
+from copy import deepcopy
 from pathlib import Path
+
+from fastapi import HTTPException
 
 from aistudio_api.api.state import runtime_state
 from aistudio_api.infrastructure.utils.logger import get_logger
@@ -168,7 +171,7 @@ async def try_switch_account(
             except Exception as exc:
                 raise AccountPreparationError(next_account.id, exc) from exc
             if result is not None:
-                rotator.clear_cooldown(next_account.id, model=model)
+                rotator.clear_auth_lockout(next_account.id)
                 _last_switch_time = time.time()
             return result is not None
         # 登录态失效严禁在原账号原地重试
@@ -195,7 +198,7 @@ async def try_switch_account(
             except Exception as exc:
                 raise AccountPreparationError(current_id, exc) from exc
             if result is not None:
-                rotator.clear_cooldown(current_id, model=model)
+                rotator.clear_auth_lockout(current_id)
                 _last_switch_time = time.time()
             return result is not None
         return bool(
@@ -203,29 +206,71 @@ async def try_switch_account(
         )
 
 
-async def ensure_active_account(attempt: int, model: str | None = None) -> None:
-    """确保在初次尝试时存在活跃账号，且该账号对目标模型可用。"""
-    if attempt != 0:
+def validate_account_availability(model: str | None = None) -> None:
+    """Check admission without starting a browser or changing daily counters."""
+    account_service = runtime_state.account_service
+    rotator = runtime_state.rotator
+    if account_service is None or rotator is None:
+        raise HTTPException(503, detail="Account service is not ready")
+    accounts = account_service.list_accounts()
+    if not accounts:
+        raise HTTPException(503, detail="No accounts configured. Please import an account.")
+    stats = [rotator.get_account_stats(account.id) for account in accounts]
+    # A temporary auth failure may still use the existing isolated refresh
+    # path. Expired credentials and model cooldowns must never bypass admission.
+    if any(
+        item is None
+        or deepcopy(item).is_available(model, ignore_auth_cooldown=True)
+        for item in stats
+    ):
         return
+    if all(item is not None and item.session_expired for item in stats):
+        raise HTTPException(
+            503,
+            detail={
+                "message": "The API key is valid, but all upstream Google sessions have expired. Visit the management page to import fresh cookies; keep the current API key.",
+                "type": "upstream_auth_expired",
+            },
+        )
+    raise HTTPException(
+        429,
+        detail={
+            "message": f"No accounts are currently available for model '{model}'.",
+            "type": "rate_limit_exceeded",
+        },
+    )
+
+
+async def ensure_active_account(attempt: int, model: str | None = None) -> None:
+    """Select a usable account before every attempt, including retry races."""
+    logger.debug("Preparing an available account: attempt=%d", attempt + 1)
+    validate_account_availability(model)
     account_svc = runtime_state.account_service
     rotator = runtime_state.rotator
     current = account_svc.get_active_account() if account_svc else None
     if not current:
-        await try_switch_account(model=model)
-    elif (
-        rotator and model and not rotator.is_account_available(current.id, model=model)
-    ):
+        switched = await try_switch_account(model=model)
+        if not switched:
+            raise HTTPException(503, detail="Could not prepare an available account")
+    elif rotator and not rotator.is_account_available(current.id, model=model):
         # 当前账号对该模型已限流，提前切号
-        await try_switch_account(model=model, failed_account_id=current.id)
+        switched = await try_switch_account(model=model, failed_account_id=current.id)
+        if not switched:
+            validate_account_availability(model)
+            raise HTTPException(503, detail="Could not prepare an available account")
 
     # Registry selection and browser initialization are separate. Resolve the
     # active path lazily so accounts imported after process startup also work.
     async with _get_switch_lock():
         account_svc = runtime_state.account_service
         client = runtime_state.client
+        rotator = runtime_state.rotator
         current = account_svc.get_active_account() if account_svc else None
-        if account_svc is None or client is None or current is None:
-            return
+        if account_svc is None or client is None or current is None or rotator is None:
+            raise HTTPException(503, detail="Account service is not ready")
+        if not rotator.is_account_available(current.id, model=model):
+            validate_account_availability(model)
+            raise HTTPException(503, detail="Selected account is no longer available")
         session = client.session
         auth_path = account_svc.get_account_auth_path(current.id)
         if auth_path is None:
@@ -238,6 +283,11 @@ async def ensure_active_account(attempt: int, model: str | None = None) -> None:
                 raise
             except Exception as exc:
                 raise AccountPreparationError(current.id, exc) from exc
+        # Browser preparation yields to other requests. A concurrent failure
+        # can quarantine this account while its context is being prepared.
+        if not rotator.is_account_available(current.id, model=model):
+            validate_account_availability(model)
+            raise HTTPException(503, detail="Selected account is no longer available")
 
 
 def account_id_for_auth_file(auth_file: str | None) -> str | None:
@@ -282,4 +332,5 @@ __all__ = [
     "ensure_active_account",
     "record_rotator_event",
     "try_switch_account",
+    "validate_account_availability",
 ]

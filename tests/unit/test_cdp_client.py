@@ -71,6 +71,30 @@ async def test_cdp_connection_error_handling():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("during_send", [False, True])
+async def test_cdp_cancellation_releases_pending_future_without_closing_connection(
+    during_send,
+):
+    conn = CDPConnection("ws://synthetic.invalid")
+    conn.ws = AsyncMock()
+    sent = asyncio.Event()
+
+    async def send(_text):
+        sent.set()
+        if during_send:
+            await asyncio.Event().wait()
+
+    conn.ws.send.side_effect = send
+    task = asyncio.create_task(conn.send("Runtime.evaluate", {"expression": "1"}))
+    await sent.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert conn._futures == {}
+    assert conn._closed is False
+
+
+@pytest.mark.asyncio
 async def test_cdp_page_blocked_urls_configuration():
     """Test CDPPage sets blocked URLs on Network domain."""
     conn = MagicMock(spec=CDPConnection)

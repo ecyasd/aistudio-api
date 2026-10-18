@@ -222,6 +222,10 @@ class CDPConnection:
         }
         try:
             await self.ws.send(json.dumps(payload))
+        except asyncio.CancelledError:
+            self._futures.pop(req_id, None)
+            fut.cancel()
+            raise
         except Exception as e:
             self._closed = True
             self._futures.pop(req_id, None)
@@ -252,8 +256,10 @@ class CDPConnection:
                 except TimeoutError:
                     if fut.done():
                         return fut.result()
-        except Exception:
+        except BaseException:
             self._futures.pop(req_id, None)
+            if not fut.done():
+                fut.cancel()
             raise
 
     def on(
