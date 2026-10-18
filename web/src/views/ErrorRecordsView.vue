@@ -230,6 +230,12 @@ onUnmounted(errorsStore.cancel)
                   {{ categoryLabel(record.category) }}
                 </p>
                 <p
+                  v-if="record.code && record.code !== record.category"
+                  class="mt-1 text-[11px] text-gray-500 font-mono break-all whitespace-normal"
+                >
+                  {{ record.code }}
+                </p>
+                <p
                   v-if="record.transport_status != null && record.transport_status !== record.status"
                   class="mt-1 text-[11px] text-gray-400"
                 >
@@ -327,6 +333,13 @@ onUnmounted(errorsStore.cancel)
               错误码
             </dt><dd class="mt-1 font-mono text-gray-800">
               {{ selected.status }}
+            </dd>
+          </div>
+          <div>
+            <dt class="text-gray-400">
+              诊断代码
+            </dt><dd class="mt-1 font-mono text-gray-800 break-all">
+              {{ selected.code || selected.category }}
             </dd>
           </div>
           <div>

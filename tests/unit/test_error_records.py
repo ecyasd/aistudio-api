@@ -12,6 +12,8 @@ from fastapi import FastAPI
 
 from aistudio_api.api import routes_errors
 from aistudio_api.domain.errors import (
+    AccountIdentityMismatchError,
+    AccountIdentityUnavailableError,
     AuthError,
     RequestError,
     SessionExpiredError,
@@ -83,6 +85,67 @@ def test_error_categories_have_stable_safe_descriptions(store, exc, status, cate
     event = _failure(store, exc)
     assert (event["status"], event["category"]) == (status, category)
     assert "synthetic" not in event["summary"]
+
+
+@pytest.mark.parametrize(("error_type", "code", "summary"), [
+    (AccountIdentityMismatchError, "upstream_account_mismatch", "身份与所选账号不一致"),
+    (AccountIdentityUnavailableError, "upstream_account_unavailable", "身份暂时无法核验"),
+])
+def test_identity_errors_have_distinct_safe_codes_without_evaluating_messages(
+    store, error_type, code, summary,
+):
+    class SensitiveIdentityError(error_type):
+        def __str__(self):
+            raise AssertionError("Identity diagnostics must not read exception messages")
+
+    event = _failure(store, SensitiveIdentityError("SYNTHETIC_EMAIL_SECRET"))
+    assert (event["status"], event["category"], event["code"]) == (503, "authentication", code)
+    assert summary in event["summary"]
+    assert "SYNTHETIC_EMAIL_SECRET" not in json.dumps(event)
+
+
+def test_http_wrapper_preserves_typed_identity_and_relative_origin_frame(store):
+    from fastapi import HTTPException
+
+    namespace = {"AccountIdentityMismatchError": AccountIdentityMismatchError}
+    exec(compile(
+        "def prepare():\n    raise AccountIdentityMismatchError('SYNTHETIC_EMAIL_SECRET')\n",
+        "/private/SYNTHETIC_PATH_SECRET/aistudio_api/infrastructure/gateway/session_auth.py", "exec",
+    ), namespace)
+    try:
+        try:
+            namespace["prepare"]()
+        except AccountIdentityMismatchError as original:
+            raise HTTPException(503, "SYNTHETIC_HTTP_SECRET") from original
+    except HTTPException as wrapped:
+        event = _failure(store, wrapped, http_status=503)
+    assert event["exception_type"] == "AccountIdentityMismatchError"
+    assert event["code"] == "upstream_account_mismatch"
+    assert event["frames"] == [{
+        "file": "aistudio_api/infrastructure/gateway/session_auth.py", "line": 2, "function": "prepare",
+    }]
+    assert "SYNTHETIC" not in json.dumps(event)
+
+
+def test_identity_error_keeps_its_type_when_chained_from_internal_failure(store):
+    try:
+        try:
+            raise RuntimeError("SYNTHETIC_ORIGINAL_SECRET")
+        except RuntimeError as original:
+            raise AccountIdentityUnavailableError("SYNTHETIC_EMAIL_SECRET") from original
+    except AccountIdentityUnavailableError as error:
+        event = _failure(store, error)
+    assert event["code"] == "upstream_account_unavailable"
+    assert event["exception_type"] == "AccountIdentityUnavailableError"
+    assert "SYNTHETIC" not in json.dumps(event)
+
+
+def test_arbitrary_exception_codes_cannot_enter_diagnostics(store):
+    error = RuntimeError("SYNTHETIC_SECRET")
+    error.code = "SYNTHETIC_PRIVATE_CODE"
+    event = _failure(store, error)
+    assert event["code"] == "internal"
+    assert "SYNTHETIC" not in json.dumps(event)
 
 
 def test_index_error_contains_only_relative_source_locations(store):

@@ -2,24 +2,30 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import re
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
-from urllib.parse import urlsplit
+from typing import Literal
+from urllib.parse import parse_qs, urlsplit
 
-from aistudio_api.domain.errors import SessionExpiredError
+from aistudio_api.domain.errors import (
+    AccountIdentityMismatchError,
+    AccountIdentityUnavailableError,
+    SessionExpiredError,
+)
 from aistudio_api.infrastructure.account.storage_state import (
     atomic_write_json,
     auth_file_version,
 )
 from aistudio_api.infrastructure.browser.cdp_client import CDPPage
 from aistudio_api.infrastructure.browser.scripts import (
-    CHECK_IDENTITY_JS,
+    ACCOUNT_IDENTITY_JS,
     EXTRACT_EMAIL_JS,
 )
-from aistudio_api.infrastructure.utils.common import mask_email
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 log = get_logger("session.auth")
@@ -159,79 +165,65 @@ async def extract_account_email(page: CDPPage | None) -> str | None:
     return None
 
 
-async def verify_account_identity(page: CDPPage, auth_file: str | None) -> bool:
-    """Verify currently loaded account matches metadata in auth_file."""
+IdentityStatus = Literal["verified", "mismatch", "unavailable"]
+
+
+async def _account_identity_status(page: CDPPage, auth_file: str | None) -> IdentityStatus:
+    """Compare live active-account evidence without guessing from unrelated DOM."""
     if not auth_file:
-        return True
+        bound_file = vars(page).get("_auth_file_path")
+        auth_file = bound_file if isinstance(bound_file, str) else None
+    if not auth_file:
+        # Unpinned pages are used only by explicit account-email discovery.
+        # Request contexts always supply their account metadata.
+        return "verified"
     meta_path = Path(auth_file).parent / "meta.json"
-    if not meta_path.exists():
-        return True
     try:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if not isinstance(meta, dict):
+            return "unavailable"
+        auth_user = str(meta.get("auth_user", "0"))
+        expected_email = meta.get("email") or ""
+        if not re.fullmatch(r"[0-9]+", auth_user) or not isinstance(expected_email, str):
+            return "unavailable"
+        expected_email = expected_email.strip().lower()
+        snapshot = await page.evaluate(ACCOUNT_IDENTITY_JS, timeout_s=2.0)
     except Exception:
-        return True
+        return "unavailable"
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("url"), str):
+        return "unavailable"
+    try:
+        current = urlsplit(snapshot["url"])
+        if (
+            current.scheme != "https"
+            or current.hostname != "aistudio.google.com"
+            or is_login_page_url(snapshot["url"])
+        ):
+            return "unavailable"
+        route = re.match(r"^/u/([0-9]+)(?:/|$)", current.path)
+        if current.path.startswith("/u/") and not route:
+            return "unavailable"
+        query = parse_qs(current.query, keep_blank_values=True).get("authuser", [])
+        if len(query) > 1 or (query and not re.fullmatch(r"[0-9]+", query[0])):
+            return "unavailable"
+        if route and query and int(route[1]) != int(query[0]):
+            return "unavailable"
+        actual_user = int(route[1] if route else query[0] if query else "0")
+        if actual_user != int(auth_user):
+            return "mismatch"
+    except (ValueError, TypeError):
+        return "unavailable"
+    discovered = snapshot.get("email")
+    if not isinstance(discovered, str) or "@" not in discovered:
+        return "unavailable"
+    if expected_email and discovered.strip().lower() != expected_email:
+        return "mismatch"
+    return "verified"
 
-    account_id = meta.get("id", "unknown")
-    auth_user = str(meta.get("auth_user") or "0")
 
-    curr_url = str(getattr(page, "url", "") or "")
-    is_on_correct_user = (
-        f"/u/{auth_user}/" in curr_url
-        if auth_user != "0"
-        else ("/u/0/" in curr_url or "/u/" not in curr_url)
-    )
-
-    expected_email = (meta.get("email") or "").strip().lower()
-    discovered_email = await extract_account_email(page) if is_on_correct_user else None
-
-    if not expected_email and is_on_correct_user and discovered_email:
-        log.info(
-            "已自动识别账号 %s (u/%s) 登录邮箱: %s",
-            account_id,
-            auth_user,
-            mask_email(discovered_email),
-        )
-        expected_email = discovered_email.strip().lower()
-
-    if not expected_email:
-        return is_on_correct_user
-
-    if (
-        discovered_email
-        and discovered_email.strip().lower() == expected_email
-        and is_on_correct_user
-    ):
-        return True
-
-    if (
-        discovered_email
-        and discovered_email.strip().lower() != expected_email
-    ):
-        log.warning(
-            "[account-guard] 页面检测到不同账号 %s (期望 %s, acc_id=%s, u/%s, url=%s)，跳过本次 Cookie 回写以防覆盖",
-            mask_email(discovered_email),
-            mask_email(expected_email),
-            account_id,
-            auth_user,
-            curr_url,
-        )
-        return False
-
-    if not is_on_correct_user:
-        return False
-
-    is_verified = False
-    with suppress(Exception):
-        is_verified = bool(
-            await page.evaluate(
-                CHECK_IDENTITY_JS,
-                # Python already checks the route. Do not let the JS helper's
-                # route-only fallback substitute for matching a known email.
-                {"email": expected_email, "authUser": ""},
-            )
-        )
-
-    return is_verified
+async def verify_account_identity(page: CDPPage, auth_file: str | None) -> bool:
+    """Checkpoint only when live account and route agree with the selected file."""
+    return await _account_identity_status(page, auth_file) == "verified"
 
 
 async def save_browser_cookies(
@@ -248,12 +240,8 @@ async def save_browser_cookies(
         version = vars(page).get("_auth_file_version")
         if bound_path != str(auth_path) or not isinstance(version, str):
             return False
-        current_url = str(page.url or "")
-        host = (urlsplit(current_url).hostname or "").lower()
         if (
             page.is_closed()
-            or host != "aistudio.google.com"
-            or is_login_page_url(current_url)
             or not await verify_account_identity(page, auth_file)
         ):
             return False
@@ -393,18 +381,37 @@ async def navigate_to_aistudio(
                         break
                 await page.wait_for_timeout(500)
 
-            if verify_identity_cb is not None:
-                is_verified = await verify_identity_cb(page)
-            else:
-                is_verified = await verify_account_identity(page, auth_file)
+            identity_status: IdentityStatus = "unavailable"
+            # MakerSuite can exist before the current-account control hydrates.
+            # Wait locally with a fixed budget; missing evidence is not a
+            # confirmed mismatch and must never authorize Cookie checkpoints.
+            try:
+                async with asyncio.timeout(4.0):
+                    for attempt in range(12):
+                        if verify_identity_cb is not None:
+                            identity_status = (
+                                "verified" if await verify_identity_cb(page) else "unavailable"
+                            )
+                        else:
+                            identity_status = await _account_identity_status(page, auth_file)
+                        if identity_status == "verified":
+                            break
+                        if attempt < 11:
+                            await page.wait_for_timeout(250)
+            except TimeoutError:
+                pass
 
-            if is_verified:
+            if identity_status == "verified":
                 if save_cookies_cb is not None:
                     await save_cookies_cb(auth_file=auth_file)
                 else:
                     await save_browser_cookies(page, auth_file)
                 return
-            raise RuntimeError("AI Studio account identity does not match the selected account")
+            if identity_status == "mismatch":
+                raise AccountIdentityMismatchError(
+                    "AI Studio account identity does not match the selected account"
+                )
+            raise AccountIdentityUnavailableError("AI Studio account identity is not yet available")
         except Exception as exc:
             if "地区限制" in str(exc) or "Cookie 认证失败" in str(exc):
                 raise exc

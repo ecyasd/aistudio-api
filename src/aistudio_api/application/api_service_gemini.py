@@ -39,6 +39,8 @@ from aistudio_api.application.chat_service import (
 )
 from aistudio_api.application.inference_limits import inference_limiter
 from aistudio_api.domain.errors import (
+    AccountIdentityMismatchError,
+    AccountIdentityUnavailableError,
     AistudioError,
     AuthError,
     RequestError,
@@ -59,6 +61,16 @@ from aistudio_api.infrastructure.utils.logger import get_logger
 logger = get_logger("api.gemini")
 SSE_HEARTBEAT_INTERVAL_SECONDS = 15.0
 SSE_SEND_TIMEOUT_SECONDS = 30.0
+ACCOUNT_IDENTITY_MESSAGES = {
+    "upstream_account_mismatch": (
+        "AI Studio account identity does not match the selected account. "
+        "Check the selected Google account on the management page; keep your API key."
+    ),
+    "upstream_account_unavailable": (
+        "AI Studio could not verify the selected Google account. "
+        "Retry later or check the account on the management page; keep your API key."
+    ),
+}
 
 
 WIRE_TO_GEMINI_FINISH_REASON: dict[int, str] = {
@@ -108,6 +120,10 @@ def clean_upstream_error_message(raw_msg: str) -> str:
 
 def classify_gemini_error_payload(exc: Exception) -> tuple[int, str, str]:
     """Extract standard Gemini HTTP status code, message, and status string from an exception."""
+    if isinstance(exc, AccountPreparationError):
+        exc = exc.original_error
+    if isinstance(exc, (AccountIdentityMismatchError, AccountIdentityUnavailableError)):
+        return 503, ACCOUNT_IDENTITY_MESSAGES[exc.code], "UNAVAILABLE"
     if isinstance(exc, SessionExpiredError):
         return (
             503,
@@ -267,6 +283,25 @@ async def _handle_attempt_exception(
     if isinstance(exc, (ValueError, RequestValidationError)):
         raise HTTPException(
             400, detail={"message": str(exc), "type": "bad_request"}
+        ) from exc
+
+    if isinstance(exc, (AccountIdentityMismatchError, AccountIdentityUnavailableError)):
+        logger.warning("账号身份验证失败: type=%s", type(exc).__name__)
+        client.clear_templates()
+        if can_retry:
+            if await try_switch_account(
+                model=target_model,
+                failed_account_id=account_id,
+                failed_context_id=request_context_id,
+                is_auth_error=True,
+            ):
+                logger.info("账号身份验证失败后切换至可用账号重试 (%d/%d)", attempt + 1, MAX_RETRIES)
+                return True
+        else:
+            record_rotator_event("auth_error", model=target_model, account_id=account_id)
+        raise HTTPException(
+            503,
+            detail={"message": ACCOUNT_IDENTITY_MESSAGES[exc.code], "type": exc.code},
         ) from exc
 
     if isinstance(exc, SessionExpiredError):
@@ -645,13 +680,20 @@ def format_sse_usage(
 
 def gemini_error_type(exc: Exception) -> str | None:
     """Expose only fixed service-auth categories, never upstream error data."""
+    if isinstance(exc, AccountPreparationError):
+        exc = exc.original_error
+    if isinstance(exc, (AccountIdentityMismatchError, AccountIdentityUnavailableError)):
+        return exc.code
     if isinstance(exc, SessionExpiredError):
         return "upstream_auth_expired"
     if isinstance(exc, AuthError):
         return "upstream_auth_failed"
     if isinstance(exc, HTTPException) and isinstance(exc.detail, dict):
         value = exc.detail.get("type")
-        if value in ("upstream_auth_expired", "upstream_auth_failed"):
+        if value in (
+            "upstream_auth_expired", "upstream_auth_failed",
+            "upstream_account_mismatch", "upstream_account_unavailable",
+        ):
             return value
     return None
 

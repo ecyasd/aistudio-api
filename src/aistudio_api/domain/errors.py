@@ -17,6 +17,20 @@ class SessionExpiredError(AuthError):
     """明确被 Google 重定向至登录页（Cookie 真正失效）。"""
 
 
+class AccountIdentityMismatchError(AuthError):
+    """The verified Google identity differs from the selected account."""
+
+    code = "upstream_account_mismatch"
+    status = 503
+
+
+class AccountIdentityUnavailableError(AuthError):
+    """The active Google identity could not be verified safely."""
+
+    code = "upstream_account_unavailable"
+    status = 503
+
+
 class UsageLimitExceeded(AistudioError):
     pass
 
