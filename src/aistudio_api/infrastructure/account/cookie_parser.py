@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import time
 import uuid
 from collections.abc import Iterable
+from typing import cast
 
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 logger = get_logger("cookie_parser")
+
 
 DEFAULT_API_KEY = "AIzaSyDdP816MREB3SkjZO04QXbjsigfcI0GWOs"
 DEFAULT_EXT_BIN = "CAESAUwwATgEQABQBGICSlBwAHgBkAEAmAEB"
@@ -139,6 +142,9 @@ def parse_raw_cookies(raw: object) -> dict[str, str]:
 
     for line in lines:
         trimmed = line.strip()
+        # Netscape exports use this prefix to mark HttpOnly, not a comment.
+        if trimmed.startswith("#HttpOnly_"):
+            trimmed = trimmed[len("#HttpOnly_") :]
         if not trimmed or trimmed.startswith("#"):
             continue
 
@@ -196,9 +202,6 @@ def build_google_cookie_list(
     discard_transient: bool = False,
 ) -> list[dict[str, object]]:
     """Build Playwright/CDP compatible cookies from name/value pairs."""
-    now = int(time.time())
-    default_expires = now + 86400 * 180  # 180 天后过期
-
     seen: set[tuple[str, str, str]] = set()
     cookies: list[dict[str, object]] = []
 
@@ -221,7 +224,6 @@ def build_google_cookie_list(
             "secure": True,
             "httpOnly": name not in _AUTH_COOKIE_NAMES,
             "sameSite": "None",
-            "expires": default_expires,
         }
         if target_kind == "url":
             cookie["url"] = target_value
@@ -254,6 +256,33 @@ def parse_cookie_string(
     raw: object, *, discard_transient: bool = True
 ) -> dict[str, object]:
     """将任意格式 cookie 解析为 storage state dict，包含 cookies 和 origins 字段。"""
+    exported = _structured_cookie_items(raw)
+    if exported is not None:
+        cookies: list[dict[str, object]] = []
+        expired_auth_families: set[int] = set()
+        valid_auth_families: set[int] = set()
+        auth_families = (
+            {"SID", "__Secure-1PSID", "__Secure-3PSID"},
+            {"APISID", "SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID"},
+        )
+        for item in exported:
+            cookie = _normalize_export_cookie(item)
+            if cookie is None:
+                continue
+            name = str(cookie["name"])
+            expired = "expires" in cookie and float(cast("str | float", cookie["expires"])) <= time.time()
+            for index, family in enumerate(auth_families):
+                if name in family:
+                    (expired_auth_families if expired else valid_auth_families).add(index)
+            if expired or (discard_transient and (
+                name in DISCARDABLE_IMPORT_COOKIE_NAMES or name.startswith(("_ga_", "_gcl_"))
+            )):
+                continue
+            cookies.append(cookie)
+        if expired_auth_families - valid_auth_families:
+            raise ValueError("导入的 Google 认证 Cookie 已过期，请重新导出当前登录会话")
+        return {"cookies": cookies, "origins": []}
+
     cookie_dict = parse_raw_cookies(raw)
     return {
         "cookies": build_google_cookie_list(
@@ -262,16 +291,110 @@ def parse_cookie_string(
         "origins": [],
     }
 
+
+def _structured_cookie_items(raw: object) -> list[dict[str, object]] | None:
+    """Recognize exports that carry real scope, expiry, and HttpOnly attributes."""
+    obj = raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text.startswith(("[", "{")):
+            try:
+                obj = json.loads(text)
+            except (ValueError, TypeError):
+                return None
+        elif "\t" in text:
+            items: list[dict[str, object]] = []
+            for line in text.splitlines():
+                line = line.strip()
+                http_only = line.startswith("#HttpOnly_")
+                if http_only:
+                    line = line[len("#HttpOnly_") :]
+                if not line or line.startswith("#"):
+                    continue
+                columns = line.split("\t")
+                if len(columns) < 7:
+                    continue
+                items.append({
+                    "domain": (
+                        "." + columns[0].lstrip(".")
+                        if columns[1].upper() == "TRUE"
+                        else columns[0].lstrip(".")
+                    ), "path": columns[2],
+                    "secure": columns[3].upper() == "TRUE", "expires": columns[4],
+                    "name": columns[5], "value": columns[6], "httpOnly": http_only,
+                })
+            return items
+    if isinstance(obj, dict):
+        obj = obj.get("cookies")
+    if isinstance(obj, list):
+        return [item for item in obj if isinstance(item, dict)]
+    return None
+
+
+def is_structured_cookie_export(raw: object) -> bool:
+    return _structured_cookie_items(raw) is not None
+
+
+def _normalize_export_cookie(item: dict[str, object]) -> dict[str, object] | None:
+    name = str(item.get("name") or "").strip()
+    value = item.get("value")
+    if not name or value is None or str(value) == "":
+        return None
+    domain = str(item.get("domain") or "").strip().lower()
+    url = str(item.get("url") or "")
+    if not domain and url:
+        from urllib.parse import urlsplit
+        domain = (urlsplit(url).hostname or "").lower()
+    if domain and not (domain.lstrip(".") == "google.com" or domain.endswith(".google.com")):
+        return None
+    # Name/value-only JSON uses the header mapping, while retaining any real
+    # expiry/flags present in the export.
+    if not domain:
+        domain = _DOMAIN_OVERRIDES.get(name, [".google.com"])[0]
+    cookie: dict[str, object] = {
+        "name": name, "value": str(value), "domain": domain,
+        "path": str(item.get("path") or "/"),
+        "secure": bool(item.get("secure", True)),
+        "httpOnly": bool(item.get("httpOnly", name not in _AUTH_COOKIE_NAMES)),
+    }
+    same_site = str(item.get("sameSite") or "").lower()
+    if same_site in {"none", "no_restriction", "lax", "strict"}:
+        cookie["sameSite"] = "None" if same_site == "no_restriction" else same_site.capitalize()
+    expiry = item.get("expires", item.get("expirationDate"))
+    if not item.get("session") and expiry is not None:
+        try:
+            expires = float(cast("str | float", expiry))
+        except (TypeError, ValueError):
+            raise ValueError("Cookie 到期时间格式无效") from None
+        if not math.isfinite(expires):
+            raise ValueError("Cookie 到期时间格式无效")
+        if expires > 0:
+            cookie["expires"] = expires
+    if name.startswith("__Host-") and (domain.startswith(".") or cookie["path"] != "/" or not cookie["secure"]):
+        raise ValueError("Host Cookie 的域名或安全属性无效")
+    if name.startswith("__Secure-") and not cookie["secure"]:
+        raise ValueError("Secure Cookie 缺少安全属性")
+    partition_key = item.get("partitionKey")
+    if isinstance(partition_key, dict) and partition_key.get("topLevelSite"):
+        cookie["partitionKey"] = {
+            "topLevelSite": str(partition_key["topLevelSite"]),
+            "hasCrossSiteAncestor": bool(partition_key.get("hasCrossSiteAncestor", False)),
+        }
+    return cookie
+
 async def probe_google_accounts_infinite(
     raw_or_dict: object,
     *,
     max_fails_in_a_row: int = 1,
+    max_accounts: int = 32,
 ) -> list[dict[str, object]]:
     """一路向下探测多账号登录索引（u/0, u/1, u/2...），直到探测失败为止。
 
     Returns:
         有效账号列表，例如 [{"auth_user": "0", "status_code": 200, "name": "Google Account (u/0)"}, ...]
     """
+    if not 1 <= max_accounts <= 256 or max_fails_in_a_row < 1:
+        raise ValueError("账号探测范围无效")
     cookie_dict = parse_raw_cookies(raw_or_dict)
     if not cookie_dict:
         return []
@@ -287,7 +410,9 @@ async def probe_google_accounts_infinite(
     consecutive_failures = 0
 
     async with httpx.AsyncClient(timeout=10.0, proxy=settings.proxy_url) as client:
-        while True:
+        # A service-wide 403 does not prove an unbounded number of sessions.
+        # This is a local resource bound, not a claimed Google account limit.
+        while auth_user_idx < max_accounts:
             u_index = str(auth_user_idx)
             auth_header = calculate_sapisid_hash(cookie_dict)
             headers = {

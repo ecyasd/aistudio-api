@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -128,3 +131,95 @@ async def test_api_accounts_active_endpoint():
         assert "no-store" in resp.headers.get("Cache-Control", "")
         data = resp.json()
         assert data["id"] == "acc_1"
+
+
+@pytest.mark.asyncio
+async def test_detect_email_uses_isolated_target_when_browser_is_cold(
+    setup_mock_account_service, monkeypatch
+):
+    service = setup_mock_account_service
+    account = service.list_accounts.return_value[0]
+    service.get_account.return_value = account
+    service.get_account_auth_path.return_value = Path("synthetic/target/auth.json")
+    session = SimpleNamespace(
+        page=None,
+        _auth_file="synthetic/active/auth.json",
+        detect_account_email=AsyncMock(return_value="detected@example.com"),
+        switch_auth=AsyncMock(),
+    )
+    monkeypatch.setattr(runtime_state, "client", SimpleNamespace(_session=session))
+
+    async with _client() as client:
+        response = await client.post("/api/accounts/acc_1/detect-email")
+
+    assert response.status_code == 200
+    session.detect_account_email.assert_awaited_once_with(
+        str(Path("synthetic/target/auth.json"))
+    )
+    session.switch_auth.assert_not_awaited()
+    service.set_active_account.assert_not_called()
+    service.update_account_email.assert_called_once_with("acc_1", "detected@example.com")
+    assert session._auth_file == "synthetic/active/auth.json"
+
+
+@pytest.mark.asyncio
+async def test_detect_email_missing_auth_does_not_use_active_account(
+    setup_mock_account_service, monkeypatch
+):
+    service = setup_mock_account_service
+    service.get_account.return_value = service.list_accounts.return_value[0]
+    service.get_account_auth_path.return_value = None
+    session = SimpleNamespace(detect_account_email=AsyncMock())
+    monkeypatch.setattr(runtime_state, "client", SimpleNamespace(_session=session))
+
+    async with _client() as client:
+        response = await client.post("/api/accounts/acc_1/detect-email")
+
+    assert response.status_code == 404
+    session.detect_account_email.assert_not_awaited()
+    service.update_account_email.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("file_path", ["/etc/private.json", ""])
+async def test_import_bundle_rejects_server_paths_even_with_inline_content(
+    setup_mock_account_service, monkeypatch, file_path
+):
+    def forbidden_read(*args, **kwargs):
+        pytest.fail("import-bundle must not read any server file")
+
+    monkeypatch.setattr(Path, "read_text", forbidden_read)
+    async with _client() as client:
+        response = await client.post(
+            "/api/accounts/import-bundle",
+            json={"file_path": file_path, "content": "[]"},
+        )
+
+    assert response.status_code == 400
+    assert "file_path" in response.text
+    setup_mock_account_service.save_account_from_cookies.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload_field", ["accounts", "content"])
+async def test_import_bundle_keeps_inline_imports(
+    setup_mock_account_service, monkeypatch, payload_field
+):
+    service = setup_mock_account_service
+    service.save_account_from_cookies.return_value = service.list_accounts.return_value[0]
+    monkeypatch.setattr(runtime_state, "rotator", None)
+    accounts = [
+        {
+            "name": "Synthetic account",
+            "cookies": json.dumps(
+                [{"name": "SAPISID", "value": "synthetic", "domain": ".google.com"}]
+            ),
+        }
+    ]
+    payload = {payload_field: accounts if payload_field == "accounts" else json.dumps(accounts)}
+    async with _client() as client:
+        response = await client.post("/api/accounts/import-bundle", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["imported_count"] == 1
+    service.save_account_from_cookies.assert_called_once()

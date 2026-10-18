@@ -10,6 +10,7 @@ from pathlib import Path
 import yaml
 
 from aistudio_api.config import resolve_config_file
+from aistudio_api.infrastructure.utils.config_store import api_key_items, mutate_config
 
 from .wire_types import (
     AistudioImageOutputMode,
@@ -316,8 +317,17 @@ def _default_config() -> dict[str, object]:
     }
 
 
-_CONFIG_CACHE: dict[str, tuple[float, dict[str, object]]] = {}
-_API_KEYS_CACHE: dict[str, tuple[float, frozenset[str], list[dict[str, str]]]] = {}
+ConfigStamp = tuple[int, int, int, int] | None
+_CONFIG_CACHE: dict[str, tuple[ConfigStamp, dict[str, object]]] = {}
+_API_KEYS_CACHE: dict[str, tuple[ConfigStamp, frozenset[str], list[dict[str, str]]]] = {}
+
+
+def _config_stamp(path: Path) -> ConfigStamp:
+    try:
+        info = path.stat()
+        return info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+    except OSError:
+        return None
 
 
 def invalidate_config_cache() -> None:
@@ -333,10 +343,7 @@ def _load_yaml_config(config_path: Path) -> dict[str, object]:
         return _default_config()
 
     path_key = str(config_path.resolve())
-    try:
-        mtime = config_path.stat().st_mtime
-    except OSError:
-        mtime = 0.0
+    mtime = _config_stamp(config_path)
 
     cached = _CONFIG_CACHE.get(path_key)
     if cached is not None and cached[0] == mtime:
@@ -425,36 +432,14 @@ def get_configured_api_key_items(
     """获取 config.yaml 中配置的结构化 API Key 列表（含备注名与创建时间）。"""
     resolved_path = _resolve_config_path(config_path)
     path_key = str(resolved_path.resolve())
-    try:
-        mtime = resolved_path.stat().st_mtime if resolved_path.exists() else 0.0
-    except OSError:
-        mtime = 0.0
+    mtime = _config_stamp(resolved_path)
 
     cached = _API_KEYS_CACHE.get(path_key)
     if cached is not None and cached[0] == mtime:
         return list(cached[2])
 
     config = _load_yaml_config(resolved_path)
-    raw_keys = config.get("api_keys")
-    items: list[dict[str, str]] = []
-    if isinstance(raw_keys, list):
-        for k in raw_keys:
-            if isinstance(k, dict):
-                key_val = str(k.get("key") or "").strip()
-                name_val = str(k.get("name") or "API Key").strip()
-                created_val = str(k.get("created_at") or "").strip()
-                if key_val:
-                    items.append(
-                        {"key": key_val, "name": name_val, "created_at": created_val}
-                    )
-            elif isinstance(k, str) and k.strip():
-                items.append({"key": k.strip(), "name": "API Key", "created_at": ""})
-    elif isinstance(raw_keys, str):
-        for line in raw_keys.splitlines():
-            for part in line.split(","):
-                s = part.strip()
-                if s:
-                    items.append({"key": s, "name": "API Key", "created_at": ""})
+    items = api_key_items(config.get("api_keys"))
 
     keys_set = frozenset(item["key"] for item in items if item.get("key"))
     _API_KEYS_CACHE[path_key] = (mtime, keys_set, items)
@@ -467,10 +452,7 @@ def get_configured_api_keys(
     """获取 config.yaml 中配置的所有有效 API Key 集合。"""
     resolved_path = _resolve_config_path(config_path)
     path_key = str(resolved_path.resolve())
-    try:
-        mtime = resolved_path.stat().st_mtime if resolved_path.exists() else 0.0
-    except OSError:
-        mtime = 0.0
+    mtime = _config_stamp(resolved_path)
 
     cached = _API_KEYS_CACHE.get(path_key)
     if cached is not None and cached[0] == mtime:
@@ -511,28 +493,21 @@ def update_configured_logging_settings(
 ) -> dict[str, object]:
     """更新 config.yaml 中的 logging 设置并刷新缓存。"""
     resolved_path = _resolve_config_path(config_path)
-    content = (
-        resolved_path.read_text(encoding="utf-8") if resolved_path.exists() else ""
-    )
-    parsed = yaml.safe_load(content) or {}
-    if not isinstance(parsed, dict):
-        parsed = {}
+    def update_logging(parsed: dict[str, object]) -> dict[str, object]:
+        raw_logging = parsed.get("logging")
+        logging_dict = dict(raw_logging) if isinstance(raw_logging, dict) else {}
+        if level is not None:
+            logging_dict["level"] = level.strip().upper()
+        if dump_requests is not None:
+            logging_dict["dump_requests"] = dump_requests
+        if dump_to_file is not None:
+            logging_dict["dump_to_file"] = dump_to_file
+        if dump_dir is not None:
+            logging_dict["dump_dir"] = dump_dir
+        parsed["logging"] = logging_dict
+        return parsed
 
-    raw_logging = parsed.get("logging")
-    logging_dict = dict(raw_logging) if isinstance(raw_logging, dict) else {}
-    if level is not None:
-        logging_dict["level"] = level.strip().upper()
-    if dump_requests is not None:
-        logging_dict["dump_requests"] = dump_requests
-    if dump_to_file is not None:
-        logging_dict["dump_to_file"] = dump_to_file
-    if dump_dir is not None:
-        logging_dict["dump_dir"] = dump_dir
-
-    parsed["logging"] = logging_dict
-    resolved_path.write_text(
-        yaml.dump(parsed, allow_unicode=True, sort_keys=False),
-        encoding="utf-8",
-    )
+    stored = mutate_config(resolved_path, update_logging)
     invalidate_config_cache()
-    return logging_dict
+    raw_logging = stored["logging"]
+    return dict(raw_logging) if isinstance(raw_logging, dict) else {}

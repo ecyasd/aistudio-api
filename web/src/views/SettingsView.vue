@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { systemApi } from '@/api/system.ts'
 import { useToastStore } from '@/stores/toast.ts'
-import type { SystemConfig } from '@/types/system.ts'
+import type { BrowserStatusResponse, SystemConfig } from '@/types/system.ts'
 import ApiKeyManagerCard from '@/components/settings/ApiKeyManagerCard.vue'
 import LogConfigCard from '@/components/settings/LogConfigCard.vue'
 import VisualConfigEditor from '@/components/config/VisualConfigEditor.vue'
@@ -19,6 +19,23 @@ const toast = useToastStore()
 
 const config = ref<SystemConfig | null>(null)
 const loading = ref(false)
+const browser = ref<BrowserStatusResponse | null>(null)
+const browserStatusText = computed(() => {
+  if (!browser.value) return '状态暂不可用'
+  return {
+    not_started: '等待首次调用', idle: '空闲休眠', starting: '正在启动',
+    ready: '已就绪', failed: '启动失败，调用时重试', closed: '已停止，调用时启动',
+  }[browser.value.status]
+})
+let browserTimer: ReturnType<typeof setInterval> | undefined
+
+async function loadBrowserStatus() {
+  try {
+    browser.value = await systemApi.getBrowserStatus()
+  } catch {
+    browser.value = null
+  }
+}
 
 async function loadConfig() {
   loading.value = true
@@ -34,7 +51,10 @@ async function loadConfig() {
 
 onMounted(() => {
   void loadConfig()
+  void loadBrowserStatus()
+  browserTimer = setInterval(() => { void loadBrowserStatus() }, 15000)
 })
+onUnmounted(() => { if (browserTimer) clearInterval(browserTimer) })
 </script>
 
 <template>
@@ -58,6 +78,22 @@ onMounted(() => {
         </div>
         <div class="text-[11px] text-gray-400 mt-1">
           无头模式: {{ config?.browser_headless ? '开启 (Headless)' : '禁用' }}
+        </div>
+        <div
+          class="text-xs mt-2"
+          :class="browser?.status === 'failed' ? 'text-amber-700' : 'text-gray-600'"
+        >
+          浏览器：{{ browserStatusText }}
+        </div>
+        <div
+          v-if="browser"
+          class="text-[11px] text-gray-400 mt-1"
+        >
+          收到调用后自动启动；<template v-if="browser.idle_timeout_seconds > 0">
+            空闲 {{ browser.idle_timeout_seconds }} 秒后释放内存
+          </template><template v-else>
+            不自动休眠
+          </template>
         </div>
       </div>
 

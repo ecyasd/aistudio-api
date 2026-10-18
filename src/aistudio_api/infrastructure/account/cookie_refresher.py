@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-import time
+from typing import cast
 
 from aistudio_api.infrastructure.account.cookie_parser import (
     DISCARDABLE_IMPORT_COOKIE_NAMES,
+    build_google_cookie_list,
+    is_structured_cookie_export,
+    parse_cookie_string,
     parse_raw_cookies,
 )
 from aistudio_api.infrastructure.utils.logger import get_logger
@@ -80,30 +83,22 @@ def load_cookies_from_string(cookie_string: str) -> list[dict[str, object]]:
     returns Playwright-format cookies for browser injection.
     Real expires come from browser export after visiting the page.
     """
+    if is_structured_cookie_export(cookie_string):
+        # A name/value refresh would discard domains, paths, real expiries and
+        # host-only/session semantics. Let this isolated browser negotiate them.
+        return cast(list[dict[str, object]], parse_cookie_string(cookie_string)["cookies"])
+
     parsed = parse_raw_cookies(cookie_string)
     refreshed = _refresh_session_cookies(parsed)
     merged = dict(parsed)
     merged.update(refreshed)
-    default_expires = int(time.time()) + 86400 * 180  # 180 天后过期
-
     cookies = []
     skipped_names: list[str] = []
     for name, value in merged.items():
         if _should_skip_browser_injection(name):
             skipped_names.append(name)
             continue
-        cookies.append(
-            {
-                "name": name,
-                "value": value,
-                "domain": ".google.com",
-                "path": "/",
-                "secure": True,
-                "httpOnly": name not in AUTH_COOKIE_NAMES,
-                "sameSite": "None",
-                "expires": default_expires,
-            }
-        )
+        cookies.extend(build_google_cookie_list([(name, value)], allow_url_targets=True))
     log.info(
         "Cookie 合并完成: 原始=%d, 刷新=%d, 合并后=%d",
         len(parsed),

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -17,8 +20,46 @@ from aistudio_api.domain.models import Candidate, ModelOutput
 
 
 @pytest.fixture
-def mock_client() -> MagicMock:
-    return MagicMock()
+def mock_client(monkeypatch, tmp_path) -> MagicMock:
+    """Supply account metadata and a leased fake browser to the real API path."""
+    from aistudio_api.api.state import runtime_state
+    from aistudio_api.application import api_service_gemini
+    from aistudio_api.application.account_rotator import AccountStats
+
+    client = MagicMock()
+    account = SimpleNamespace(id="sdk-offline-account")
+    auth_path = str(tmp_path / "fake-auth.json")
+    context = SimpleNamespace(auth_file=auth_path, context_id=1)
+    stats = AccountStats(account_id=account.id)
+
+    @asynccontextmanager
+    async def request_scope():
+        yield context
+
+    client.session = SimpleNamespace(
+        _auth_file=auth_path, is_ready=True, request_scope=request_scope
+    )
+    account_service = SimpleNamespace(
+        list_accounts=lambda: [account],
+        get_active_account=lambda: account,
+        get_account_auth_path=lambda account_id: auth_path,
+    )
+    rotator = SimpleNamespace(
+        get_account_stats=lambda account_id: stats,
+        is_account_available=lambda account_id, model=None: True,
+        record_success=MagicMock(),
+        record_rate_limited=MagicMock(),
+        record_auth_error=MagicMock(),
+        record_session_expired=MagicMock(),
+        record_error=MagicMock(),
+    )
+    monkeypatch.setattr(runtime_state, "client", client)
+    monkeypatch.setattr(runtime_state, "account_service", account_service)
+    monkeypatch.setattr(runtime_state, "rotator", rotator)
+    monkeypatch.setattr(runtime_state, "record", MagicMock())
+    monkeypatch.setattr(api_service_gemini, "try_switch_account", AsyncMock(return_value=False))
+    monkeypatch.setattr(api_service_gemini, "SSE_HEARTBEAT_INTERVAL_SECONDS", 0.005)
+    return client
 
 
 @pytest.mark.asyncio
@@ -77,6 +118,8 @@ async def test_genai_sdk_aio_streaming(mock_client: MagicMock) -> None:
     async def fake_stream(
         *_args: object, **_kwargs: object
     ) -> AsyncGenerator[tuple[str, object], None]:
+        # Exercise SDK skipping of keepalive separators before any model chunk.
+        await asyncio.sleep(0.02)
         yield ("thinking", "Thinking about the greeting...")
         yield ("body", "Hello ")
         yield ("body", "World!")

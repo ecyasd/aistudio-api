@@ -47,7 +47,7 @@ def test_load_cookies_from_string_builds_playwright_safe_cookies(monkeypatch):
     cookies = load_cookies_from_string("SID=sid123")
     by_name = {cookie["name"]: cookie for cookie in cookies}
 
-    assert by_name["LSID"]["domain"] == ".google.com"
+    assert by_name["LSID"]["url"] == "https://accounts.google.com/"
     assert by_name["SID"]["domain"] == ".google.com"
     assert "__Host-GAPS" not in by_name
 
@@ -70,8 +70,8 @@ def test_load_cookies_from_string_keeps_accounts_cookies_from_raw_string(monkeyp
     by_name = {cookie["name"]: cookie for cookie in cookies}
 
     assert by_name["SID"]["value"] == "sid_from_refresh"
-    assert by_name["LSID"]["domain"] == ".google.com"
-    assert by_name["ACCOUNT_CHOOSER"]["domain"] == ".google.com"
+    assert by_name["LSID"]["url"] == "https://accounts.google.com/"
+    assert by_name["ACCOUNT_CHOOSER"]["url"] == "https://accounts.google.com/"
     assert "__Host-1PLSID" not in by_name
 
 
@@ -162,6 +162,7 @@ def test_domain_overrides_scopes_osid_strictly_to_aistudio():
 @pytest.mark.asyncio
 async def test_import_bundle_flow(tmp_path):
     from aistudio_api.api.routes_accounts import ImportBundleRequest, import_bundle
+    from aistudio_api.api.state import RuntimeState
     from aistudio_api.application.account_service import AccountService
     from aistudio_api.infrastructure.account.account_store import AccountStore
 
@@ -187,7 +188,9 @@ async def test_import_bundle_flow(tmp_path):
     }"""
 
     req = ImportBundleRequest(content=bundle_content)
-    res = await import_bundle(req, account_service=svc)
+    res = await import_bundle(
+        req, account_service=svc, runtime_state=RuntimeState(account_service=svc)
+    )
 
     assert res.imported_count == 2
     assert len(res.accounts) == 2

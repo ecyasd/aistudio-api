@@ -8,11 +8,13 @@ import ToastContainer from '@/components/ui/ToastContainer.vue'
 import { useAccountsStore } from '@/stores/accounts.ts'
 import { useSystemStore } from '@/stores/system.ts'
 import { useToastStore } from '@/stores/toast.ts'
+import { useErrorsStore } from '@/stores/errors.ts'
 
 const route = useRoute()
 const accountsStore = useAccountsStore()
 const systemStore = useSystemStore()
 const toast = useToastStore()
+const errorsStore = useErrorsStore()
 
 const sidebarOpen = ref(false)
 const tokenModalOpen = ref(false)
@@ -27,6 +29,11 @@ async function handleRefresh() {
   if (refreshing.value) return
   refreshing.value = true
   try {
+    if (route.name === 'error-records') {
+      if (await errorsStore.refresh()) toast.success('错误记录已刷新')
+      else toast.error('错误记录读取失败，请查看页面提示')
+      return
+    }
     await Promise.allSettled([
       accountsStore.fetchAll(),
       systemStore.fetchStats(),

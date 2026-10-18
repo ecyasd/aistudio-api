@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import aclosing
 from pathlib import Path
 from typing import ClassVar
 
@@ -65,10 +66,12 @@ class AIStudioClient:
         self._replay_service = RequestReplayService(session=self._session)
 
         self._streaming_gateway = StreamingGateway(session=self._session)
+
     @property
     def session(self) -> BrowserSession:
         """Expose active browser session facade."""
         return self._session
+
     async def warmup(self) -> None:
         """预热浏览器后端并加载 AI Studio 页面及捕获 BotGuard 服务。"""
         if self._session is not None:
@@ -200,11 +203,11 @@ class AIStudioClient:
             )
             if not captured:
                 raise RequestError(0, "无法拦截请求")
-            async for event in self._streaming_gateway.stream_chat(
-                captured=captured,
-                model=model,
-            ):
-                yield event
+            async with aclosing(
+                self._streaming_gateway.stream_chat(captured=captured, model=model)
+            ) as events:
+                async for event in events:
+                    yield event
 
     async def generate_content(
         self,

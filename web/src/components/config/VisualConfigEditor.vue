@@ -34,8 +34,9 @@ const emit = defineEmits<{
 const toast = useToastStore()
 
 const activeTab = ref<'visual' | 'yaml'>('visual')
-const rawYaml = ref(props.initialYaml || '')
+const rawYaml = ref('')
 const parsedConfig = ref<ParsedConfigYaml>({})
+const savedYaml = ref(serializeConfig({}))
 const yamlParseError = ref<string | null>(null)
 const saving = ref(false)
 const dictModalOpen = ref(false)
@@ -69,13 +70,38 @@ const filteredModels = computed(() => {
   return result
 })
 
+// API keys belong to the key manager. Never retain or submit a cached copy
+// through the model editor, including when the user pastes an old config file.
+function readEditorYaml(content: string): { yaml: string; config: ParsedConfigYaml } {
+  const doc = YAML.parseDocument(content)
+  if (doc.errors.length) throw new Error(doc.errors[0]?.message || 'YAML 解析失败')
+  if (doc.contents !== null && !YAML.isMap(doc.contents)) {
+    throw new Error('YAML 顶层必须是字典结构')
+  }
+  if (doc.contents !== null) doc.delete('api_keys')
+  return { yaml: doc.toString(), config: (doc.toJS() || {}) as ParsedConfigYaml }
+}
+
+function serializeConfig(config: ParsedConfigYaml): string {
+  return YAML.stringify(config, { indent: 2 })
+}
+
+const hasUnsavedChanges = computed(() => {
+  try {
+    const config = activeTab.value === 'visual'
+      ? parsedConfig.value
+      : readEditorYaml(rawYaml.value).config
+    return serializeConfig(config) !== savedYaml.value
+  } catch {
+    return true
+  }
+})
+
 function parseYamlToState(content: string): boolean {
   try {
-    const doc = YAML.parse(content) || {}
-    if (typeof doc !== 'object' || doc === null) {
-      throw new Error('YAML 顶层必须是字典结构')
-    }
-    parsedConfig.value = doc as ParsedConfigYaml
+    const editor = readEditorYaml(content)
+    rawYaml.value = editor.yaml
+    parsedConfig.value = editor.config
     yamlParseError.value = null
     return true
   } catch (err: unknown) {
@@ -87,9 +113,7 @@ function parseYamlToState(content: string): boolean {
 
 function syncStateToYaml(): string {
   try {
-    const dumped = YAML.stringify(parsedConfig.value, {
-      indent: 2,
-    })
+    const dumped = serializeConfig(parsedConfig.value)
     rawYaml.value = dumped
     return dumped
   } catch (err) {
@@ -101,15 +125,15 @@ function syncStateToYaml(): string {
 watch(
   () => props.initialYaml,
   (val) => {
-    if (val !== undefined) {
-      rawYaml.value = val
-      parseYamlToState(val)
-    }
+    // Refreshes from the other settings cards must not discard a model draft.
+    if (val === undefined || hasUnsavedChanges.value) return
+    if (parseYamlToState(val)) savedYaml.value = serializeConfig(parsedConfig.value)
   },
   { immediate: true }
 )
 
 function switchTab(tab: 'visual' | 'yaml') {
+  if (tab === activeTab.value) return
   if (tab === 'yaml') {
     syncStateToYaml()
   } else {
@@ -198,13 +222,11 @@ function updateGlobalDropUnsupported(val: boolean) {
 
 function handleResetDefaults() {
   if (confirm('确定要将所有模型规则重置为官方推荐默认预设吗？')) {
-    const currentApiKeys = parsedConfig.value.api_keys || []
     const currentLogging = (parsedConfig.value as Record<string, unknown>).logging || {
       level: 'INFO',
       dump_requests: false,
     }
     const doc: ParsedConfigYaml = {
-      api_keys: currentApiKeys,
       logging: currentLogging,
       model_defaults: {
         drop_unsupported_params: false,
@@ -260,13 +282,13 @@ function handleResetDefaults() {
     }
     parsedConfig.value = doc
     syncStateToYaml()
-    toast.info('已载入默认规则（保留现有 API Key 与日志配置），请点击右上角保存并生效')
+    toast.info('已载入默认规则（API Key 由上方独立管理，日志配置保留），请点击右上角保存并生效')
   }
 }
 
 async function handleSave() {
   saving.value = true
-  let contentToSave = rawYaml.value
+  let contentToSave: string
   if (activeTab.value === 'visual') {
     contentToSave = syncStateToYaml()
   } else {
@@ -277,10 +299,12 @@ async function handleSave() {
       saving.value = false
       return
     }
+    contentToSave = rawYaml.value
   }
 
   try {
     await systemApi.updateConfigYaml(contentToSave)
+    savedYaml.value = serializeConfig(readEditorYaml(contentToSave).config)
     toast.success('模型规则配置已成功保存并完成热重载！')
     emit('saved')
   } catch (err: unknown) {
@@ -303,11 +327,6 @@ function handleYamlKeydown(e: KeyboardEvent) {
     })
   }
 }
-
-const hasUnsavedChanges = computed(() => {
-  const current = activeTab.value === 'visual' ? syncStateToYaml() : rawYaml.value
-  return Boolean(props.initialYaml && current.trim() !== props.initialYaml.trim())
-})
 
 onBeforeRouteLeave((_to, _from, next) => {
   if (hasUnsavedChanges.value) {
@@ -333,6 +352,9 @@ onBeforeRouteLeave((_to, _from, next) => {
             模型规则与安全策略 (config.yaml)
           </h3>
         </div>
+        <p class="text-xs text-gray-500 mt-2">
+          API 密钥由上方密钥管理独立保存，导入或激活账号、保存模型规则均不会更换调用密钥。
+        </p>
       </div>
 
       <!-- Controls & Actions -->

@@ -10,10 +10,15 @@ import type {
   UpdateLoggingConfigRequest,
   UpdateLoggingConfigResponse,
   HealthCheckResponse,
+  BrowserStatusResponse,
 } from '@/types'
 
 
 export const systemApi = {
+  getBrowserStatus(): Promise<BrowserStatusResponse> {
+    return request<BrowserStatusResponse>('/browser/status')
+  },
+
   health(): Promise<HealthCheckResponse> {
     return request<HealthCheckResponse>('/health')
   },

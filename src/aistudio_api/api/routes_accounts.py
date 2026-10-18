@@ -137,6 +137,8 @@ async def activate_account(
     account = await account_service.activate_account(account_id, browser_session)
     if account is None:
         raise HTTPException(status_code=404, detail="账号不存在或切换失败")
+    if runtime_state.rotator:
+        runtime_state.rotator.clear_auth_lockout(account.id)
     log.info("手动激活账号: %s (%s)", account.id, account.name)
     return to_account_response(account)
 
@@ -149,17 +151,16 @@ async def detect_account_email(
 ) -> AccountResponse:
     """从受控浏览器页面自动提取并更新指定账号的真实邮箱。"""
     browser_session = runtime_state.client._session if runtime_state.client else None
-    if browser_session is None or browser_session.page is None:
+    if browser_session is None:
         raise HTTPException(status_code=503, detail="受控浏览器未就绪")
     acc = account_service.get_account(account_id)
     if not acc:
         raise HTTPException(status_code=404, detail="账号不存在")
 
     target_auth = account_service.get_account_auth_path(account_id)
-    if target_auth and str(target_auth) != browser_session._auth_file:
-        await browser_session.switch_auth(str(target_auth))
-
-    email = await browser_session.extract_account_email()
+    if target_auth is None:
+        raise HTTPException(status_code=404, detail="账号凭据不存在")
+    email = await browser_session.detect_account_email(str(target_auth))
     if email:
         account_service.update_account_email(account_id, email)
         log.info("已自动识别并更新账号 %s 邮箱: %s", account_id, mask_email(email))
@@ -273,7 +274,10 @@ async def import_cookies(
     runtime_state: RuntimeState = Depends(get_runtime_state),
 ) -> ImportCookiesResponse:
     """从 cookie 导入账号（支持 JSON 数组、Netscape 或 KV）。"""
-    storage_state = parse_cookie_string(req.cookies)
+    try:
+        storage_state = parse_cookie_string(req.cookies)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     raw_cookies = storage_state.get("cookies")
     cookie_list: list[dict[str, object]] = (
         raw_cookies if isinstance(raw_cookies, list) else []
@@ -314,7 +318,14 @@ async def import_cookies(
             )
             log.info("已注入 %d 个 Cookie 并为 %s 保存 auth.json", count, account.name)
     except Exception as e:
+        from aistudio_api.infrastructure.utils.error_records import record_failure
+
+        record_failure(e, source="management_warning", operation="cookie_injection",
+                       account_id=account.id)
         log.warning("为 %s 注入浏览器 Cookie 失败: %s", account.name, e)
+
+    if runtime_state.rotator:
+        runtime_state.rotator.clear_auth_lockout(account.id)
 
     return ImportCookiesResponse(
         account_id=account.id,
@@ -329,6 +340,7 @@ async def import_cookies(
 async def probe_and_import(
     req: ProbeAndImportRequest,
     account_service: AccountService = Depends(get_account_service),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
 ) -> ProbeAndImportResponse:
     """单份 Cookie 无限向下探活多账号并一键批量导入。"""
     from aistudio_api.infrastructure.account.cookie_parser import (
@@ -336,11 +348,14 @@ async def probe_and_import(
         probe_google_accounts_infinite,
     )
 
+    try:
+        storage_state = parse_cookie_string(req.cookies)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     probed = await probe_google_accounts_infinite(req.cookies)
     if not probed:
         raise HTTPException(status_code=400, detail="未探测到有效已登录 Google 账号")
 
-    storage_state = parse_cookie_string(req.cookies)
     prefix = req.name_prefix.strip() if req.name_prefix else "Google Account"
     import secrets
 
@@ -351,6 +366,9 @@ async def probe_and_import(
         prefix=prefix,
         cookie_id=cid,
     )
+    if runtime_state.rotator:
+        for account in metas:
+            runtime_state.rotator.clear_auth_lockout(account.id)
     imported_accounts = [to_account_response(account) for account in metas]
 
     log.info("探活与导入完成: 成功导入 %d 个账号", len(imported_accounts))
@@ -364,15 +382,21 @@ async def probe_and_import(
 async def import_bundle(
     req: ImportBundleRequest,
     account_service: AccountService = Depends(get_account_service),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
 ) -> ImportBundleResponse:
-    """批量导入多个账号的凭据 Bundle（支持传入 JSON 文本、直接解析列表或服务器本地文件路径）。"""
+    """批量导入多个账号的凭据 Bundle（JSON 文本或直接解析列表）。"""
     import json
     import secrets
-    from pathlib import Path
 
     from aistudio_api.infrastructure.account.cookie_parser import parse_cookie_string
 
     items_to_import: list[dict[str, object]] = []
+
+    if req.file_path is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="不支持服务器本地 file_path，请提交 accounts 列表或 content JSON 文本",
+        )
 
     if req.accounts:
         for a in req.accounts:
@@ -400,30 +424,10 @@ async def import_bundle(
         for item in raw_list:
             if isinstance(item, dict) and item.get("cookies"):
                 items_to_import.append(item)
-    elif req.file_path:
-        fpath = Path(req.file_path).expanduser().resolve()
-        if not fpath.is_file():
-            raise HTTPException(status_code=404, detail=f"文件不存在: {fpath}")
-        try:
-            raw_text = fpath.read_text(encoding="utf-8")
-            raw_data = json.loads(raw_text)
-        except Exception as e:
-            raise HTTPException(
-                status_code=400, detail=f"读取或解析文件失败: {e}"
-            ) from e
-        if isinstance(raw_data, list):
-            raw_list = raw_data
-        elif isinstance(raw_data, dict):
-            raw_list = raw_data.get("accounts") or raw_data.get("profiles") or []
-        else:
-            raw_list = []
-        for item in raw_list:
-            if isinstance(item, dict) and item.get("cookies"):
-                items_to_import.append(item)
     else:
         raise HTTPException(
             status_code=400,
-            detail="请提供 accounts 列表、content JSON 文本或 file_path 本地文件路径",
+            detail="请提供 accounts 列表或 content JSON 文本",
         )
 
     if not items_to_import:
@@ -433,10 +437,18 @@ async def import_bundle(
 
     imported_accounts: list[AccountResponse] = []
     for idx, item in enumerate(items_to_import):
-        raw_cookie_str = str(item.get("cookies") or "")
+        raw_cookie_data = item.get("cookies")
+        raw_cookie_str = (
+            raw_cookie_data
+            if isinstance(raw_cookie_data, str)
+            else json.dumps(raw_cookie_data) if raw_cookie_data else ""
+        )
         if not raw_cookie_str:
             continue
-        storage_state = parse_cookie_string(raw_cookie_str)
+        try:
+            storage_state = parse_cookie_string(raw_cookie_str)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if not storage_state.get("cookies"):
             continue
 
@@ -452,6 +464,8 @@ async def import_bundle(
             auth_user=acc_auth_user,
             cookie_id=cid,
         )
+        if runtime_state.rotator:
+            runtime_state.rotator.clear_auth_lockout(account.id)
         imported_accounts.append(to_account_response(account))
 
     if not account_service.get_active_account() and imported_accounts:

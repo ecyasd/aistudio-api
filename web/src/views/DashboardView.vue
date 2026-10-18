@@ -11,6 +11,8 @@ import {
   Users,
   Activity,
   AlertTriangle,
+  ArrowRight,
+  FileWarning,
 } from 'lucide-vue-next'
 
 const accountsStore = useAccountsStore()
@@ -88,6 +90,24 @@ usePolling(loadData, 10000)
         </template>
       </StatCard>
     </div>
+
+    <RouterLink
+      to="/error-records"
+      class="flex items-center justify-between gap-4 p-4 sm:p-5 rounded-2xl border border-gray-200 bg-white hover:border-brand-300 hover:bg-brand-50/30 transition-colors"
+    >
+      <div class="flex items-center gap-3">
+        <FileWarning class="w-5 h-5 text-rose-500 shrink-0" />
+        <div>
+          <p class="text-sm font-semibold text-gray-900">
+            查看实时错误
+          </p>
+          <p class="text-xs text-gray-500 mt-1">
+            查看最近 10 分钟的 API 失败、流式中断、浏览器异常和自动重试
+          </p>
+        </div>
+      </div>
+      <ArrowRight class="w-4 h-4 text-gray-400 shrink-0" />
+    </RouterLink>
 
     <!-- Model Statistics Table -->
     <ModelStatsTable

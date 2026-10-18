@@ -1,5 +1,17 @@
 # aistudio-api
 
+Based on [DeconstructedCube/aistudio-api](https://github.com/DeconstructedCube/aistudio-api).
+
+This fork includes browser startup and first-request recovery, isolated account
+sessions, refreshed Cookie checkpointing, persistent API key configuration, and a
+real-time error page. Error records stay in memory for ten minutes (up to 100
+records), refresh every five seconds while the page is visible, and clear on
+restart. A revoked or expired Google login still requires valid credentials to be
+reimported. See [deploy/README.md](deploy/README.md) for the optional hardened
+HTTPS launcher. The upstream Docker Hub image does not include this fork's
+changes; build this checkout with `docker build -t aistudio-api:local .` to use
+the included frontend and backend.
+
 <p align="center">
   <a href="https://github.com/DeconstructedCube/aistudio-api"><img src="https://img.shields.io/badge/API-Gemini%20v1beta-4285F4?style=flat-square&logo=google" alt="Gemini API"></a>
   <a href="https://hub.docker.com/r/bedrockblock/aistudio-api"><img src="https://img.shields.io/badge/Docker-bedrockblock%2Faistudio--api-2496ED?style=flat-square&logo=docker" alt="Docker Hub"></a>
@@ -104,7 +116,7 @@ Open Termux and run the following commands step by step:
 pkg update -y && pkg install -y git
 
 # Step 2: Clone repository and enter directory
-git clone https://github.com/DeconstructedCube/aistudio-api.git
+git clone https://github.com/ecyasd/aistudio-api.git
 cd aistudio-api
 
 # Step 3: Initialize Python environment & sync dependencies (auto-resolves prebuilt Android wheels)
@@ -136,7 +148,7 @@ Open PowerShell or Windows Terminal:
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 # Step 2: Clone repository and enter directory
-git clone https://github.com/DeconstructedCube/aistudio-api.git
+git clone https://github.com/ecyasd/aistudio-api.git
 cd aistudio-api
 
 # Step 3: Sync dependencies
@@ -162,7 +174,7 @@ Open a terminal and run:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Step 2: Clone repository and enter directory
-git clone https://github.com/DeconstructedCube/aistudio-api.git
+git clone https://github.com/ecyasd/aistudio-api.git
 cd aistudio-api
 
 # Step 3: Sync dependencies

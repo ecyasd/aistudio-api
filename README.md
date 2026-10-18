@@ -1,5 +1,15 @@
 # aistudio-api
 
+基于 [DeconstructedCube/aistudio-api](https://github.com/DeconstructedCube/aistudio-api)。
+
+本分支包含浏览器启动与首次调用恢复、账号会话隔离、Cookie 刷新保存、API Key
+配置持久化，以及前端「实时错误」页面。错误仅保留在内存中，最近 10 分钟最多
+100 条，页面可见时每 5 秒刷新，重启后清空。Cookie 被 Google 撤销或登录过期时，
+仍需重新导入有效登录状态。可选的公开 HTTPS 加固启动方式见
+[deploy/README.md](deploy/README.md)。
+上游 Docker Hub 镜像不包含本分支修复；使用
+`docker build -t aistudio-api:local .` 从本仓库构建，才能使用对应的前后端。
+
 <p align="center">
   <a href="https://github.com/DeconstructedCube/aistudio-api"><img src="https://img.shields.io/badge/API-Gemini%20v1beta-4285F4?style=flat-square&logo=google" alt="Gemini API"></a>
   <a href="https://hub.docker.com/r/bedrockblock/aistudio-api"><img src="https://img.shields.io/badge/Docker-bedrockblock%2Faistudio--api-2496ED?style=flat-square&logo=docker" alt="Docker Hub"></a>
@@ -104,7 +114,7 @@
 pkg update -y && pkg install -y git
 
 # 步骤 2：克隆代码仓库并进入目录
-git clone https://github.com/DeconstructedCube/aistudio-api.git
+git clone https://github.com/ecyasd/aistudio-api.git
 cd aistudio-api
 
 # 步骤 3：初始化依赖环境（自动配置手机专属加速源，无需本地编译）
@@ -136,7 +146,7 @@ uv run python main.py server --port 8080
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 # 步骤 2：克隆代码仓库并进入目录
-git clone https://github.com/DeconstructedCube/aistudio-api.git
+git clone https://github.com/ecyasd/aistudio-api.git
 cd aistudio-api
 
 # 步骤 3：同步安装项目依赖
@@ -162,7 +172,7 @@ uv run python main.py server --port 8080
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # 步骤 2：克隆代码仓库并进入目录
-git clone https://github.com/DeconstructedCube/aistudio-api.git
+git clone https://github.com/ecyasd/aistudio-api.git
 cd aistudio-api
 
 # 步骤 3：同步安装项目依赖

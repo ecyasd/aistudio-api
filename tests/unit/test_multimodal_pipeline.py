@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -12,8 +12,10 @@ from aistudio_api.api.schemas import (
     GeminiPart,
 )
 from aistudio_api.application.chat_service import normalize_gemini_request
+from aistudio_api.infrastructure.browser.cdp_client import CDPPage
 from aistudio_api.infrastructure.gateway.capture import CapturedRequest
 from aistudio_api.infrastructure.gateway.client import AIStudioClient
+from aistudio_api.infrastructure.gateway.session_state import SessionContext
 
 
 def test_multimodal_zero_disk_io_pipeline():
@@ -43,6 +45,17 @@ def test_multimodal_zero_disk_io_pipeline():
 async def test_generate_image_tools_selection():
     """Verify tool override precedence and use_default_tools handling."""
     client = AIStudioClient(port=9222)
+    page = MagicMock(spec=CDPPage)
+    page.is_closed.return_value = False
+    client.session.set_ready_context(
+        SessionContext(
+            page=page,
+            snap_key="synthetic-image-test-snapshot",
+            auth_user="0",
+            auth_file=None,
+            base_template={},
+        )
+    )
     captured_tools = []
 
     async def mock_capture_request(*args, **kwargs):

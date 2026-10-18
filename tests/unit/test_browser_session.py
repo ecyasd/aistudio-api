@@ -280,8 +280,8 @@ async def test_generate_snapshot_hash_complex_tools_and_multimodal():
 
 
 @pytest.mark.asyncio
-async def test_account_service_activate_account_warms_up_browser():
-    """Verify activate_account invokes ensure_botguard_service for instant readiness."""
+async def test_account_service_activate_account_prepares_before_commit():
+    """Verify activation commits only after an atomic prepared transition."""
     mock_store = MagicMock(spec=AccountStore)
     mock_store.get_account.return_value = AccountMeta(
         id="acc_1",
@@ -294,8 +294,12 @@ async def test_account_service_activate_account_warms_up_browser():
     mock_store.get_auth_path_optional.return_value = "/data/accounts/acc_1/auth.json"
 
     mock_session = MagicMock(spec=BrowserSession)
-    mock_session.switch_auth = AsyncMock()
-    mock_session.ensure_botguard_service = AsyncMock()
+    mock_session.transition_to_account = AsyncMock()
+
+    async def verify_not_committed(*args, **kwargs):
+        mock_store.set_active_account.assert_not_called()
+
+    mock_session.transition_to_account.side_effect = verify_not_committed
 
     service = AccountService(mock_store)
 
@@ -306,8 +310,10 @@ async def test_account_service_activate_account_warms_up_browser():
 
     assert result is not None
     assert result.id == "acc_1"
-    mock_session.switch_auth.assert_called_once_with("/data/accounts/acc_1/auth.json")
-    mock_session.ensure_botguard_service.assert_called_once()
+    mock_session.transition_to_account.assert_awaited_once_with(
+        "/data/accounts/acc_1/auth.json", force_refresh=True
+    )
+    mock_store.set_active_account.assert_called_once_with("acc_1")
 
 
 @pytest.mark.asyncio

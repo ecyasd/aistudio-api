@@ -664,6 +664,18 @@ class AccountRotator:
         logger.error("账号 %s 登录态失效，已被永久禁用直至重新导入凭据", account_id)
         self.save_state()
 
+    def clear_auth_lockout(self, account_id: str) -> None:
+        """Recover refreshed credentials without resetting usage or model quotas."""
+        stats = self._stats.get(account_id)
+        if stats is None:
+            if self._store.get_account(account_id) is None:
+                return
+            stats = AccountStats(account_id=account_id)
+            self._stats[account_id] = stats
+        stats.session_expired = False
+        stats.auth_cooldown = 0.0
+        self.save_state()
+
     def clear_cooldown(self, account_id: str, model: str | None = None) -> None:
         """清除指定账号的 429 锁定。"""
         if account_id in self._stats:

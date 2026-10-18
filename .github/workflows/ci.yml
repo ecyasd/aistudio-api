@@ -37,6 +37,7 @@ jobs:
           filters: |
             backend:
               - 'src/aistudio_api/**'
+              - 'deploy/**'
               - 'tests/**'
               - 'pyproject.toml'
               - 'uv.lock'

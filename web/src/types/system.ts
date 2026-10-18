@@ -31,6 +31,12 @@ export interface HealthCheckResponse {
   status: string
   busy: boolean
 }
+export interface BrowserStatusResponse {
+  status: 'not_started' | 'idle' | 'starting' | 'ready' | 'failed' | 'closed'
+  process_running: boolean
+  in_flight: number
+  idle_timeout_seconds: number
+}
 export interface ApiKeyItem {
   name: string
   key: string

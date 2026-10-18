@@ -138,7 +138,7 @@ class ModelDiscoveryService:
             # 1. 优先通过当前激活的浏览器 Page 会话发 XHR 拉取 ListModels
             if session is not None:
                 try:
-                    page = getattr(session, "_page", None)
+                    page = session.page
                     if page is not None and not page.is_closed():
                         models = await self._fetch_via_page(page)
                         if models:

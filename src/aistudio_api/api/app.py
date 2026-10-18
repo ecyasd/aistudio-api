@@ -27,7 +27,9 @@ from aistudio_api.infrastructure.utils.logger import (
 )
 
 from .dependencies import require_api_key, require_web_auth
+from .error_middleware import ErrorRecordsMiddleware, record_http_failure
 from .routes_accounts import router as accounts_router
+from .routes_errors import router as errors_router
 from .routes_gemini import router as gemini_router
 from .routes_models import router as models_router
 from .routes_system import (
@@ -124,6 +126,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="AI Studio API", lifespan=lifespan)
 app.include_router(system_public_router)
 app.include_router(system_protected_router, dependencies=[Depends(require_web_auth)])
+app.include_router(errors_router, dependencies=[Depends(require_web_auth)])
 app.include_router(accounts_router, prefix="/api", dependencies=[Depends(require_web_auth)])
 app.include_router(accounts_router, dependencies=[Depends(require_web_auth)])
 app.include_router(gemini_router, dependencies=[Depends(require_api_key)])
@@ -133,6 +136,7 @@ app.include_router(models_router, dependencies=[Depends(require_api_key)])
 @app.exception_handler(HTTPException)
 async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONResponse:
     code, msg, status_str = classify_gemini_error_payload(exc)
+    record_http_failure(exc, code)
     return JSONResponse(
         status_code=code,
         content={
@@ -151,6 +155,7 @@ async def validation_exception_handler(
     _request: Request, exc: RequestValidationError
 ) -> JSONResponse:
     code, msg, status_str = 400, str(exc), "INVALID_ARGUMENT"
+    record_http_failure(exc, code)
     return JSONResponse(
         status_code=code,
         content={
@@ -308,6 +313,8 @@ async def spa_navigation_middleware(request: Request, call_next):
             "/rotation",
             "/config",
             "/api-keys",
+            "/errors",
+            "/browser/status",
         )
     )
     is_accounts_spa = request.url.path in ("/accounts", "/accounts/")
@@ -340,6 +347,9 @@ async def root_index():
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         return response
     return JSONResponse({"message": "AI Studio API Web UI"})
+
+
+app.add_middleware(ErrorRecordsMiddleware)
 
 
 def main():

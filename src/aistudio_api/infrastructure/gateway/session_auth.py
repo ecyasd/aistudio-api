@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -9,6 +10,10 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from aistudio_api.domain.errors import SessionExpiredError
+from aistudio_api.infrastructure.account.storage_state import (
+    atomic_write_json,
+    auth_file_version,
+)
 from aistudio_api.infrastructure.browser.cdp_client import CDPPage
 from aistudio_api.infrastructure.browser.scripts import (
     CHECK_IDENTITY_JS,
@@ -84,19 +89,38 @@ def get_aistudio_urls(
     return [AI_STUDIO_URL, AI_STUDIO_URL_FALLBACK]
 
 
+def get_auth_file_version(auth_file: str | None) -> str | None:
+    return auth_file_version(auth_file) if auth_file else None
+
+
+def bind_auth_file(
+    page: CDPPage, auth_file: str, *, expected_version: str | None = None
+) -> bool:
+    """Bind a page to the credential generation it actually imported."""
+    version = get_auth_file_version(auth_file)
+    if version is None or (expected_version is not None and version != expected_version):
+        return False
+    page._auth_file_path = str(Path(auth_file).resolve())
+    page._auth_file_version = version
+    return True
+
+
 async def load_cookies_to_page(page: CDPPage, auth_file: str | None) -> bool:
     """Inject cookies from auth_file into target page with session-conflict filtering."""
     if not auth_file or not Path(auth_file).is_file():
         return False
     try:
-        with suppress(Exception):
-            await page.cdp.send("Network.clearBrowserCookies")
-            await page.cdp.send("Network.clearBrowserCache")
-
-        data = json.loads(Path(auth_file).read_text(encoding="utf-8"))
+        raw_data = Path(auth_file).read_bytes()
+        data = json.loads(raw_data)
         cookies = data.get("cookies") or []
-        if not cookies:
+        if not isinstance(cookies, list) or not cookies:
             return False
+
+        # Record the exact bytes loaded, before yielding to a concurrent import.
+        page._auth_file_path = str(Path(auth_file).resolve())
+        page._auth_file_version = hashlib.sha256(raw_data).hexdigest()
+
+        await page.clear_cookies()
 
         cleaned_cookies = [
             c
@@ -158,24 +182,16 @@ async def verify_account_identity(page: CDPPage, auth_file: str | None) -> bool:
     )
 
     expected_email = (meta.get("email") or "").strip().lower()
-    discovered_email: str | None = None
+    discovered_email = await extract_account_email(page) if is_on_correct_user else None
 
-    if not expected_email and is_on_correct_user:
-        discovered_email = await extract_account_email(page)
-        if discovered_email:
-            log.info(
-                "已自动识别账号 %s (u/%s) 登录邮箱: %s",
-                account_id,
-                auth_user,
-                mask_email(discovered_email),
-            )
-            meta["email"] = discovered_email
-            with suppress(Exception):
-                meta_path.write_text(
-                    json.dumps(meta, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
-            expected_email = discovered_email.strip().lower()
+    if not expected_email and is_on_correct_user and discovered_email:
+        log.info(
+            "已自动识别账号 %s (u/%s) 登录邮箱: %s",
+            account_id,
+            auth_user,
+            mask_email(discovered_email),
+        )
+        expected_email = discovered_email.strip().lower()
 
     if not expected_email:
         return is_on_correct_user
@@ -190,16 +206,18 @@ async def verify_account_identity(page: CDPPage, auth_file: str | None) -> bool:
     if (
         discovered_email
         and discovered_email.strip().lower() != expected_email
-        and not is_on_correct_user
     ):
         log.warning(
             "[account-guard] 页面检测到不同账号 %s (期望 %s, acc_id=%s, u/%s, url=%s)，跳过本次 Cookie 回写以防覆盖",
-            discovered_email,
-            expected_email,
+            mask_email(discovered_email),
+            mask_email(expected_email),
             account_id,
             auth_user,
             curr_url,
         )
+        return False
+
+    if not is_on_correct_user:
         return False
 
     is_verified = False
@@ -207,19 +225,11 @@ async def verify_account_identity(page: CDPPage, auth_file: str | None) -> bool:
         is_verified = bool(
             await page.evaluate(
                 CHECK_IDENTITY_JS,
-                {"email": expected_email, "authUser": auth_user},
+                # Python already checks the route. Do not let the JS helper's
+                # route-only fallback substitute for matching a known email.
+                {"email": expected_email, "authUser": ""},
             )
         )
-
-    if (
-        not is_verified
-        and auth_user != "0"
-        and f"/u/{auth_user}/" in curr_url
-        and (
-            not discovered_email or discovered_email.strip().lower() == expected_email
-        )
-    ):
-        is_verified = True
 
     return is_verified
 
@@ -228,32 +238,59 @@ async def save_browser_cookies(
     page: CDPPage,
     auth_file: str | None,
     cookies: list[dict[str, object]] | None = None,
-) -> None:
-    """Save browser cookies back to auth_file JSON atomically."""
+) -> bool:
+    """Checkpoint a verified full jar without overwriting a newer import."""
     if not auth_file:
-        return
+        return False
     try:
+        auth_path = Path(auth_file).resolve()
+        bound_path = vars(page).get("_auth_file_path")
+        version = vars(page).get("_auth_file_version")
+        if bound_path != str(auth_path) or not isinstance(version, str):
+            return False
+        current_url = str(page.url or "")
+        host = (urlsplit(current_url).hostname or "").lower()
+        if (
+            page.is_closed()
+            or host != "aistudio.google.com"
+            or is_login_page_url(current_url)
+            or not await verify_account_identity(page, auth_file)
+        ):
+            return False
         current_cookies = cookies
         if current_cookies is None:
-            if page.is_closed():
-                return
             current_cookies = await page.get_cookies()
-        if not current_cookies:
-            return
-        auth_path = Path(auth_file)
-        origins = []
-        if auth_path.exists():
-            with suppress(Exception):
-                existing = json.loads(auth_path.read_text(encoding="utf-8"))
-                origins = existing.get("origins", [])
-        auth_path.parent.mkdir(parents=True, exist_ok=True)
-        auth_path.write_text(
-            json.dumps({"cookies": current_cookies, "origins": origins}, indent=2),
-            encoding="utf-8",
+        if not isinstance(current_cookies, list) or not current_cookies:
+            return False
+        if any(not isinstance(cookie, dict) or not cookie.get("name") for cookie in current_cookies):
+            return False
+        existing = json.loads(auth_path.read_bytes())
+        old_cookies = existing.get("cookies") or []
+        auth_families = (
+            {"SID", "__Secure-1PSID", "__Secure-3PSID"},
+            {"APISID", "SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID"},
         )
+        old_names = {cookie.get("name") for cookie in old_cookies if isinstance(cookie, dict)}
+        new_names = {cookie.get("name") for cookie in current_cookies if cookie.get("value")}
+        if not any(new_names & family for family in auth_families) or any(
+            old_names & family and not new_names & family for family in auth_families
+        ):
+            # Empty/partial snapshots must never erase the last usable export.
+            # A verified full jar may legitimately retire one cookie in a
+            # family; do not resurrect it or block rotation of its replacement.
+            return False
+        data = {"cookies": current_cookies, "origins": existing.get("origins", [])}
+        if not atomic_write_json(auth_path, data, expected_version=version):
+            log.debug("Cookie checkpoint skipped after a newer credential import")
+            return False
+        page._auth_file_version = hashlib.sha256(
+            json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
         log.info("已保存 %d 个 Cookie 至 %s", len(current_cookies), auth_file)
+        return True
     except Exception as e:
         log.debug("保存 Cookie 失败: %s", e)
+        return False
 
 
 async def bootstrap_google_session(page: CDPPage) -> None:
@@ -335,10 +372,20 @@ async def navigate_to_aistudio(
                     current_url,
                 )
                 if await load_cookies_to_page(page, auth_file):
-                    return
-                raise SessionExpiredError(
-                    f"Cookie 认证失败，已被重定向到 Google 登录页。 (url={current_url})"
-                )
+                    # Injection changes the jar, not the current login document.
+                    # Retry the target once and verify its actual destination.
+                    await page.goto(url, wait_until="domcontentloaded", timeout_s=20.0)
+                    current_url = page.url or ""
+                    with suppress(Exception):
+                        eval_url = await page.evaluate("() => window.location.href", timeout_s=2.0)
+                        if eval_url:
+                            current_url = str(eval_url)
+                if is_login_page_url(current_url):
+                    raise SessionExpiredError(
+                        f"Cookie 认证失败，已被重定向到 Google 登录页。 (url={current_url})"
+                    )
+                if "available-regions" in current_url:
+                    raise RuntimeError(f"Google AI Studio 地区限制: {current_url}")
 
             for _ in range(15):
                 with suppress(Exception):
@@ -356,7 +403,8 @@ async def navigate_to_aistudio(
                     await save_cookies_cb(auth_file=auth_file)
                 else:
                     await save_browser_cookies(page, auth_file)
-            return
+                return
+            raise RuntimeError("AI Studio account identity does not match the selected account")
         except Exception as exc:
             if "地区限制" in str(exc) or "Cookie 认证失败" in str(exc):
                 raise exc

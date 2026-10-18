@@ -1,8 +1,16 @@
+from unittest.mock import AsyncMock, MagicMock
+
 import httpx
 import pytest
 
 from aistudio_api.api.app import app
+from aistudio_api.api.response_models import GeminiModelResponse
+from aistudio_api.api.routes_models import _to_gemini_model
 from aistudio_api.config import settings
+from aistudio_api.infrastructure.browser.cdp_client import CDPPage
+from aistudio_api.infrastructure.gateway.model_discovery import ModelDiscoveryService
+from aistudio_api.infrastructure.gateway.session import BrowserSession
+from aistudio_api.infrastructure.gateway.session_state import SessionContext
 
 
 def _build_client() -> httpx.AsyncClient:
@@ -80,12 +88,6 @@ async def test_get_single_model_not_found_returns_404(monkeypatch):
 async def test_model_discovery_falls_back_to_auth_file_cookies(tmp_path, monkeypatch):
     """测试当页面未就绪时，model_discovery 从 auth.json 读取凭据进行 HTTP 探测降级。"""
     import json
-    from unittest.mock import AsyncMock, MagicMock
-
-    from aistudio_api.infrastructure.gateway.model_discovery import (
-        ModelDiscoveryService,
-    )
-
     auth_file = tmp_path / "auth.json"
     auth_file.write_text(
         json.dumps(
@@ -121,3 +123,44 @@ async def test_model_discovery_falls_back_to_auth_file_cookies(tmp_path, monkeyp
     call_cookies, call_auth_user = service._fetch_via_http.call_args[0]
     assert call_cookies["SAPISID"] == "test_sapisid"
     assert call_auth_user == "0"
+
+
+@pytest.mark.asyncio
+async def test_model_discovery_uses_real_session_page_property(monkeypatch):
+    monkeypatch.setattr(settings, "auth_file", None)
+    session = BrowserSession(port=9222)
+    page = MagicMock(spec=CDPPage)
+    page.is_closed.return_value = False
+    session.set_ready_context(
+        SessionContext(
+            page=page,
+            snap_key="synthetic",
+            auth_user="0",
+            auth_file=None,
+            base_template={},
+        )
+    )
+    service = ModelDiscoveryService()
+    models = [{"id": "gemini-test", "displayName": "Synthetic"}]
+    page_fetch = AsyncMock(return_value=models)
+    http_fetch = AsyncMock()
+    monkeypatch.setattr(service, "_fetch_via_page", page_fetch)
+    monkeypatch.setattr(service, "_fetch_via_http", http_fetch)
+
+    assert await service.get_models(session=session) == models
+    page_fetch.assert_awaited_once_with(page)
+    http_fetch.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "upstream_methods",
+    [None, ["generateContent", "countTokens", "createCachedContent", "embedContent"]],
+)
+def test_model_metadata_advertises_only_gateway_capabilities(upstream_methods):
+    model = _to_gemini_model(
+        {"id": "gemini-test", "supportedGenerationMethods": upstream_methods}
+    )
+    assert model.supportedGenerationMethods == ["generateContent"]
+    assert GeminiModelResponse(name="models/gemini-test").supportedGenerationMethods == [
+        "generateContent"
+    ]

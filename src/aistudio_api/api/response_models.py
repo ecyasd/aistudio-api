@@ -96,11 +96,7 @@ class GeminiModelResponse(BaseModel):
     description: str | None = None
     inputTokenLimit: int | None = None
     outputTokenLimit: int | None = None
-    supportedGenerationMethods: list[str] = [
-        "generateContent",
-        "countTokens",
-        "createCachedContent",
-    ]
+    supportedGenerationMethods: list[str] = ["generateContent"]
     temperature: float | None = None
     topP: float | None = None
     topK: int | None = None

@@ -2,35 +2,22 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import shutil
 import threading
-import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from os.path import abspath, basename, join
 from pathlib import Path
 from typing import ClassVar
 
+from aistudio_api.infrastructure.account.storage_state import atomic_write_json
+
 
 def _atomic_write_json(path: Path, data: object) -> None:
     """原子写入 JSON 文件（写唯一临时文件后原子替换，防止写穿或损坏）。"""
-    target_path = path.resolve()
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = target_path.with_suffix(f".tmp.{os.getpid()}_{time.time_ns()}")
-    try:
-        tmp_path.write_text(
-            json.dumps(data, ensure_ascii=False, separators=(",", ":")),
-            encoding="utf-8",
-        )
-        tmp_path.replace(target_path)
-    except Exception:
-        if tmp_path.exists():
-            with contextlib.suppress(OSError):
-                tmp_path.unlink()
-        raise
+    atomic_write_json(path, data)
 
 
 # 默认搜索路径（与 config.py 保持一致）

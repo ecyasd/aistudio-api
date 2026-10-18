@@ -56,10 +56,11 @@ class AccountService:
             logger.error("账号 %s 的账号目录不存在", account_id)
             return None
 
+        await browser_session.transition_to_account(str(auth_path), force_refresh=True)
+        # Browser preparation may fail or be cancelled. Persist the selection
+        # only after the target session is ready so rollback keeps both aligned.
         self._store.set_active_account(account_id)
         logger.info("已切换活跃账号持久化状态: %s", account_id)
-        await browser_session.switch_auth(str(auth_path))
-        await browser_session.ensure_botguard_service()
         logger.info("已切换到账号: %s (%s)", account_id, account.name)
         return account
 

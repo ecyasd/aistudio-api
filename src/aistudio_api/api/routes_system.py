@@ -20,6 +20,11 @@ from aistudio_api.infrastructure.gateway.model_defaults import (
     _resolve_config_path,
     invalidate_config_cache,
 )
+from aistudio_api.infrastructure.utils.config_store import (
+    api_key_items,
+    mutate_config,
+    save_model_config,
+)
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 logger = get_logger("routes.system")
@@ -72,6 +77,20 @@ async def health():
 @protected_router.get("/stats", response_model=StatsResponse)
 async def stats():
     return stats_response()
+
+
+@protected_router.get("/browser/status")
+async def browser_status(
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+) -> dict[str, object]:
+    """Report lifecycle state without starting Chromium or inspecting credentials."""
+    client = runtime_state.client
+    if client is None:
+        return {
+            "status": "not_started", "process_running": False,
+            "in_flight": 0, "idle_timeout_seconds": 0,
+        }
+    return client.session.get_status()
 
 
 # ========== 调度与配额管理 API ==========
@@ -242,7 +261,7 @@ async def update_config_yaml(req: ConfigYamlUpdateRequest) -> dict[str, object]:
         raise HTTPException(400, detail=f"YAML 语法格式错误: {e}") from e
     config_yaml_path = _resolve_config_path(None)
     try:
-        config_yaml_path.write_text(req.yaml_content, encoding="utf-8")
+        save_model_config(config_yaml_path, parsed or {})
         invalidate_config_cache()
 
         if isinstance(parsed, dict) and "logging" in parsed:
@@ -378,37 +397,17 @@ async def create_api_key(req: CreateApiKeyRequest) -> ApiKeyItemModel:
     name = req.name.strip() if req.name.strip() else "API Key"
 
     config_path = _resolve_config_path(None)
-    content = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
-    parsed = yaml.safe_load(content) or {}
-    if not isinstance(parsed, dict):
-        parsed = {}
 
-    raw_keys = parsed.get("api_keys")
-    new_list: list[dict[str, str]] = []
-    if isinstance(raw_keys, list):
-        for item in raw_keys:
-            if isinstance(item, dict):
-                new_list.append(
-                    {
-                        "name": str(item.get("name") or "API Key"),
-                        "key": str(item.get("key") or ""),
-                        "created_at": str(item.get("created_at") or ""),
-                    }
-                )
-            elif isinstance(item, str) and item.strip():
-                new_list.append(
-                    {"name": "API Key", "key": item.strip(), "created_at": ""}
-                )
+    def append_key(parsed: dict[str, object]) -> dict[str, object]:
+        items = api_key_items(parsed.get("api_keys"))
+        items.append({"name": name, "key": new_key, "created_at": created_at})
+        parsed["api_keys"] = items
+        return parsed
 
-    new_list.append({"name": name, "key": new_key, "created_at": created_at})
-    parsed["api_keys"] = new_list
-
-    config_path.write_text(
-        yaml.dump(parsed, allow_unicode=True, sort_keys=False), encoding="utf-8"
-    )
+    mutate_config(config_path, append_key)
     invalidate_config_cache()
 
-    logger.info("已创建新 API Key: 备注=%s, 密钥=%s", name, new_key[:8] + "...")
+    logger.info("已创建新 API Key: 备注=%s", name)
     return ApiKeyItemModel(name=name, key=new_key, created_at=created_at)
 
 
@@ -417,41 +416,19 @@ async def delete_api_key(key_value: str) -> dict[str, bool]:
     """在 config.yaml 中删除指定 API Key。"""
 
     config_path = _resolve_config_path(None)
-    content = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
-    parsed = yaml.safe_load(content) or {}
-    if not isinstance(parsed, dict):
-        raise HTTPException(404, detail="未找到 API Key")
 
-    raw_keys = parsed.get("api_keys")
-    new_list: list[dict[str, str]] = []
-    found = False
-    if isinstance(raw_keys, list):
-        for item in raw_keys:
-            item_key = str(item.get("key") if isinstance(item, dict) else item).strip()
-            if item_key == key_value:
-                found = True
-                continue
-            if isinstance(item, dict):
-                new_list.append(
-                    {
-                        "name": str(item.get("name") or "API Key"),
-                        "key": item_key,
-                        "created_at": str(item.get("created_at") or ""),
-                    }
-                )
-            elif item_key:
-                new_list.append({"name": "API Key", "key": item_key, "created_at": ""})
+    def remove_key(parsed: dict[str, object]) -> dict[str, object]:
+        items = api_key_items(parsed.get("api_keys"))
+        remaining = [item for item in items if item["key"] != key_value]
+        if len(remaining) == len(items):
+            raise HTTPException(404, detail="未找到该 API Key")
+        parsed["api_keys"] = remaining
+        return parsed
 
-    if not found:
-        raise HTTPException(404, detail="未找到该 API Key")
-
-    parsed["api_keys"] = new_list
-    config_path.write_text(
-        yaml.dump(parsed, allow_unicode=True, sort_keys=False), encoding="utf-8"
-    )
+    mutate_config(config_path, remove_key)
     invalidate_config_cache()
 
-    logger.info("已删除 API Key: %s", key_value[:8] + "...")
+    logger.info("已删除 API Key")
     return {"ok": True}
 
 
@@ -462,43 +439,28 @@ async def update_api_key_name(
     """在 config.yaml 中更新指定 API Key 的备注名。"""
 
     config_path = _resolve_config_path(None)
-    content = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
-    parsed = yaml.safe_load(content) or {}
-    if not isinstance(parsed, dict):
-        raise HTTPException(404, detail="未找到 API Key")
-
-    raw_keys = parsed.get("api_keys")
-    new_list: list[dict[str, str]] = []
-    updated_item: ApiKeyItemModel | None = None
     new_name = req.name.strip() if req.name.strip() else "API Key"
+    updated_item: ApiKeyItemModel | None = None
 
-    if isinstance(raw_keys, list):
-        for item in raw_keys:
-            item_key = str(item.get("key") if isinstance(item, dict) else item).strip()
-            created = str(item.get("created_at") if isinstance(item, dict) else "")
-            if item_key == key_value:
+    def rename_key(parsed: dict[str, object]) -> dict[str, object]:
+        nonlocal updated_item
+        items = api_key_items(parsed.get("api_keys"))
+        for item in items:
+            if item["key"] == key_value:
+                item["name"] = new_name
                 updated_item = ApiKeyItemModel(
-                    name=new_name, key=item_key, created_at=created or None
+                    name=new_name,
+                    key=key_value,
+                    created_at=item["created_at"] or None,
                 )
-                new_list.append(
-                    {"name": new_name, "key": item_key, "created_at": created}
-                )
-            else:
-                name_val = str(
-                    item.get("name") if isinstance(item, dict) else "API Key"
-                )
-                new_list.append(
-                    {"name": name_val, "key": item_key, "created_at": created}
-                )
+        if updated_item is None:
+            raise HTTPException(404, detail="未找到该 API Key")
+        parsed["api_keys"] = items
+        return parsed
 
-    if not updated_item:
-        raise HTTPException(404, detail="未找到该 API Key")
-
-    parsed["api_keys"] = new_list
-    config_path.write_text(
-        yaml.dump(parsed, allow_unicode=True, sort_keys=False), encoding="utf-8"
-    )
+    mutate_config(config_path, rename_key)
     invalidate_config_cache()
-    logger.info("API Key 备注名已更新: %s -> %s", key_value[:8] + "...", new_name)
+    logger.info("API Key 备注名已更新: %s", new_name)
 
+    assert updated_item is not None
     return updated_item

@@ -29,16 +29,9 @@ def _to_gemini_model(model_data: Mapping[str, object]) -> GeminiModelResponse:
     description = str(model_data.get("description") or f"Google {display_name} model")
     input_tokens = int(str(model_data.get("inputTokenLimit") or 1048576))
     output_tokens = int(str(model_data.get("outputTokenLimit") or 8192))
-    raw_methods = model_data.get("supportedGenerationMethods")
-    methods = (
-        [str(x) for x in raw_methods]
-        if isinstance(raw_methods, list)
-        else [
-            "generateContent",
-            "countTokens",
-            "createCachedContent",
-        ]
-    )
+    # Advertise the capability implemented by this gateway, including its
+    # streaming transport, rather than unsupported upstream API methods.
+    methods = ["generateContent"]
     return GeminiModelResponse(
         name=name,
         version="001",

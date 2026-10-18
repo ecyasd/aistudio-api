@@ -4,6 +4,7 @@ const LoginView = () => import('@/views/LoginView.vue')
 const DashboardView = () => import('@/views/DashboardView.vue')
 const AccountsView = () => import('@/views/AccountsView.vue')
 const SettingsView = () => import('@/views/SettingsView.vue')
+const ErrorRecordsView = () => import('@/views/ErrorRecordsView.vue')
 
 const routes: RouteRecordRaw[] = [
   {
@@ -23,6 +24,12 @@ const routes: RouteRecordRaw[] = [
     name: 'accounts',
     component: AccountsView,
     meta: { title: '账号管理' },
+  },
+  {
+    path: '/error-records',
+    name: 'error-records',
+    component: ErrorRecordsView,
+    meta: { title: '实时错误' },
   },
   {
     path: '/settings',

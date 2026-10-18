@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
 
 from aistudio_api.api.state import runtime_state
 from aistudio_api.infrastructure.utils.logger import get_logger
@@ -14,6 +15,15 @@ MAX_RETRIES = 5
 _switch_lock: asyncio.Lock | None = None
 _switch_lock_loop: asyncio.AbstractEventLoop | None = None
 _last_switch_time: float = 0.0
+
+
+class AccountPreparationError(Exception):
+    """Preserve the identity attempted before a request obtained a session lease."""
+
+    def __init__(self, account_id: str, original_error: Exception) -> None:
+        super().__init__("Could not prepare account session")
+        self.account_id = account_id
+        self.original_error = original_error
 
 
 def _get_switch_lock() -> asyncio.Lock:
@@ -34,6 +44,8 @@ async def try_switch_account(
     *,
     is_auth_error: bool = False,
     is_session_expired: bool = False,
+    failure_recorded: bool = False,
+    failed_context_id: int | None = None,
 ) -> bool:
     """尝试切换到下一个对目标 model 可用的账号。防止并发级联切号。"""
     global _last_switch_time
@@ -71,6 +83,38 @@ async def try_switch_account(
         current_active = account_service.get_active_account()
         current_id = current_active.id if current_active else None
 
+        active_context = client.session.active_context
+        active_context_id = active_context.context_id if active_context else None
+        same_account_recovered = bool(
+            current_id
+            and current_id == failed_account_id
+            and not is_session_expired
+            and (
+                _last_switch_time >= entry_time
+                or (
+                    failed_context_id is not None
+                    and isinstance(active_context_id, int)
+                    and active_context_id != failed_context_id
+                )
+            )
+        )
+        if same_account_recovered and current_id is not None:
+            # Old concurrent 403s belong to the retired session. A caller may
+            # already have marked one before entering the lock; remove only
+            # that obsolete auth lockout, preserving model quotas/cooldowns.
+            if is_auth_error and failure_recorded:
+                rotator.clear_auth_lockout(current_id)
+            if rotator.is_account_available(current_id, model=model):
+                return True
+
+        # A concurrent switch must not prevent attribution to the failed lease.
+        # Auth errors from a retired context must not lock a refreshed session.
+        if failed_account_id and not failure_recorded and not same_account_recovered:
+            if is_session_expired:
+                rotator.record_session_expired(failed_account_id, model=model)
+            elif is_auth_error:
+                rotator.record_auth_error(failed_account_id, model=model)
+
         # 双重检查 1：如果已有并发协程在 entry_time 之后完成切号或在位自愈刷新，且当前账号对该模型可用，则直接复用
         if (
             _last_switch_time >= entry_time
@@ -84,12 +128,6 @@ async def try_switch_account(
                 model,
             )
             return True
-
-        # 遇到登录态失效时，永久禁用该账号并拒绝原地重试
-        if failed_account_id and is_session_expired:
-            rotator.record_session_expired(failed_account_id, model=model)
-        elif failed_account_id and is_auth_error:
-            rotator.record_auth_error(failed_account_id, model=model)
 
         # 双重检查 2：如果已经由并发协程切换到了新账号，且新账号对当前 model 可用，则直接复用
         if (
@@ -120,10 +158,15 @@ async def try_switch_account(
             return False
 
         if current_id is None or next_account.id != current_id:
-            result = await account_service.activate_account(
-                next_account.id,
-                client.session,
-            )
+            try:
+                result = await account_service.activate_account(
+                    next_account.id,
+                    client.session,
+                )
+            except AccountPreparationError:
+                raise
+            except Exception as exc:
+                raise AccountPreparationError(next_account.id, exc) from exc
             if result is not None:
                 rotator.clear_cooldown(next_account.id, model=model)
                 _last_switch_time = time.time()
@@ -142,10 +185,15 @@ async def try_switch_account(
                 current_id,
             )
             client.clear_templates()
-            result = await account_service.activate_account(
-                current_id,
-                client.session,
-            )
+            try:
+                result = await account_service.activate_account(
+                    current_id,
+                    client.session,
+                )
+            except AccountPreparationError:
+                raise
+            except Exception as exc:
+                raise AccountPreparationError(current_id, exc) from exc
             if result is not None:
                 rotator.clear_cooldown(current_id, model=model)
                 _last_switch_time = time.time()
@@ -170,29 +218,67 @@ async def ensure_active_account(attempt: int, model: str | None = None) -> None:
         # 当前账号对该模型已限流，提前切号
         await try_switch_account(model=model, failed_account_id=current.id)
 
+    # Registry selection and browser initialization are separate. Resolve the
+    # active path lazily so accounts imported after process startup also work.
+    async with _get_switch_lock():
+        account_svc = runtime_state.account_service
+        client = runtime_state.client
+        current = account_svc.get_active_account() if account_svc else None
+        if account_svc is None or client is None or current is None:
+            return
+        session = client.session
+        auth_path = account_svc.get_account_auth_path(current.id)
+        if auth_path is None:
+            raise RuntimeError("Active account credentials are unavailable")
+        target_auth = str(auth_path)
+        if session._auth_file != target_auth or not session.is_ready:
+            try:
+                await session.transition_to_account(target_auth)
+            except AccountPreparationError:
+                raise
+            except Exception as exc:
+                raise AccountPreparationError(current.id, exc) from exc
+
+
+def account_id_for_auth_file(auth_file: str | None) -> str | None:
+    """Identify the account actually leased by a request, without active fallback."""
+    account_service = runtime_state.account_service
+    if not auth_file or account_service is None:
+        return None
+    target = Path(auth_file).resolve()
+    for account in account_service.list_accounts():
+        auth_path = account_service.get_account_auth_path(account.id)
+        if auth_path is not None and Path(auth_path).resolve() == target:
+            return account.id
+    return None
+
 
 def record_rotator_event(
     event: str,
     model: str | None = None,
+    *,
+    account_id: str | None,
 ) -> None:
-    """记录调度器事件（成功、限流、错误、鉴权异常）。"""
+    """Record an event against its leased account, never the later active account."""
     rotator = runtime_state.rotator
-    account_service = runtime_state.account_service
-    account = account_service.get_active_account() if account_service else None
-    if not rotator or account is None:
+    if not rotator or account_id is None:
         return
     if event == "success":
-        rotator.record_success(account.id, model=model)
+        rotator.record_success(account_id, model=model)
     elif event == "rate_limited":
-        rotator.record_rate_limited(account.id, model=model)
+        rotator.record_rate_limited(account_id, model=model)
     elif event == "auth_error":
-        rotator.record_auth_error(account.id, model=model)
+        rotator.record_auth_error(account_id, model=model)
+    elif event == "session_expired":
+        rotator.record_session_expired(account_id, model=model)
     elif event == "error":
-        rotator.record_error(account.id, model=model)
+        rotator.record_error(account_id, model=model)
 
 
 __all__ = [
     "MAX_RETRIES",
+    "AccountPreparationError",
+    "account_id_for_auth_file",
     "ensure_active_account",
     "record_rotator_event",
     "try_switch_account",

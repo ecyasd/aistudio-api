@@ -14,7 +14,14 @@ from aistudio_api.infrastructure.browser.scripts import (
     INSTALL_HOOKS_JS,
     STOP_GENERATION_JS,
 )
-from aistudio_api.infrastructure.gateway.session_auth import is_login_page_url
+from aistudio_api.infrastructure.gateway.session_auth import (
+    is_login_page_url,
+    navigate_to_aistudio,
+)
+from aistudio_api.infrastructure.gateway.wire_codec import (
+    AistudioWireCodec,
+    InvalidRequestTemplateError,
+)
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 log = get_logger("session.botguard")
@@ -135,33 +142,96 @@ async def bootstrap_botguard_and_template(
     reload_cookies_cb: Callable[[CDPPage], Awaitable[bool]] | None = None,
     is_proc_alive_cb: Callable[[], bool] | None = None,
     max_wait_seconds: int = 45,
+    auth_user: str = "0",
 ) -> tuple[str, dict[str, object]]:
-    """Execute 'say 1' bootstrap probe to capture BotGuardService and baseline wire template."""
-    current_url = getattr(page, "url", "") or ""
-    if "available-regions" in current_url:
-        raise RuntimeError("Google AI Studio 地区限制: 访问被重定向至 available-regions")
+    """Capture one verified template, with one bounded login recovery attempt."""
+    for attempt in range(2):
+        try:
+            return await _capture_botguard_and_template_once(
+                page,
+                is_proc_alive_cb=is_proc_alive_cb,
+                max_wait_seconds=max_wait_seconds,
+            )
+        except SessionExpiredError as initial_error:
+            if attempt != 0 or reload_cookies_cb is None:
+                raise
+            if not await reload_cookies_cb(page):
+                raise
 
-    snap_key = await install_page_hooks(page)
+            # Cookie injection alone cannot recover a login document. Navigate
+            # to this account's Studio route and verify its UI before a fresh
+            # hook/template capture. Do not infer an account from a login URL.
+            await navigate_to_aistudio(page, auth_user=auth_user, auth_file=None)
+            try:
+                await page.wait_for_selector("textarea", timeout_s=15.0)
+            except Exception as exc:
+                if is_login_page_url(getattr(page, "url", "")):
+                    raise SessionExpiredError(
+                        "Google login redirect persisted after session recovery"
+                    ) from exc
+                raise InvalidRequestTemplateError(
+                    "AI Studio did not become ready after session recovery"
+                ) from exc
+            if is_login_page_url(getattr(page, "url", "")):
+                raise SessionExpiredError(
+                    "Google login redirect persisted after session recovery"
+                ) from initial_error
+
+    raise AssertionError("Unreachable session recovery state")
+
+
+async def _capture_botguard_and_template_once(
+    page: CDPPage,
+    is_proc_alive_cb: Callable[[], bool] | None = None,
+    max_wait_seconds: int = 45,
+) -> tuple[str, dict[str, object]]:
+    """Execute a bootstrap probe in one document without reusing old hooks."""
+    current_url = getattr(page, "url", "") or ""
+    if is_login_page_url(current_url):
+        raise SessionExpiredError("Google login redirect before BotGuard capture")
+    if "available-regions" in current_url:
+        raise RuntimeError(
+            "Google AI Studio 地区限制: 访问被重定向至 available-regions"
+        )
+
+    try:
+        snap_key = await install_page_hooks(page)
+    except Exception as exc:
+        if is_login_page_url(getattr(page, "url", "")):
+            raise SessionExpiredError(
+                "Google login redirect while installing BotGuard hooks"
+            ) from exc
+        raise
 
     t0 = time.time()
     captured: dict[str, object] = {}
     original_text: str = ""
+    invalid_template_seen = False
+    probe_stopped = False
 
     def on_req(req: dict[str, object]) -> None:
+        nonlocal invalid_template_seen
         url = str(req.get("url") or "")
         if "GenerateContent" not in url or "Count" in url or captured:
             return
         body = str(req.get("post_data") or "")
         if not body:
             return
+        try:
+            AistudioWireCodec().decode(body)
+        except InvalidRequestTemplateError as exc:
+            invalid_template_seen = True
+            log.debug("忽略不可用的 AI Studio 请求模板: %s", exc)
+            return
         captured["url"] = url
         captured["headers"] = req.get("headers") or {}
         captured["body"] = body
 
     unsub = page.on_request(on_req)
-    await page.evaluate(DIALOG_CLEANUP_JS)
-    await page.evaluate(
-        """(() => {
+    try:
+        await page.evaluate(DIALOG_CLEANUP_JS)
+        await page.evaluate(
+            """(() => {
             const clickable = Array.from(document.querySelectorAll('button, mat-card, a, [role="button"], [role="tab"], .nav-item'));
             const targets = ['Playground', 'Code and Chat', 'Chat prompt', 'New chat', 'Start building', 'Create prompt'];
             for (const term of targets) {
@@ -169,24 +239,21 @@ async def bootstrap_botguard_and_template(
                 if (target) { target.click(); return; }
             }
         })()"""
-    )
-    await page.wait_for_timeout(800)
+        )
+        await page.wait_for_timeout(800)
 
-    try:
         try:
             await page.wait_for_selector("textarea", timeout_s=15.0)
         except Exception as err:
             dbg_url = getattr(page, "url", "") or ""
             if is_login_page_url(dbg_url):
-                log.warning("等待输入框期间检测到登录页重定向: %s，尝试重新注入 Cookie...", dbg_url)
-                if reload_cookies_cb and await reload_cookies_cb(page):
-                    await page.wait_for_selector("textarea", timeout_s=15.0)
-                else:
-                    raise SessionExpiredError(
-                        f"Cookie 认证失效，已被重定向到 Google 登录页: {dbg_url}"
-                    ) from err
+                raise SessionExpiredError(
+                    "Google login redirect while waiting for AI Studio textarea"
+                ) from err
             if "available-regions" in dbg_url:
-                raise RuntimeError("Google AI Studio 地区限制: 访问被重定向至 available-regions") from err
+                raise RuntimeError(
+                    "Google AI Studio 地区限制: 访问被重定向至 available-regions"
+                ) from err
 
             dbg_title = await page.title()
             raise RuntimeError(
@@ -194,7 +261,12 @@ async def bootstrap_botguard_and_template(
             ) from err
 
         original_text = str(
-            (await page.evaluate("() => document.querySelector('textarea')?.value || ''")) or ""
+            (
+                await page.evaluate(
+                    "() => document.querySelector('textarea')?.value || ''"
+                )
+            )
+            or ""
         )
         await enable_temporary_chat(page)
         await page.fill("textarea", BOTGUARD_BOOTSTRAP_PROMPT)
@@ -202,8 +274,11 @@ async def bootstrap_botguard_and_template(
         await page.evaluate(DIALOG_CLEANUP_JS)
 
         if not await click_run_button(page):
-            raise RuntimeError("failed to trigger run button while capturing BotGuardService")
+            raise RuntimeError(
+                "failed to trigger run button while capturing BotGuardService"
+            )
 
+        service_seen = False
         for i in range(max_wait_seconds):
             if is_proc_alive_cb and not is_proc_alive_cb():
                 raise RuntimeError("Browser process died during BotGuard capture")
@@ -212,27 +287,25 @@ async def bootstrap_botguard_and_template(
 
             curr_url = getattr(page, "url", "") or ""
             if is_login_page_url(curr_url):
-                log.warning("BotGuard 捕获期间检测到登录页重定向: %s，尝试重新注入 Cookie...", curr_url)
-                if reload_cookies_cb and await reload_cookies_cb(page):
-                    break
-                raise SessionExpiredError(f"Cookie 认证失效，已跳转至登录页: {curr_url}")
+                raise SessionExpiredError(
+                    "Google login redirect during BotGuard capture"
+                )
 
             await page.wait_for_timeout(1000)
             if await page.evaluate("() => !!window.__AISTUDIO__?.service"):
+                service_seen = True
+                # The hook stores `service` before its asynchronous snapshot
+                # completes. Stopping here without a captured request can
+                # cancel that first request before the browser emits its body.
+                if not captured:
+                    continue
                 with suppress(Exception):
                     await page.evaluate(STOP_GENERATION_JS)
-                if not captured:
-                    for _ in range(25):
-                        if captured:
-                            break
-                        await page.wait_for_timeout(100)
+                    probe_stopped = True
 
                 await page.fill("textarea", original_text)
                 with suppress(Exception):
                     await page.evaluate(DOM_GC_CLEANUP_JS)
-
-                if not captured:
-                    raise RuntimeError("BotGuard service captured but wire template missing")
 
                 log.info(
                     "BotGuard 握手成功并截获模板，耗时 %d 秒 (累计 %.1f 秒)",
@@ -241,8 +314,23 @@ async def bootstrap_botguard_and_template(
                 )
                 return snap_key, captured
 
+        if invalid_template_seen or service_seen:
+            raise InvalidRequestTemplateError(
+                "no valid GenerateContent body was captured before the deadline"
+            )
         raise RuntimeError(f"BotGuardService capture timeout after {max_wait_seconds}s")
+    except SessionExpiredError:
+        raise
+    except Exception as exc:
+        if is_login_page_url(getattr(page, "url", "")):
+            raise SessionExpiredError(
+                "Google login redirect interrupted BotGuard capture"
+            ) from exc
+        raise
     finally:
         unsub()
+        if not probe_stopped:
+            with suppress(Exception):
+                await page.evaluate(STOP_GENERATION_JS)
         with suppress(Exception):
             await page.fill("textarea", original_text)

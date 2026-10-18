@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import type { ModelProfileItem } from './types.ts'
+import type { GenerationConfigDefaults, ModelProfileItem } from './types.ts'
 import {
   TOOL_SUGGESTIONS,
   IMAGE_MODE_OPTIONS,
@@ -137,6 +137,7 @@ function updateThinkingConfig(level: 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH' | nul
           <div class="flex items-center gap-1.5">
             <div class="flex-1">
               <ConfigInput
+                :model-value="profile.name"
                 label="规则分组名称"
                 description="唯一标识"
                 placeholder="例如: image_models"
@@ -259,7 +260,7 @@ function updateThinkingConfig(level: 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH' | nul
                 :model-value="profile.generation_config_defaults?.media_resolution"
                 label="多模态输入分辨率"
                 :options="MEDIA_RESOLUTION_OPTIONS"
-                @update:model-value="updateGenerationConfig('media_resolution', $event as string | null)"
+                @update:model-value="updateGenerationConfig('media_resolution', $event as GenerationConfigDefaults['media_resolution'])"
               />
             </div>
             <FieldHelpTip

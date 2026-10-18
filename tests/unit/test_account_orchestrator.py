@@ -2,20 +2,29 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from aistudio_api.api.state import runtime_state
 from aistudio_api.application.account_orchestrator import (
+    AccountPreparationError,
+    account_id_for_auth_file,
     ensure_active_account,
     record_rotator_event,
     try_switch_account,
 )
 from aistudio_api.application.account_rotator import AccountRotator, AccountStats
 from aistudio_api.application.account_service import AccountService
+from aistudio_api.config import settings
+from aistudio_api.domain.errors import AuthError, SessionExpiredError
 from aistudio_api.infrastructure.account.account_store import AccountMeta, AccountStore
+from aistudio_api.infrastructure.browser.cdp_client import CDPPage
 from aistudio_api.infrastructure.gateway.client import AIStudioClient
+from aistudio_api.infrastructure.gateway.session import BrowserSession
+from aistudio_api.infrastructure.gateway.session_state import SessionContext
 
 
 @pytest.mark.asyncio
@@ -110,6 +119,160 @@ async def test_ensure_active_account_early_switch():
         runtime_state.account_service = orig_service
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("previous_auth", [None, "other-account/auth.json"])
+async def test_first_request_binds_registry_account_once(
+    tmp_path, monkeypatch, previous_auth
+):
+    """Concurrent first requests bind the current registry, not startup settings."""
+    monkeypatch.setattr(settings, "auth_file", previous_auth)
+    session = BrowserSession(port=9222)
+    target_auth = str(tmp_path / "imported_after_startup" / "auth.json")
+    account = AccountMeta(
+        id="acc_imported", name="Imported", email=None, created_at="2026-10-18"
+    )
+    service = MagicMock(spec=AccountService)
+    service.get_active_account.return_value = account
+    service.get_account_auth_path.return_value = target_auth
+    rotator = MagicMock(spec=AccountRotator)
+    rotator.is_account_available.return_value = True
+    client = MagicMock(spec=AIStudioClient)
+    client.session = session
+
+    async def prepare(auth_file):
+        await asyncio.sleep(0)
+        session._auth_file = auth_file
+        page = MagicMock(spec=CDPPage)
+        page.is_closed.return_value = False
+        session.set_ready_context(
+            SessionContext(
+                page=page,
+                snap_key="synthetic",
+                auth_user="0",
+                auth_file=auth_file,
+                base_template={},
+            )
+        )
+
+    transition = AsyncMock(side_effect=prepare)
+    monkeypatch.setattr(session, "transition_to_account", transition)
+    monkeypatch.setattr(runtime_state, "client", client)
+    monkeypatch.setattr(runtime_state, "account_service", service)
+    monkeypatch.setattr(runtime_state, "rotator", rotator)
+
+    await asyncio.gather(
+        *(ensure_active_account(0, model="gemini-test") for _ in range(4))
+    )
+
+    transition.assert_awaited_once_with(target_auth)
+    assert session._auth_file == target_auth
+    service.activate_account.assert_not_awaited()
+    service.set_active_account.assert_not_called()
+    rotator.clear_auth_lockout.assert_not_called()
+    rotator.clear_cooldown.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_first_request_rejects_missing_active_account_auth(monkeypatch):
+    service = MagicMock(spec=AccountService)
+    service.get_active_account.return_value = AccountMeta(
+        id="missing", name="Missing", email=None, created_at="2026-10-18"
+    )
+    service.get_account_auth_path.return_value = None
+    client = MagicMock(spec=AIStudioClient)
+    client.session = MagicMock(spec=BrowserSession)
+    monkeypatch.setattr(runtime_state, "client", client)
+    monkeypatch.setattr(runtime_state, "account_service", service)
+    monkeypatch.setattr(runtime_state, "rotator", None)
+
+    with pytest.raises(RuntimeError, match="credentials are unavailable"):
+        await ensure_active_account(0)
+
+    client.session.transition_to_account.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cold_start_failure_keeps_attempted_account_after_registry_changes(
+    tmp_path, monkeypatch
+):
+    service = MagicMock(spec=AccountService)
+    old = AccountMeta(id="old", name="Old", email=None, created_at="2026-10-18")
+    new = AccountMeta(id="new", name="New", email=None, created_at="2026-10-18")
+    service.get_active_account.return_value = old
+    service.get_account_auth_path.return_value = tmp_path / "old" / "auth.json"
+    session = MagicMock(spec=BrowserSession)
+    session._auth_file = None
+    session.is_ready = False
+    original_error = SessionExpiredError("synthetic expired cookie")
+
+    async def fail_after_registry_changes(*args, **kwargs):
+        service.get_active_account.return_value = new
+        raise original_error
+
+    session.transition_to_account = AsyncMock(side_effect=fail_after_registry_changes)
+    client = MagicMock(spec=AIStudioClient)
+    client.session = session
+    rotator = MagicMock(spec=AccountRotator)
+    rotator.is_account_available.return_value = True
+    monkeypatch.setattr(runtime_state, "client", client)
+    monkeypatch.setattr(runtime_state, "account_service", service)
+    monkeypatch.setattr(runtime_state, "rotator", rotator)
+
+    with pytest.raises(AccountPreparationError) as caught:
+        await ensure_active_account(0, model="gemini-test")
+
+    assert caught.value.account_id == "old"
+    assert caught.value.original_error is original_error
+    assert caught.value.__cause__ is original_error
+    record_rotator_event(
+        "session_expired", model="gemini-test", account_id=caught.value.account_id
+    )
+    rotator.record_session_expired.assert_called_once_with("old", model="gemini-test")
+    assert service.get_active_account().id == "new"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_id", ["target", "old"])
+@pytest.mark.parametrize("already_wrapped", [False, True])
+async def test_switch_preparation_failure_preserves_actual_target(
+    monkeypatch, target_id, already_wrapped
+):
+    from aistudio_api.application import account_orchestrator
+
+    old = AccountMeta(id="old", name="Old", email=None, created_at="2026-10-18")
+    target = AccountMeta(
+        id=target_id, name="Target", email=None, created_at="2026-10-18"
+    )
+    service = MagicMock(spec=AccountService)
+    service.get_active_account.return_value = old
+    original_error = SessionExpiredError("synthetic expired cookie")
+    failure = (
+        AccountPreparationError("inner_target", original_error)
+        if already_wrapped
+        else original_error
+    )
+    service.activate_account = AsyncMock(side_effect=failure)
+    client = MagicMock(spec=AIStudioClient)
+    client.session = MagicMock(spec=BrowserSession)
+    rotator = MagicMock(spec=AccountRotator)
+    rotator.get_next_account = AsyncMock(return_value=target)
+    monkeypatch.setattr(runtime_state, "client", client)
+    monkeypatch.setattr(runtime_state, "account_service", service)
+    monkeypatch.setattr(runtime_state, "rotator", rotator)
+    monkeypatch.setattr(account_orchestrator, "_last_switch_time", 0.0)
+
+    with pytest.raises(AccountPreparationError) as caught:
+        await try_switch_account(
+            model="gemini-test", failed_account_id="old", is_auth_error=True
+        )
+
+    assert caught.value.account_id == ("inner_target" if already_wrapped else target_id)
+    assert caught.value.original_error is original_error
+    if already_wrapped:
+        assert caught.value is failure
+    rotator.clear_cooldown.assert_not_called()
+
+
 def test_record_rotator_event():
     mock_rotator = MagicMock(spec=AccountRotator)
     mock_service = MagicMock(spec=AccountService)
@@ -128,26 +291,185 @@ def test_record_rotator_event():
         runtime_state.rotator = mock_rotator
         runtime_state.account_service = mock_service
 
-        record_rotator_event("success", model="gemini-2.5-flash")
+        record_rotator_event("success", model="gemini-2.5-flash", account_id="acc_1")
         mock_rotator.record_success.assert_called_with(
             "acc_1", model="gemini-2.5-flash"
         )
 
-        record_rotator_event("rate_limited", model="gemini-2.5-flash")
+        record_rotator_event(
+            "rate_limited", model="gemini-2.5-flash", account_id="acc_1"
+        )
         mock_rotator.record_rate_limited.assert_called_with(
             "acc_1", model="gemini-2.5-flash"
         )
 
-        record_rotator_event("auth_error", model="gemini-2.5-flash")
+        record_rotator_event("auth_error", model="gemini-2.5-flash", account_id="acc_1")
         mock_rotator.record_auth_error.assert_called_with(
             "acc_1", model="gemini-2.5-flash"
         )
 
-        record_rotator_event("error", model="gemini-2.5-flash")
+        record_rotator_event(
+            "session_expired", model="gemini-2.5-flash", account_id="acc_1"
+        )
+        mock_rotator.record_session_expired.assert_called_with(
+            "acc_1", model="gemini-2.5-flash"
+        )
+
+        record_rotator_event("error", model="gemini-2.5-flash", account_id="acc_1")
         mock_rotator.record_error.assert_called_with("acc_1", model="gemini-2.5-flash")
     finally:
         runtime_state.rotator = orig_rotator
         runtime_state.account_service = orig_service
+
+
+def test_rotator_events_keep_leased_identity_after_concurrent_switch(monkeypatch):
+    rotator = MagicMock(spec=AccountRotator)
+    service = MagicMock(spec=AccountService)
+    service.get_active_account.return_value = AccountMeta(
+        id="new_active", name="New", email=None, created_at="2026-10-18"
+    )
+    monkeypatch.setattr(runtime_state, "rotator", rotator)
+    monkeypatch.setattr(runtime_state, "account_service", service)
+
+    record_rotator_event("auth_error", model="gemini-test", account_id="old_lease")
+    record_rotator_event("success", model="gemini-test", account_id=None)
+
+    rotator.record_auth_error.assert_called_once_with("old_lease", model="gemini-test")
+    rotator.record_success.assert_not_called()
+    service.get_active_account.assert_not_called()
+
+
+def test_account_id_for_auth_file_never_falls_back_to_registry(tmp_path, monkeypatch):
+    service = MagicMock(spec=AccountService)
+    account = AccountMeta(
+        id="leased", name="Leased", email=None, created_at="2026-10-18"
+    )
+    auth_path = tmp_path / "leased" / "auth.json"
+    service.list_accounts.return_value = [account]
+    service.get_account_auth_path.return_value = auth_path
+    monkeypatch.setattr(runtime_state, "account_service", service)
+
+    assert account_id_for_auth_file(str(auth_path)) == "leased"
+    assert account_id_for_auth_file(str(tmp_path / "unknown.json")) is None
+    assert account_id_for_auth_file(None) is None
+    service.get_active_account.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_recorded", [False, True])
+async def test_concurrent_switch_records_failed_lease_once(
+    monkeypatch, failure_recorded
+):
+    from aistudio_api.application import account_orchestrator
+
+    rotator = MagicMock(spec=AccountRotator)
+    rotator.is_account_available.return_value = True
+    service = MagicMock(spec=AccountService)
+    service.get_active_account.return_value = AccountMeta(
+        id="healthy", name="Healthy", email=None, created_at="2026-10-18"
+    )
+    client = MagicMock(spec=AIStudioClient)
+    client.session = MagicMock(spec=BrowserSession)
+    monkeypatch.setattr(runtime_state, "rotator", rotator)
+    monkeypatch.setattr(runtime_state, "account_service", service)
+    monkeypatch.setattr(runtime_state, "client", client)
+    monkeypatch.setattr(account_orchestrator, "_last_switch_time", float("inf"))
+
+    assert await try_switch_account(
+        model="gemini-test",
+        failed_account_id="expired_lease",
+        is_session_expired=True,
+        failure_recorded=failure_recorded,
+    )
+
+    if failure_recorded:
+        rotator.record_session_expired.assert_not_called()
+    else:
+        rotator.record_session_expired.assert_called_once_with(
+            "expired_lease", model="gemini-test"
+        )
+    service.activate_account.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pre_recorded", [False, True])
+async def test_old_403_context_recovers_once_through_handler_or_pre_recorded_path(
+    monkeypatch, pre_recorded
+):
+    from aistudio_api.application import account_orchestrator
+    from aistudio_api.application.api_service_gemini import handle_attempt_exception
+
+    account = AccountMeta(
+        id="same_account", name="Same", email=None, created_at="2026-10-18"
+    )
+    stats = AccountStats(account_id=account.id)
+    stats.model_cooldowns = {"unrelated-model": float("inf")}
+    rotator = MagicMock(spec=AccountRotator)
+    rotator.is_account_available.side_effect = lambda _id, model=None: (
+        stats.is_available(model)
+    )
+    rotator.record_auth_error.side_effect = lambda _id, model=None: (
+        stats.record_auth_error(model)
+    )
+    rotator.clear_cooldown.side_effect = lambda _id, model=None: stats.clear_cooldown(
+        model
+    )
+
+    def clear_auth_lockout(_id):
+        stats.session_expired = False
+        stats.auth_cooldown = 0.0
+
+    rotator.clear_auth_lockout.side_effect = clear_auth_lockout
+    rotator.get_next_account = AsyncMock(return_value=account)
+    service = MagicMock(spec=AccountService)
+    service.get_active_account.return_value = account
+    client = MagicMock(spec=AIStudioClient)
+    session = MagicMock(spec=BrowserSession)
+    session.active_context = SimpleNamespace(context_id=1)
+    client.session = session
+
+    async def refresh_account(*args, **kwargs):
+        await asyncio.sleep(0.01)
+        session.active_context = SimpleNamespace(context_id=2)
+        return account
+
+    service.activate_account = AsyncMock(side_effect=refresh_account)
+    monkeypatch.setattr(runtime_state, "rotator", rotator)
+    monkeypatch.setattr(runtime_state, "account_service", service)
+    monkeypatch.setattr(runtime_state, "client", client)
+    monkeypatch.setattr(account_orchestrator, "_last_switch_time", 0.0)
+
+    async def old_context_failure():
+        if pre_recorded:
+            record_rotator_event(
+                "auth_error", model="gemini-test", account_id=account.id
+            )
+            return await try_switch_account(
+                model="gemini-test",
+                failed_account_id=account.id,
+                failed_context_id=1,
+                is_auth_error=True,
+                failure_recorded=True,
+            )
+        return await handle_attempt_exception(
+            AuthError("synthetic old-context 403"),
+            attempt=0,
+            model_path="gemini-test",
+            normalized_model="gemini-test",
+            client=client,
+            account_id=account.id,
+            request_context_id=1,
+        )
+
+    assert all(await asyncio.gather(*(old_context_failure() for _ in range(3))))
+    # A slow response from the retired context may arrive after recovery ended.
+    assert await old_context_failure()
+
+    service.activate_account.assert_awaited_once()
+    assert stats.auth_cooldown == 0.0
+    assert stats.is_available("gemini-test")
+    assert stats.model_cooldowns == {"unrelated-model": float("inf")}
+    assert rotator.record_auth_error.call_count == (4 if pre_recorded else 1)
 
 
 @pytest.mark.asyncio

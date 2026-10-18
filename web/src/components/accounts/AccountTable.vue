@@ -162,9 +162,8 @@ async function handleDeleteCookieGroup(group: CookieGroup) {
   }
 }
 
-// 针对登录态失效或受阻账号执行重新验证（解除禁用并在浏览器中重放连接）
+// 激活成功后由服务端解除登录态失效标记，并保留调用统计与配额冷却。
 async function handleReverifyAccount(acc: AccountWithStats) {
-  await systemStore.clearCooldown({ account_id: acc.id })
   await accountsStore.activateAccount(acc.id)
 }
 

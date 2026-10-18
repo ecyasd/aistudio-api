@@ -290,14 +290,24 @@ class CDPConnection:
 
 
 class CDPPage:
-    def __init__(self, cdp: CDPConnection, target_id: str):
+    def __init__(
+        self,
+        cdp: CDPConnection,
+        target_id: str,
+        browser_context_id: str | None = None,
+        browser_cdp: CDPConnection | None = None,
+    ):
         self.cdp = cdp
         self.target_id = target_id
+        self.browser_context_id = browser_context_id
+        self._browser_cdp = browser_cdp
         self._is_closed = False
         self._last_url: str = ""
         self._unsubscribers: list[Callable[[], None]] = []
         self.has_stream_binding: bool = False
         self._cached_cookies: dict[str, str] | None = None
+        self._auth_file_path: str | None = None
+        self._auth_file_version: str | None = None
 
     def _track_listener(self, unsub: Callable[[], None]) -> Callable[[], None]:
         self._unsubscribers.append(unsub)
@@ -639,8 +649,17 @@ class CDPPage:
             return False
 
     async def get_cookies(self) -> list[dict[str, object]]:
-        """Retrieve cookies via CDP Network domain."""
-        res = await self.cdp.send("Network.getCookies")
+        """Read the entire owned context, including accounts-only credentials.
+
+        Network.getCookies without URLs returns only the page/subframe cookies;
+        saving that partial view would remove other Google login cookies.
+        """
+        if self.browser_context_id and self._browser_cdp:
+            res = await self._browser_cdp.send(
+                "Storage.getCookies", {"browserContextId": self.browser_context_id}
+            )
+        else:
+            res = await self.cdp.send("Storage.getCookies")
         raw_cookies = res.get("cookies")
         if isinstance(raw_cookies, list):
             self._cached_cookies = {
@@ -694,7 +713,18 @@ class CDPPage:
                     item["sameSite"] = "Strict"
 
             if "expires" in c and c["expires"] is not None:
-                item["expires"] = float(str(c["expires"]))
+                # CDP snapshots use expires=-1/session=true for session cookies.
+                # Omitting expiry preserves that meaning on reinjection.
+                expires = float(str(c["expires"]))
+                if not c.get("session") and expires > 0:
+                    item["expires"] = expires
+
+            partition_key = c.get("partitionKey")
+            if isinstance(partition_key, dict) and partition_key.get("topLevelSite"):
+                item["partitionKey"] = {
+                    "topLevelSite": str(partition_key["topLevelSite"]),
+                    "hasCrossSiteAncestor": bool(partition_key.get("hasCrossSiteAncestor", False)),
+                }
 
             formatted.append(item)
 
@@ -716,10 +746,16 @@ class CDPPage:
         }
 
     async def clear_cookies(self) -> None:
-        """Clear all browser cookies."""
+        """Clear only this page's browser context cookies."""
         self._cached_cookies = None
         try:
-            await self.cdp.send("Network.clearBrowserCookies")
+            if self.browser_context_id and self._browser_cdp:
+                await self._browser_cdp.send(
+                    "Storage.clearCookies",
+                    {"browserContextId": self.browser_context_id},
+                )
+            else:
+                await self.cdp.send("Network.clearBrowserCookies")
         except Exception as e:
             log.debug("清除浏览器 Cookie 失败: %s", e)
 
@@ -808,6 +844,9 @@ class CDPClient:
         self.host = host
         self.base_url = f"http://{host}:{port}"
         self.page: CDPPage | None = None
+        self._browser_cdp: CDPConnection | None = None
+        self._owned_pages: dict[str, CDPPage] = {}
+        self._browser_contexts: set[str] = set()
 
     async def get_version(self) -> dict[str, object]:
         """Fetch /json/version info."""
@@ -897,34 +936,103 @@ class CDPClient:
         ) from last_exc
 
     async def create_new_page(self, block_assets: bool = True) -> CDPPage:
-        """Create a dedicated new tab target and connect CDP Page to it."""
+        """Create a page in its own disposable browser context and Cookie jar."""
         await self.wait_until_ready()
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.put(f"{self.base_url}/json/new")
-            resp.raise_for_status()
-            page_target = resp.json()
-
-        ws_url = str(page_target.get("webSocketDebuggerUrl") or "")
-        target_id = str(page_target.get("id") or "")
-        conn = CDPConnection(ws_url)
+        if self._browser_cdp is not None and getattr(self._browser_cdp, "_closed", False) is True:
+            await self._browser_cdp.close()
+            self._browser_cdp = None
+            self._browser_contexts.clear()
+        if self._browser_cdp is None:
+            version = await self.get_version()
+            browser_ws = str(version.get("webSocketDebuggerUrl") or "")
+            if not browser_ws:
+                raise RuntimeError("Browser CDP WebSocket URL is unavailable")
+            browser_connection = CDPConnection(browser_ws)
+            try:
+                await browser_connection.connect()
+            except BaseException:
+                await browser_connection.close()
+                raise
+            self._browser_cdp = browser_connection
+        browser_cdp = self._browser_cdp
+        result = await browser_cdp.send(
+            "Target.createBrowserContext", {"disposeOnDetach": True}
+        )
+        context_id = str(result.get("browserContextId") or "")
+        if not context_id:
+            raise RuntimeError("Browser did not create an isolated context")
+        self._browser_contexts.add(context_id)
+        conn: CDPConnection | None = None
         try:
+            target = await browser_cdp.send(
+                "Target.createTarget",
+                {"url": "about:blank", "browserContextId": context_id},
+            )
+            target_id = str(target.get("targetId") or "")
+            ws_url = ""
+            targets: list[dict[str, object]] = []
+            for attempt in range(3):
+                targets = await self.get_targets()
+                page_target = next((t for t in targets if t.get("id") == target_id), {})
+                ws_url = str(page_target.get("webSocketDebuggerUrl") or "")
+                if ws_url:
+                    break
+                if attempt < 2:
+                    await asyncio.sleep(0.05)
+            if not target_id or not ws_url:
+                raise RuntimeError("Isolated page CDP endpoint is unavailable")
+            conn = CDPConnection(ws_url)
             await conn.connect()
-            page = CDPPage(conn, target_id)
+            page = CDPPage(conn, target_id, context_id, browser_cdp)
             await page.init_domains(block_assets=block_assets)
+            self._owned_pages[target_id] = page
+            # Remove Chromium's spare default tab only after a workload tab exists.
+            for spare in targets:
+                spare_id = str(spare.get("id") or "")
+                if spare.get("type") == "page" and spare_id not in self._owned_pages:
+                    await self.close_target(spare_id)
             return page
-        except Exception:
-            await conn.close()
-            await self.close_target(target_id)
+        except BaseException:
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    await conn.close()
+            with contextlib.suppress(Exception):
+                await self.dispose_browser_context(context_id)
             raise
+
+    async def dispose_browser_context(self, context_id: str) -> None:
+        """Destroy the owned context, including every tab and its Cookie jar."""
+        if context_id in self._browser_contexts and self._browser_cdp:
+            await self._browser_cdp.send(
+                "Target.disposeBrowserContext", {"browserContextId": context_id}
+            )
+            self._browser_contexts.discard(context_id)
 
     async def close_target(self, target_id: str) -> None:
         """Close a specific target ID via /json/close/{target_id}."""
+        page = self._owned_pages.pop(target_id, None)
+        if page is not None:
+            if not page.is_closed():
+                with contextlib.suppress(Exception):
+                    await page.close()
+            if page.browser_context_id:
+                await self.dispose_browser_context(page.browser_context_id)
+            return
         with contextlib.suppress(Exception):
             async with httpx.AsyncClient(timeout=3.0) as client:
                 await client.put(f"{self.base_url}/json/close/{target_id}")
 
     async def close(self) -> None:
         """Close active page and release resources."""
+        for target_id in list(self._owned_pages):
+            with contextlib.suppress(Exception):
+                await self.close_target(target_id)
+        for context_id in list(self._browser_contexts):
+            with contextlib.suppress(Exception):
+                await self.dispose_browser_context(context_id)
         if self.page:
             await self.page.close()
             self.page = None
+        if self._browser_cdp:
+            await self._browser_cdp.close()
+            self._browser_cdp = None

@@ -1,3 +1,6 @@
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+
 import pytest
 
 from aistudio_api.api.responses import (
@@ -11,6 +14,11 @@ from aistudio_api.domain.errors import (
     SessionExpiredError,
     UsageLimitExceeded,
 )
+
+
+@asynccontextmanager
+async def _offline_request_scope():
+    yield SimpleNamespace(auth_file=None, context_id=1)
 
 
 def test_to_gemini_usage_metadata_uses_visible_and_reasoning_tokens():
@@ -203,6 +211,7 @@ async def test_build_gemini_streaming_response_passes_requested_model():
 
     mock_client = MagicMock(spec=AIStudioClient)
     mock_client.stream_generate_content = MagicMock(side_effect=fake_stream_generate_content)
+    mock_client.session.request_scope = _offline_request_scope
 
     req = GeminiGenerateContentRequest(
         contents=[GeminiContent(role="user", parts=[GeminiPart(text="hello")])]
@@ -249,6 +258,7 @@ async def test_streaming_metadata_event_does_not_block_failover():
 
     mock_client = MagicMock(spec=AIStudioClient)
     mock_client.stream_generate_content = MagicMock(side_effect=fake_stream_generate_content)
+    mock_client.session.request_scope = _offline_request_scope
     mock_client.clear_templates = MagicMock()
 
     req = GeminiGenerateContentRequest(

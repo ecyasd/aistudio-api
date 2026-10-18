@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from aistudio_api.config import DEFAULT_TEXT_MODEL, settings
+from aistudio_api.domain.errors import RequestError
 
 from .model_defaults import resolve_model_defaults
 from .wire_parser import (
@@ -31,6 +32,15 @@ TOOLS_TEMPLATES: dict[str, list[object]] = {
     "google_maps": [None, None, None, None, None, None, None, None, None, None, []],
     "url_context": [None, None, None, None, None, None, None, []],
 }
+
+
+class InvalidRequestTemplateError(RequestError):
+    """A browser-captured template cannot safely be used for an upstream call."""
+
+    def __init__(self, reason: str) -> None:
+        # This is an internal capture failure, not a bad client request or an
+        # expired Google login. Never include the captured body in the error.
+        super().__init__(503, f"AI Studio request template is unavailable: {reason}")
 
 
 def build_image_generation_search_tool(
@@ -140,14 +150,43 @@ class AistudioWireCodec:
     TIMEZONE_INDEX = TopLevelIndex.LOCATION
 
     def decode(self, raw_body: str) -> AistudioRequest:
-        body = json.loads(raw_body)
+        try:
+            body = json.loads(raw_body)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise InvalidRequestTemplateError("body is not a JSON array") from exc
+        if not isinstance(body, list):
+            raise InvalidRequestTemplateError("body is not a JSON array")
+        if len(body) <= self.CONTENTS_INDEX:
+            raise InvalidRequestTemplateError(
+                "required model or contents slot is missing"
+            )
+        if (
+            not isinstance(body[self.MODEL_INDEX], str)
+            or not body[self.MODEL_INDEX].strip()
+        ):
+            raise InvalidRequestTemplateError("model slot is invalid")
+        if not isinstance(body[self.CONTENTS_INDEX], list):
+            raise InvalidRequestTemplateError("contents slot is invalid")
+
+        # JSPB omits absent trailing fields. A valid request may contain only
+        # model and contents when the UI uses default safety/generation options.
+        safety_settings = (
+            body[self.SAFETY_INDEX] if len(body) > self.SAFETY_INDEX else None
+        )
+        generation_config = (
+            body[self.GENERATION_CONFIG_INDEX]
+            if len(body) > self.GENERATION_CONFIG_INDEX
+            else None
+        )
+        if safety_settings is not None and not isinstance(safety_settings, list):
+            raise InvalidRequestTemplateError("safety settings slot is invalid")
+        if generation_config is not None and not isinstance(generation_config, list):
+            raise InvalidRequestTemplateError("generation config slot is invalid")
         return AistudioRequest(
             model=body[self.MODEL_INDEX],
             contents=self._decode_contents(body[self.CONTENTS_INDEX]),
-            safety_settings=body[self.SAFETY_INDEX],
-            generation_config=AistudioGenerationConfig(
-                list(body[self.GENERATION_CONFIG_INDEX])
-            ),
+            safety_settings=safety_settings,
+            generation_config=AistudioGenerationConfig(list(generation_config or [])),
             snapshot=body[self.SNAPSHOT_INDEX]
             if len(body) > self.SNAPSHOT_INDEX
             else None,

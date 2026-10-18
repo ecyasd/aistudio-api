@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import suppress
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
+from urllib.parse import urlsplit
 
 from aistudio_api.infrastructure.account.cookie_parser import calculate_sapisid_hash
 from aistudio_api.infrastructure.browser.scripts import (
@@ -26,27 +28,38 @@ from aistudio_api.infrastructure.utils.logger import get_logger
 logger = get_logger("transport")
 
 
-def _get_active_auth_cookies() -> dict[str, str] | None:
-    """从当前活跃账号的 auth.json 读取凭据 Cookie 作为本地高速兜底。"""
-    try:
-        from aistudio_api.infrastructure.account.account_store import AccountStore
-
-        store = AccountStore()
-        active = store.get_active_account()
-        if not active:
-            return None
-        auth_path = store.get_auth_path_optional(active.id, require_exists=True)
-        if auth_path and auth_path.is_file():
-            data = json.loads(auth_path.read_text(encoding="utf-8"))
-            cookies = data.get("cookies") or []
-            return {
-                str(c.get("name") or ""): str(c.get("value") or "")
-                for c in cookies
-                if c.get("name")
-            }
-    except Exception:
-        pass
-    return None
+def _signing_cookies(page: CDPPage, cookies: list[dict[str, object]]) -> dict[str, str]:
+    """Select the Cookie values applicable to this page's AI Studio origin."""
+    origin_host = "aistudio.google.com"
+    page_path = urlsplit(str(getattr(page, "url", "") or "")).path or "/"
+    candidates: dict[str, tuple[tuple[int, int], str]] = {}
+    for cookie in cookies:
+        if not isinstance(cookie, dict) or not cookie.get("name"):
+            continue
+        domain = str(cookie.get("domain") or "")
+        if not domain and cookie.get("url"):
+            domain = urlsplit(str(cookie["url"])).hostname or ""
+        bare_domain = domain.lower().lstrip(".")
+        if not bare_domain or not (
+            origin_host == bare_domain
+            or (domain.startswith(".") and origin_host.endswith("." + bare_domain))
+        ):
+            continue
+        path = str(cookie.get("path") or "/")
+        if not (page_path == path or page_path.startswith(path if path.endswith("/") else path + "/")):
+            continue
+        expiry = cookie.get("expires")
+        if expiry is not None and not cookie.get("session"):
+            try:
+                if 0 < float(cast("str | float", expiry)) <= time.time():
+                    continue
+            except (TypeError, ValueError):
+                continue
+        name = str(cookie["name"])
+        rank = (len(path), len(bare_domain))
+        if name not in candidates or rank > candidates[name][0]:
+            candidates[name] = (rank, str(cookie.get("value") or ""))
+    return {name: value for name, (_, value) in candidates.items()}
 
 
 async def _ensure_authorization_header(
@@ -67,18 +80,15 @@ async def _ensure_authorization_header(
     }
     clean_headers["X-Goog-AuthUser"] = str(auth_user or "0")
 
-    # 1. 优先使用 page 上的内存缓存 Cookie，避免高并发下向 Chromium 密集发送重复的 Network.getCookies CDP 流量
-    cookie_dict = getattr(page, "_cached_cookies", None)
-    if not cookie_dict or not any("SAPISID" in k for k in cookie_dict):
-        with suppress(Exception):
-            await page.get_cookies()
-            cookie_dict = getattr(page, "_cached_cookies", None)
-    # 2. 如果 CDP 出现超时波动或未取到 SAPISID，回退读取活跃账号 auth.json 凭据
-    if not cookie_dict or not any("SAPISID" in k for k in cookie_dict):
-        disk_cookies = _get_active_auth_cookies()
-        if disk_cookies and any("SAPISID" in k for k in disk_cookies):
-            cookie_dict = disk_cookies
-            page._cached_cookies = cookie_dict
+    # Google can rotate the actual jar while the page stays alive. A freshly
+    # timestamped hash of an indefinitely cached SAPISID still authenticates
+    # with an obsolete credential. Read this context before every replay.
+    cookie_dict = None
+    with suppress(Exception):
+        current = await page.get_cookies()
+        if isinstance(current, list):
+            cookie_dict = _signing_cookies(page, current)
+    # Never fall back to the globally active account: this page may be retiring.
     fresh_auth = calculate_sapisid_hash(cookie_dict) if cookie_dict else ""
     if fresh_auth:
         clean_headers["Authorization"] = fresh_auth
@@ -221,13 +231,12 @@ class XHRStreamTransport:
             timeout_s=timeout_s,
             rid=rid,
         )
-        await page.evaluate(STREAMING_INIT_JS, init_args)
-
         deadline = asyncio.get_running_loop().time() + timeout_s
         status_sent = False
         is_terminal = False
 
         try:
+            await page.evaluate(STREAMING_INIT_JS, init_args)
             while not is_terminal:
                 if page.is_closed() is True:
                     raise RuntimeError("Browser page closed during streaming")
