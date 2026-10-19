@@ -325,6 +325,42 @@ curl http://localhost:8080/v1beta/models/gemini-3.7-flash:streamGenerateContent?
 
 ---
 
+### Incomplete responses and optional continuation
+
+An upstream response that ends before any response Part is sent receives one retry without
+forced account rotation. Once text, thinking, a signature, a tool call or an image has been sent, the
+request is never replayed. Invalid JSON, resource limits and safety stops do not trigger
+this recovery. Success still requires complete transport and a real completion marker.
+
+Both generation endpoints accept the top-level JSON extension `"autoContinue": true`
+(also `auto_continue`), defaulting to `false`. When enabled, a plain-text response ending
+with the actual `MAX_TOKENS` reason can receive at most two extra generation rounds.
+`maxOutputTokens` applies **per round**; the combined answer can exceed it. Extra rounds
+consume additional request quota and tokens. Returned usage sums all rounds, including
+their repeated input. Ordinary requests do not enable extra generation.
+
+```json
+{
+  "contents": [{"role": "user", "parts": [{"text": "Write a long explanation."}]}],
+  "tools": [],
+  "autoContinue": true,
+  "generationConfig": {"maxOutputTokens": 2048}
+}
+```
+
+All rounds share one account lease, inference slot and `AISTUDIO_TIMEOUT_STREAM` time
+budget. Continuation retains at most 512 KiB of text and uses an estimated 1 MiB input
+history budget; reaching a bound stops extra requests and retains the real finish reason.
+Only plain-text requests and outputs without thinking or signatures are eligible.
+Tools (including default tools), images, executable code and JSON/structured output do
+not continue automatically. Explicit `tools: []` disables default tools. The model may
+repeat text; the service does not guess which text to remove. Disconnects and failures
+clean up resources and report errors. Complete answers cannot be guaranteed.
+
+With the official Python SDK, pass
+`config={"http_options": {"extra_body": {"autoContinue": True}}, "tools": []}`
+to opt in for either streaming or non-streaming generation.
+
 ### Python SDK (google-genai)
 
 Using the official `google-genai` Python SDK:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import AliasChoices, BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, StrictBool, field_validator
 
 
 class GeminiInlineData(BaseModel):
@@ -180,6 +180,15 @@ class GeminiSafetySetting(BaseModel):
 
 class GeminiGenerateContentRequest(BaseModel):
     contents: list[GeminiContent]
+    autoContinue: StrictBool = Field(
+        default=False,
+        validation_alias=AliasChoices("autoContinue", "auto_continue"),
+        description=(
+            "Opt in to at most two extra plain-text generations after MAX_TOKENS. "
+            "maxOutputTokens applies per round, not to the combined answer. "
+            "Each round may consume additional upstream quota and tokens."
+        ),
+    )
     systemInstruction: GeminiContent | None = Field(
         default=None,
         validation_alias=AliasChoices("systemInstruction", "system_instruction"),

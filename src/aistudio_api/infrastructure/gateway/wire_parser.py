@@ -7,8 +7,9 @@ docs/WIRE_SPECIFICATION.md
 from __future__ import annotations
 
 import json
+import re
 
-from aistudio_api.domain.errors import RequestError
+from aistudio_api.domain.errors import IncompleteResponseError, RequestError
 from aistudio_api.domain.models import (
     Candidate,
     ContentPart,
@@ -57,6 +58,56 @@ WIRE_CANDIDATE_CONTENT = 0  # Field 1 [parts, role]
 WIRE_CANDIDATE_FINISH_REASON = 1  # Field 2 finish reason enum code
 WIRE_CANDIDATE_FINISH_MESSAGE = 3  # Field 4 finish message string
 WIRE_CANDIDATE_SAFETY_RATINGS = 4  # Field 5 safety ratings array
+
+
+_PARTIAL_JSON_VALUES = frozenset(
+    {"n", "nu", "nul", "t", "tr", "tru", "f", "fa", "fal", "fals", "-"}
+)
+_PARTIAL_JSON_NUMBER = re.compile(
+    r"(?:-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?[eE][+-]?"
+    r"|-?(?:0|[1-9][0-9]*)\.)\Z"
+)
+_MAX_PARTIAL_NUMBER_PREFIX_CHARS = 128
+
+
+def is_incomplete_json_error(text: str, exc: json.JSONDecodeError) -> bool:
+    """Recognize unfinished JSON tails while retaining definite syntax errors.
+
+    The decoder already validated the preceding JSON. Only inspect its error
+    position and a bounded number suffix; do not parse arbitrary malformed JSON
+    again or treat every invalid response as a retryable transport failure.
+    """
+    if exc.pos >= len(text) or exc.msg.startswith("Unterminated string"):
+        return True
+    if exc.msg == "Invalid \\uXXXX escape":
+        # CPython reports this even when all four hex digits arrived but the
+        # closing quote did not. Inspect only that final, bounded escape tail.
+        return (
+            exc.pos > 0
+            and text[exc.pos - 1] == "\\"
+            and 1 <= len(text) - exc.pos <= 5
+            and text[exc.pos] == "u"
+            and all(char in "0123456789abcdefABCDEF" for char in text[exc.pos + 1:])
+        )
+    if len(text) - exc.pos > 4:
+        return False
+    tail = text[exc.pos:]
+    if exc.msg == "Expecting value" and tail in _PARTIAL_JSON_VALUES:
+        return True
+    if exc.msg not in {"Expecting ',' delimiter", "Extra data"}:
+        return False
+    if text[exc.pos] not in ".eE":
+        return False
+    start = max(0, exc.pos - _MAX_PARTIAL_NUMBER_PREFIX_CHARS)
+    match = _PARTIAL_JSON_NUMBER.search(text[start:])
+    if match is None:
+        return False
+    number_start = start + match.start()
+    # The decoder must have consumed a valid numeric stem. A second value after
+    # a missing comma must not be mistaken for a truncated exponent or decimal.
+    return number_start < exc.pos and (
+        number_start == 0 or text[number_start - 1] in "[,: \t\r\n"
+    )
 
 
 def _looks_like_response_chunk(value: object) -> bool:
@@ -555,12 +606,21 @@ def parse_response_chunk(chunk: list[object]) -> Candidate:
 def parse_text_output(raw: str) -> ModelOutput:
     output = ModelOutput(raw_response=raw)
 
-    text = raw.strip()
+    # Keep trailing whitespace: whitespace after an unfinished scalar makes
+    # that scalar malformed, whereas whitespace after complete JSON is valid.
+    text = raw.lstrip()
     if text.startswith(")]}'"):
         text = text[4:].lstrip()
     try:
         outer = json.loads(text)
-    except (json.JSONDecodeError, RecursionError) as exc:
+    except json.JSONDecodeError as exc:
+        # Only an otherwise unfinished JSON prefix is eligible for recovery.
+        # Invalid tokens, separators, escapes and trailing data remain ordinary
+        # protocol errors instead of repeatedly submitting the same request.
+        if is_incomplete_json_error(text, exc):
+            raise IncompleteResponseError from exc
+        raise RequestError(502, "Upstream response is malformed or truncated") from exc
+    except RecursionError as exc:
         raise RequestError(502, "Upstream response is malformed or truncated") from exc
     chunks = _iter_response_chunks(outer)
     if not chunks:
@@ -605,7 +665,7 @@ def parse_text_output(raw: str) -> ModelOutput:
         if isinstance(raw_rid, str) and raw_rid:
             output.response_id = raw_rid
     if merged.finish_reason is None or merged.finish_reason <= 0:
-        raise RequestError(502, "Upstream response ended without a completion marker")
+        raise IncompleteResponseError
     output.candidates = [merged]
     return output
 
