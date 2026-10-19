@@ -317,6 +317,36 @@ curl http://localhost:8080/v1beta/models/gemini-3.7-flash:streamGenerateContent?
 
 ---
 
+### 截断恢复与可选自动续写
+
+上游响应在首段内容发出前意外结束时，会在不主动切号的情况下重试一次；已经发出文字、
+思考、签名、工具或图片后不重放。无效 JSON、资源超限和安全阻止不会因此重试。
+完整传输及真实完成标志仍是成功条件，部分正文不会被标成正常结束。
+
+两个生成端点都接受请求体顶层扩展 `"autoContinue": true`（也接受 `auto_continue`），
+默认 `false`。启用后，仅在纯文本响应真实以 `MAX_TOKENS` 结束时，最多追加两轮续写。
+`maxOutputTokens` 是**每轮**上限，合并回答可能超过它；额外轮次会消耗额外请求额度和
+Token，返回的用量累计包含各轮输入和输出。普通调用不启用额外生成。
+
+```json
+{
+  "contents": [{"role": "user", "parts": [{"text": "请写一篇较长的说明。"}]}],
+  "tools": [],
+  "autoContinue": true,
+  "generationConfig": {"maxOutputTokens": 2048}
+}
+```
+
+续写保持同一账号租约和并发名额，所有轮次共享 `AISTUDIO_TIMEOUT_STREAM` 时间预算；
+用于续写的累计文本最多保留 512 KiB，输入历史估算预算为 1 MiB，达到边界便停止追加请求并
+保留真实结束原因。仅支持无思考/签名的纯文本请求与结果；工具（包括默认工具）、图片、
+代码执行及 JSON/结构化输出不自动续写。显式 `tools: []` 可关闭默认工具。模型可能重复
+部分文字，服务不会猜测删改正文。断连或失败会清理资源并报告错误，不能保证任意回答完整。
+
+官方 Python SDK 可通过
+`config={"http_options": {"extra_body": {"autoContinue": True}}, "tools": []}`
+将这一扩展传入请求；流式和非流式均可使用。
+
 ### Python SDK (google-genai)
 
 使用 Google 官方 `google-genai` SDK 直连本代理服务：

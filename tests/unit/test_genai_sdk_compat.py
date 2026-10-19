@@ -15,8 +15,8 @@ from google.genai import errors, types
 
 from aistudio_api.api.app import app
 from aistudio_api.api.dependencies import get_client
-from aistudio_api.domain.errors import UsageLimitExceeded
-from aistudio_api.domain.models import Candidate, ModelOutput
+from aistudio_api.domain.errors import RequestError, UsageLimitExceeded
+from aistudio_api.domain.models import Candidate, ContentPart, ModelOutput
 
 
 @pytest.fixture
@@ -112,6 +112,144 @@ async def test_genai_sdk_aio_non_streaming(mock_client: MagicMock) -> None:
             assert response.usage_metadata.total_token_count == 30
     finally:
         app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_genai_sdk_opt_in_continuation_keeps_one_account_and_sums_usage(
+    mock_client: MagicMock, stream: bool,
+) -> None:
+    """The SDK extension reaches both real API handlers without extra leases."""
+    from aistudio_api.api.state import runtime_state
+
+    calls: list[dict[str, object]] = []
+    closed: list[bool] = []
+
+    def output(index: int) -> ModelOutput:
+        text = ["first ", "second"][index]
+        return ModelOutput(
+            candidates=[Candidate(
+                text=text, parts=[ContentPart(text=text)],
+                finish_reason=[2, 1][index],
+            )],
+            response_id=f"offline-round-{index}",
+            usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        )
+
+    async def generate(**kwargs):
+        calls.append(kwargs)
+        return output(len(calls) - 1)
+
+    async def generate_stream(**kwargs):
+        calls.append(kwargs)
+        result = output(len(calls) - 1)
+        try:
+            yield "response_id", result.response_id
+            yield "parts", result.candidates[0].parts
+            yield "finish_reason", result.candidates[0].finish_reason
+            yield "usage", result.usage
+            yield "done", None
+        finally:
+            closed.append(True)
+
+    mock_client.generate_content = generate
+    mock_client.stream_generate_content = generate_stream
+    app.dependency_overrides[get_client] = lambda: mock_client
+    try:
+        sdk = genai.Client(
+            api_key="test-key", http_options=types.HttpOptions(base_url="http://testserver"),
+        )
+        config = types.GenerateContentConfig(
+            tools=[], max_output_tokens=5,
+            http_options=types.HttpOptions(extra_body={"autoContinue": True}),
+        )
+        async with sdk.aio as aio:
+            aio._api_client._async_httpx_client = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver",
+            )
+            if stream:
+                result = [part async for part in await aio.models.generate_content_stream(
+                    model="continuation-offline", contents="offline prompt", config=config,
+                )]
+                assert "".join(part.text or "" for part in result) == "first second"
+                final = result[-1]
+                assert closed == [True, True]
+            else:
+                final = await aio.models.generate_content(
+                    model="continuation-offline", contents="offline prompt", config=config,
+                )
+                assert final.text == "first second"
+            assert final.candidates[0].finish_reason == types.FinishReason.STOP
+            assert final.usage_metadata.prompt_token_count == 20
+            assert final.usage_metadata.candidates_token_count == 10
+            assert final.usage_metadata.total_token_count == 30
+        assert len(calls) == 2
+        assert all(call["max_tokens"] == 5 for call in calls)
+        runtime_state.rotator.record_success.assert_called_once()
+        assert runtime_state.record.call_args.args[2]["total_tokens"] == 30
+    finally:
+        app.dependency_overrides.clear()
+
+
+async def test_nonstream_failed_continuation_never_replays_first_round(
+    mock_client: MagicMock,
+) -> None:
+    from aistudio_api.api.state import runtime_state
+    from aistudio_api.domain.errors import IncompleteResponseError
+
+    mock_client.generate_content = AsyncMock(side_effect=[
+        ModelOutput(candidates=[Candidate(
+            text="partial", parts=[ContentPart(text="partial")], finish_reason=2,
+        )]),
+        IncompleteResponseError(),
+    ])
+    app.dependency_overrides[get_client] = lambda: mock_client
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver",
+        ) as http:
+            response = await http.post(
+                "/v1beta/models/continuation-offline:generateContent",
+                headers={"x-goog-api-key": "test-key"},
+                json={"contents": [{"parts": [{"text": "offline prompt"}]}],
+                      "tools": [], "autoContinue": True},
+            )
+        assert response.status_code == 502
+        assert mock_client.generate_content.await_count == 2
+        runtime_state.rotator.record_success.assert_not_called()
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize("value", ["true", 1, None, [], {}])
+async def test_auto_continue_requires_explicit_json_boolean(
+    mock_client: MagicMock, value: object,
+) -> None:
+    app.dependency_overrides[get_client] = lambda: mock_client
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver",
+        ) as http:
+            response = await http.post(
+                "/v1beta/models/continuation-offline:generateContent",
+                headers={"x-goog-api-key": "test-key"},
+                json={"contents": [{"parts": [{"text": "offline prompt"}]}],
+                      "autoContinue": value},
+            )
+        assert response.status_code == 400
+        mock_client.generate_content.assert_not_called()
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_continuation_deadline_has_gemini_deadline_status(stream: bool) -> None:
+    from fastapi import HTTPException
+
+    from aistudio_api.application import api_service_gemini as api
+
+    error = RequestError(504, "Automatic continuation exceeded the request time budget")
+    classified = error if stream else HTTPException(504, detail={"message": str(error)})
+    assert api.classify_gemini_error_payload(classified)[::2] == (504, "DEADLINE_EXCEEDED")
 
 
 @pytest.mark.asyncio

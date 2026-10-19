@@ -41,6 +41,13 @@ class RequestError(AistudioError):
         super().__init__(f"HTTP {status}: {message}" if message else f"HTTP {status}")
 
 
+class IncompleteResponseError(RequestError):
+    """A response reached EOF before protocol completion was confirmed."""
+
+    def __init__(self) -> None:
+        super().__init__(502, "Upstream response ended before completion")
+
+
 GRPC_CODE_TO_HTTP: dict[int, int] = {
     1: 499,  # CANCELLED
     2: 500,  # UNKNOWN

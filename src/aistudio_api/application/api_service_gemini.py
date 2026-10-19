@@ -24,6 +24,7 @@ from aistudio_api.api.response_models import (
 from aistudio_api.api.responses import to_gemini_parts, to_gemini_usage_metadata
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
 from aistudio_api.api.state import runtime_state
+from aistudio_api.application import continuation
 from aistudio_api.application.account_orchestrator import (
     MAX_RETRIES,
     AccountPreparationError,
@@ -43,6 +44,7 @@ from aistudio_api.domain.errors import (
     AccountIdentityUnavailableError,
     AistudioError,
     AuthError,
+    IncompleteResponseError,
     RequestError,
     SessionExpiredError,
     UsageLimitExceeded,
@@ -151,6 +153,7 @@ def classify_gemini_error_payload(exc: Exception) -> tuple[int, str, str]:
             429: "RESOURCE_EXHAUSTED",
             500: "INTERNAL",
             503: "UNAVAILABLE",
+            504: "DEADLINE_EXCEEDED",
         }
         return (
             status,
@@ -168,6 +171,7 @@ def classify_gemini_error_payload(exc: Exception) -> tuple[int, str, str]:
             429: "RESOURCE_EXHAUSTED",
             500: "INTERNAL",
             503: "UNAVAILABLE",
+            504: "DEADLINE_EXCEEDED",
         }
         return (
             status,
@@ -284,6 +288,14 @@ async def _handle_attempt_exception(
         raise HTTPException(
             400, detail={"message": str(exc), "type": "bad_request"}
         ) from exc
+
+    if isinstance(exc, IncompleteResponseError) and attempt == 0 and can_retry:
+        # No response Part has reached the client, so discard this unpublished
+        # attempt and retry once. A protocol EOF does not quarantine or rotate
+        # an otherwise healthy account.
+        logger.warning("Gemini 上游响应未完整结束，未输出内容时重试一次")
+        client.clear_templates()
+        return True
 
     if isinstance(exc, (AccountIdentityMismatchError, AccountIdentityUnavailableError)):
         logger.warning("账号身份验证失败: type=%s", type(exc).__name__)
@@ -489,21 +501,8 @@ async def _generate_non_streaming(
             async with client.session.request_scope() as ctx:
                 account_id = account_id_for_auth_file(ctx.auth_file)
                 request_context_id = ctx.context_id
-                output = await client.generate_content(
-                    model=normalized.model,
-                    capture_prompt=normalized.capture_prompt,
-                    capture_images=normalized.capture_images,
-                    contents=normalized.contents,
-                    system_instruction_content=normalized.system_instruction,
-                    tools=normalized.tools,
-                    tool_config=normalized.tool_config,
-                    safety_settings=normalized.safety_settings,
-                    temperature=normalized.temperature,
-                    top_p=normalized.top_p,
-                    top_k=normalized.top_k,
-                    max_tokens=normalized.max_tokens,
-                    generation_config_overrides=normalized.generation_config_overrides,
-                    sanitize_plain_text=False,
+                output = await continuation.generate_content(
+                    client, normalized, auto_continue=req.autoContinue,
                 )
 
                 await _persist_successful_cookies(client, ctx)
@@ -544,6 +543,9 @@ async def _generate_non_streaming(
                 responseId=output.response_id or None,
             )
         except Exception as exc:
+            generated_before_failure = isinstance(exc, continuation.ContinuationError)
+            if isinstance(exc, continuation.ContinuationError):
+                exc = exc.original_error
             last_error = exc
             if await handle_attempt_exception(
                 exc,
@@ -551,6 +553,7 @@ async def _generate_non_streaming(
                 model_path=model_path,
                 normalized_model=normalized.model if normalized else None,
                 client=client,
+                has_yielded_data=generated_before_failure,
                 account_id=account_id,
                 request_context_id=request_context_id,
             ):
@@ -845,21 +848,8 @@ def _build_gemini_streaming_response(
                     async with client.session.request_scope() as ctx:
                         account_id = account_id_for_auth_file(ctx.auth_file)
                         request_context_id = ctx.context_id
-                        async with aclosing(client.stream_generate_content(
-                            model=normalized.model,
-                            capture_prompt=normalized.capture_prompt,
-                            capture_images=normalized.capture_images,
-                            contents=normalized.contents,
-                            system_instruction_content=normalized.system_instruction,
-                            tools=normalized.tools,
-                            tool_config=normalized.tool_config,
-                            safety_settings=normalized.safety_settings,
-                            temperature=normalized.temperature,
-                            top_p=normalized.top_p,
-                            top_k=normalized.top_k,
-                            max_tokens=normalized.max_tokens,
-                            generation_config_overrides=normalized.generation_config_overrides,
-                            sanitize_plain_text=False,
+                        async with aclosing(continuation.stream_generate_content(
+                            client, normalized, auto_continue=req.autoContinue,
                             force_refresh_capture=stream_attempt > 0,
                         )) as upstream:
                             async for event_type, text in upstream:

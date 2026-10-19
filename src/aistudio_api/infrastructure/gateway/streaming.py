@@ -9,7 +9,11 @@ from contextlib import aclosing
 from pathlib import Path
 
 from aistudio_api.config import settings
-from aistudio_api.domain.errors import RequestError, classify_error
+from aistudio_api.domain.errors import (
+    IncompleteResponseError,
+    RequestError,
+    classify_error,
+)
 from aistudio_api.infrastructure.gateway.capture import CapturedRequest
 from aistudio_api.infrastructure.gateway.session import BrowserSession
 from aistudio_api.infrastructure.gateway.stream_parser import (
@@ -172,9 +176,7 @@ class StreamingGateway:
         # turn a truncated document or a failed transport into success.
         list(parser.finish())
         if latest_finish_reason is None:
-            raise RequestError(
-                502, "Upstream response ended without a completion marker"
-            )
+            raise IncompleteResponseError
         yield ("finish_reason", latest_finish_reason)
         yield ("usage", latest_usage)
         yield ("done", None)

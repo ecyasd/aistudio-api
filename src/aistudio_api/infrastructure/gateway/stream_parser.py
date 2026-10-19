@@ -5,8 +5,11 @@ from __future__ import annotations
 import json
 from collections.abc import Generator
 
-from aistudio_api.domain.errors import RequestError
-from aistudio_api.infrastructure.gateway.wire_parser import parse_response_chunk
+from aistudio_api.domain.errors import IncompleteResponseError, RequestError
+from aistudio_api.infrastructure.gateway.wire_parser import (
+    is_incomplete_json_error,
+    parse_response_chunk,
+)
 
 XSSI_PREFIX = ")]}'"
 MAX_PENDING_JSON_CHARS = 16 * 1024 * 1024
@@ -117,7 +120,15 @@ class IncrementalJSONStreamParser:
 
     def finish(self) -> Generator[list[object], None, None]:
         if self._state != "complete":
-            raise self._invalid()
+            if self._state == "chunk":
+                try:
+                    json.loads(self.buffer)
+                except json.JSONDecodeError as exc:
+                    if not is_incomplete_json_error(self.buffer, exc):
+                        raise self._invalid() from exc
+                except RecursionError as exc:
+                    raise self._invalid() from exc
+            raise IncompleteResponseError
         yield from ()
 
 
