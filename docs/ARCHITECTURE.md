@@ -219,7 +219,7 @@ sequenceDiagram
 - **403 鉴权异常快速隔离**：当账号遭遇 `The caller does not have permission` (403) 异常时，调度器立即对该账号设置短时隔离（`auth_cooldown`），优先调度至健康备用账号。
 - **Sticky 黏性调度**：默认保持当前活跃账号，直到该账号针对当前模型遭遇 429 限流或 403 异常时，才自动顺延切换至下一个健康账号。
 - **并发结果归属**：成功和失败归属请求实际使用的账号；旧请求晚到的成功结果不得清除其他在途请求刚设置的有效冷却。
-- **自动配额重置**：按 `America/Los_Angeles` 当地午夜重置 RPD 计数，自动处理夏令时；对应北京时间会随季节变化。
+- **自动配额重置**：按 `America/Los_Angeles` 当地午夜重置 RPD 计数，自动处理夏令时；对应北京时间会随季节变化。成功、限流及其他失败均记入同一当地日期的请求计数，账号统计页面也刷新未再次调用模型的旧日计数；累计总数与登录态隔离保持独立。
 
 ### 4.3 防切号雪崩互斥锁 (`_switch_lock`) 与自愈
 
@@ -262,7 +262,8 @@ sequenceDiagram
 | 账号与配额 | `application/account_rotator.py`、`account_orchestrator.py`、`gateway/session.py` | 统计归属原账号、模型冷却独立、退休上下文等待租约释放 |
 | 生成与续写 | `application/continuation.py`、`gateway/wire_parser.py`、`streaming.py` | Part 顺序与签名保真、真实完成、预算有界、不重放已发出的内容 |
 | 浏览器通信 | `browser/cdp_client.py`、`gateway/transport.py`、`browser/js/` | 同一期限覆盖发送与等待，断连/取消清理队列、任务和请求 |
-| 管理界面 | `web/src/`、`tests/frontend/` | 筛选编辑保留隐藏配置，过期请求不覆盖新登录，卸载清理计时器与请求 |
+| HTTP 诊断 | `api/app.py`、`api/error_middleware.py` | 摘要只记录固定操作名与异常类型，未处理异常返回通用 500，并保留安全的内存诊断；取消继续向外传递 |
+| 管理界面 | `web/src/`、`tests/frontend/` | 筛选编辑保留隐藏配置，过期请求不覆盖新登录，文件读取与保存回调只更新当前弹窗和草稿，卸载清理计时器与请求 |
 
 使用已配置的 Python 环境运行 `python scripts/run_tests.py`。该入口在导入前隔离配置、账号、统计与临时目录并禁用 dotenv；测试中的启动和浏览器路径使用合成响应及替身。Windows 自动排除两项 Linux 专用测试，Linux CI 运行完整检查。
 

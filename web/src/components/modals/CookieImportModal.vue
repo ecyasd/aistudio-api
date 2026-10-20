@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch, onUnmounted } from 'vue'
 import { useAccountsStore } from '@/stores/accounts.ts'
 import Modal from '@/components/ui/Modal.vue'
 import Button from '@/components/ui/Button.vue'
 import { Sparkles, FileText, Upload, FolderOpen, CheckCircle2 } from 'lucide-vue-next'
-defineProps<{
+const props = defineProps<{
   modelValue: boolean
 }>()
 
@@ -29,17 +29,50 @@ const selectedFileSize = ref('')
 const selectedFileContent = ref('')
 const localFilePath = ref('')
 const detectedCount = ref<number | null>(null)
+const readingFile = ref(false)
+const fileReadError = ref('')
+let activeReader: FileReader | null = null
+let fileReadSequence = 0
+let modalRevision = 0
+
+function cancelFileRead() {
+  fileReadSequence++
+  const reader = activeReader
+  activeReader = null
+  if (reader?.readyState === 1) reader.abort()
+  readingFile.value = false
+}
+
+watch(() => props.modelValue, (open) => {
+  modalRevision++
+  if (!open) cancelFileRead()
+}, { flush: 'sync' })
+
+onUnmounted(() => {
+  modalRevision++
+  cancelFileRead()
+})
 
 function onFileChange(event: Event) {
   const target = event.target as HTMLInputElement
   const file = target.files?.[0]
   if (!file) return
 
+  cancelFileRead()
+  const sequence = fileReadSequence
   selectedFileName.value = file.name
   selectedFileSize.value = `${(file.size / 1024).toFixed(1)} KB`
+  selectedFileContent.value = ''
+  detectedCount.value = null
+  fileReadError.value = ''
+  readingFile.value = true
 
   const reader = new FileReader()
+  activeReader = reader
   reader.onload = (e) => {
+    if (activeReader !== reader || sequence !== fileReadSequence) return
+    activeReader = null
+    readingFile.value = false
     const text = (e.target?.result as string) || ''
     selectedFileContent.value = text
     try {
@@ -50,29 +83,40 @@ function onFileChange(event: Event) {
       detectedCount.value = null
     }
   }
+  reader.onerror = () => {
+    if (activeReader !== reader || sequence !== fileReadSequence) return
+    clearSelectedFile()
+    fileReadError.value = '无法读取所选文件，请重新选择。'
+  }
   reader.readAsText(file)
 }
 
 function clearSelectedFile() {
+  cancelFileRead()
   selectedFileName.value = ''
   selectedFileSize.value = ''
   selectedFileContent.value = ''
   detectedCount.value = null
+  fileReadError.value = ''
   if (fileInputRef.value) {
     fileInputRef.value.value = ''
   }
 }
 async function handleSubmit() {
+  if (!props.modelValue || accountsStore.importing || readingFile.value) return
+  const revision = modalRevision
   if (activeTab.value === 'file') {
     const content = selectedFileContent.value.trim()
     const path = localFilePath.value.trim()
+    const sequence = fileReadSequence
     if (!content && !path) return
 
     const ok = await accountsStore.importBundle({
       content: content || undefined,
       file_path: path || undefined,
     })
-    if (ok) {
+    if (ok && activeTab.value === 'file' && modalRevision === revision && fileReadSequence === sequence &&
+        selectedFileContent.value.trim() === content && localFilePath.value.trim() === path) {
       clearSelectedFile()
       localFilePath.value = ''
       emit('update:modelValue', false)
@@ -82,19 +126,23 @@ async function handleSubmit() {
 
   const raw = cookieInput.value.trim()
   if (!raw) return
+  const prefix = namePrefix.value.trim()
+  const email = singleEmail.value.trim()
+  const probe = autoProbe.value
 
-  const ok = autoProbe.value
+  const ok = probe
     ? await accountsStore.probeAndImport({
         cookies: raw,
-        name_prefix: namePrefix.value.trim() || undefined,
+        name_prefix: prefix || undefined,
       })
     : await accountsStore.importCookies({
         cookies: raw,
-        name: namePrefix.value.trim() || undefined,
-        email: singleEmail.value.trim() || undefined,
+        name: prefix || undefined,
+        email: email || undefined,
       })
 
-  if (ok) {
+  if (ok && activeTab.value === 'text' && modalRevision === revision && cookieInput.value.trim() === raw &&
+      namePrefix.value.trim() === prefix && singleEmail.value.trim() === email && autoProbe.value === probe) {
     cookieInput.value = ''
     namePrefix.value = ''
     singleEmail.value = ''
@@ -197,6 +245,20 @@ async function handleSubmit() {
             </button>
           </div>
         </div>
+
+        <p
+          v-if="readingFile"
+          class="text-xs text-gray-500"
+        >
+          正在读取所选文件…
+        </p>
+        <p
+          v-if="fileReadError"
+          class="text-xs text-rose-600"
+          role="alert"
+        >
+          {{ fileReadError }}
+        </p>
 
         <!-- Alternative: Local File Path on Server -->
         <div class="space-y-1.5">
@@ -313,7 +375,7 @@ async function handleSubmit() {
         variant="primary"
         size="sm"
         :loading="accountsStore.importing"
-        :disabled="activeTab === 'file' ? (!selectedFileContent && !localFilePath.trim()) : !cookieInput.trim()"
+        :disabled="readingFile || (activeTab === 'file' ? (!selectedFileContent && !localFilePath.trim()) : !cookieInput.trim())"
         @click="handleSubmit"
       >
         <template #default>

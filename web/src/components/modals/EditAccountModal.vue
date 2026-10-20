@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, watch, onUnmounted } from 'vue'
 import type { AccountWithStats } from '@/types'
 import { useAccountsStore } from '@/stores/accounts.ts'
 import Modal from '@/components/ui/Modal.vue'
@@ -16,24 +16,42 @@ const emit = defineEmits<{
 
 const accountsStore = useAccountsStore()
 const inputName = ref('')
+const saving = ref(false)
+let dialogRevision = 0
+let mounted = true
 
 watch(
-  () => props.account,
-  (acc) => {
-    if (acc) {
-      inputName.value = acc.name || ''
+  [() => props.modelValue, () => props.account?.id],
+  () => {
+    dialogRevision++
+    if (props.modelValue && props.account) {
+      inputName.value = props.account.name || ''
     }
   },
-  { immediate: true }
+  { immediate: true, flush: 'sync' }
 )
 
+onUnmounted(() => {
+  mounted = false
+  dialogRevision++
+})
+
 async function handleSave() {
-  if (!props.account) return
+  if (!props.modelValue || !props.account || saving.value) return
   const trimmed = inputName.value.trim()
   if (!trimmed) return
-
-  await accountsStore.updateAccountName(props.account.id, trimmed)
-  emit('update:modelValue', false)
+  const id = props.account.id
+  const revision = dialogRevision
+  saving.value = true
+  try {
+    const ok = await accountsStore.updateAccountName(id, trimmed)
+    if (ok && mounted && props.modelValue && dialogRevision === revision &&
+        props.account?.id === id && inputName.value.trim() === trimmed) {
+      emit('update:modelValue', false)
+    }
+  } finally {
+    if (mounted) saving.value = false
+  }
 }
 </script>
 
@@ -68,6 +86,7 @@ async function handleSave() {
       <Button
         variant="primary"
         size="sm"
+        :loading="saving"
         :disabled="!inputName.trim()"
         @click="handleSave"
       >

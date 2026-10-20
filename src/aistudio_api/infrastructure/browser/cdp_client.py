@@ -310,8 +310,8 @@ class CDPConnection:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._recv_task
         if self.ws:
-            with contextlib.suppress(Exception):
-                await self.ws.close()
+            # Retain the socket on failure so its owner can retry cleanup.
+            await self.ws.close()
             self.ws = None
 
 
@@ -857,9 +857,13 @@ class CDPPage:
             with contextlib.suppress(Exception):
                 unsub()
         self._unsubscribers.clear()
-        with contextlib.suppress(Exception):
-            await self.cdp.send("Page.close")
-        await self.cdp.close()
+        try:
+            with contextlib.suppress(Exception):
+                await self.cdp.send("Page.close")
+        finally:
+            # A cancelled Page.close command must still release its socket,
+            # pending commands and event handlers before the owner retries.
+            await self.cdp.close()
 
 
 class CDPClient:
@@ -1036,13 +1040,21 @@ class CDPClient:
 
     async def close_target(self, target_id: str) -> None:
         """Close a specific target ID via /json/close/{target_id}."""
-        page = self._owned_pages.pop(target_id, None)
+        page = self._owned_pages.get(target_id)
         if page is not None:
-            if not page.is_closed():
-                with contextlib.suppress(Exception):
-                    await page.close()
+            # A failed/closed target can still own a socket and listeners. Keep
+            # ownership until both page cleanup and context disposal complete so
+            # cancellation or a failed disposal can be retried safely.
+            await page.close()
+            if getattr(page.cdp, "_close_in_progress", False) is True:
+                # Concurrent calls and cancelled listeners can reenter close.
+                # They return without joining the owning closer; only that
+                # closer may dispose the context and remove page ownership.
+                return
             if page.browser_context_id:
                 await self.dispose_browser_context(page.browser_context_id)
+            if self._owned_pages.get(target_id) is page:
+                self._owned_pages.pop(target_id)
             return
         with contextlib.suppress(Exception):
             async with httpx.AsyncClient(timeout=3.0) as client:
