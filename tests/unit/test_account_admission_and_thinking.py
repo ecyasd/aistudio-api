@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,7 +14,10 @@ from fastapi import HTTPException
 
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
 from aistudio_api.api.state import runtime_state
-from aistudio_api.application import account_orchestrator as orchestrator
+from aistudio_api.application import (
+    account_orchestrator as orchestrator,
+    account_rotator as rotator_module,
+)
 from aistudio_api.application.account_rotator import (
     AccountRotator,
     get_pacific_date_key,
@@ -114,7 +118,14 @@ async def test_retry_admission_also_rejects_newly_quarantined_account(account_en
     account_env.session.transition_to_account.assert_not_awaited()
 
 
-async def test_automatic_failover_preserves_target_usage_and_drip_history(account_env):
+async def test_automatic_failover_preserves_target_usage_and_drip_history(account_env, monkeypatch):
+    # Test daytime backoff, independently of the wall clock near LA midnight.
+    instant = datetime(2026, 10, 20, 19, tzinfo=UTC)
+    clock = MagicMock(wraps=datetime)
+    clock.now.side_effect = lambda tz=None: instant.astimezone(tz)
+    monkeypatch.setattr(rotator_module, "ZoneInfo", lambda _: timezone(timedelta(hours=-7)))
+    monkeypatch.setattr(rotator_module, "datetime", clock)
+    monkeypatch.setattr(rotator_module.time, "time", instant.timestamp)
     env = account_env
     target = SimpleNamespace(id="synthetic-b", name="B")
     env.accounts.append(target)

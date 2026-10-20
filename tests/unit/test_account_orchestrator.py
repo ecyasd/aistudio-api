@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -10,6 +11,7 @@ import pytest
 from fastapi import HTTPException
 
 from aistudio_api.api.state import runtime_state
+from aistudio_api.application import account_rotator as rotator_module
 from aistudio_api.application.account_orchestrator import (
     AccountPreparationError,
     account_id_for_auth_file,
@@ -654,8 +656,15 @@ def test_account_stats_session_expired_permanent_isolation():
     assert stats.is_available("gemini-3.8-flash")
 
 
-def test_account_stats_short_cooldown_sync():
+def test_account_stats_short_cooldown_sync(monkeypatch):
     """Verify short 60s cooldown is tracked accurately for monitoring."""
+    # LA noon leaves room for the full daytime 300-second backoff.
+    instant = datetime(2026, 10, 20, 19, tzinfo=UTC)
+    clock = MagicMock(wraps=datetime)
+    clock.now.side_effect = lambda tz=None: instant.astimezone(tz)
+    monkeypatch.setattr(rotator_module, "ZoneInfo", lambda _: timezone(timedelta(hours=-7)))
+    monkeypatch.setattr(rotator_module, "datetime", clock)
+    monkeypatch.setattr(rotator_module.time, "time", instant.timestamp)
     stats = AccountStats(account_id="acc_test")
     stats.record_rate_limited(model="gemini-2.5-flash")
 

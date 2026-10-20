@@ -21,6 +21,16 @@ from aistudio_api.infrastructure.utils.logger import get_logger
 logger = get_logger("state")
 
 
+def _stats_counter(value: object) -> int:
+    """Keep one damaged persisted counter from dropping unrelated statistics."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return 0
+    try:
+        return max(0, int(value))
+    except (ValueError, OverflowError):
+        return 0
+
+
 @dataclass
 class ModelStatsItem:
     requests: int = 0
@@ -62,19 +72,19 @@ class RuntimeState:
                 for model, item in data.items():
                     if isinstance(item, dict):
                         self.model_stats[model] = ModelStatsItem(
-                            requests=int(item.get("requests", 0)),
-                            success=int(item.get("success", 0)),
-                            rate_limited=int(item.get("rate_limited", 0)),
-                            errors=int(item.get("errors", 0)),
-                            prompt_tokens=int(item.get("prompt_tokens", 0)),
-                            completion_tokens=int(item.get("completion_tokens", 0)),
-                            total_tokens=int(item.get("total_tokens", 0)),
+                            requests=_stats_counter(item.get("requests", 0)),
+                            success=_stats_counter(item.get("success", 0)),
+                            rate_limited=_stats_counter(item.get("rate_limited", 0)),
+                            errors=_stats_counter(item.get("errors", 0)),
+                            prompt_tokens=_stats_counter(item.get("prompt_tokens", 0)),
+                            completion_tokens=_stats_counter(item.get("completion_tokens", 0)),
+                            total_tokens=_stats_counter(item.get("total_tokens", 0)),
                             last_used=str(item["last_used"])
                             if item.get("last_used")
                             else None,
                         )
         except Exception as e:
-            logger.warning("从 %s 读取模型统计失败: %s", stats_path, e)
+            logger.warning("读取模型统计失败: type=%s", type(e).__name__)
 
     def save_stats(self) -> None:
         """将模型调用与 Token 统计持久化到文件。"""
@@ -88,7 +98,7 @@ class RuntimeState:
 
             self._last_saved_time = time.time()
         except Exception as e:
-            logger.warning("持久化模型统计到 %s 失败: %s", stats_path, e)
+            logger.warning("持久化模型统计失败: type=%s", type(e).__name__)
 
     def _schedule_debounced_save(self, delay: float = 2.0) -> None:
         if not settings.persist_stats:

@@ -20,6 +20,7 @@ from aistudio_api.infrastructure.gateway.stream_parser import (
     IncrementalJSONStreamParser,
 )
 from aistudio_api.infrastructure.gateway.wire_parser import (
+    is_response_chunk,
     parse_chunk_usage,
     parse_response_chunk,
 )
@@ -133,6 +134,13 @@ class StreamingGateway:
                     if status_code != 200:
                         continue
                     for parsed_chunk in parser.feed(text_payload):
+                        # JSON framing alone cannot validate a generation
+                        # chunk. Do not let a prior finish marker hide a malformed
+                        # sibling that non-streaming parsing would reject.
+                        if not is_response_chunk(parsed_chunk):
+                            raise RequestError(
+                                502, "Upstream response contains a malformed generation chunk"
+                            )
                         usage = parse_chunk_usage(parsed_chunk)
                         if usage:
                             latest_usage = usage

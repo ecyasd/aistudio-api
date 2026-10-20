@@ -83,6 +83,7 @@ class CDPConnection:
         self._recv_task: asyncio.Task[None] | None = None
         self._background_tasks: set[asyncio.Task[object]] = set()
         self._closed = False
+        self._close_in_progress = False
         self._liveness_checker: Callable[[], bool] | None = None
 
     def set_liveness_checker(self, checker: Callable[[], bool] | None) -> None:
@@ -174,7 +175,7 @@ class CDPConnection:
                             if asyncio.iscoroutine(res):
                                 task = asyncio.create_task(res)
                                 self._background_tasks.add(task)
-                                task.add_done_callback(self._background_tasks.discard)
+                                task.add_done_callback(self._event_task_done)
                         except Exception as e:
                             log.debug("CDP 事件监听器处理 %s 异常: %s", method, e)
 
@@ -194,6 +195,12 @@ class CDPConnection:
                     fut.set_exception(RuntimeError("CDP connection closed"))
             self._futures.clear()
 
+    def _event_task_done(self, task: asyncio.Task[object]) -> None:
+        self._background_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            # Event parameters and exception arguments may contain page data.
+            log.debug("CDP asynchronous event handler failed")
+
     async def send(
         self,
         method: str,
@@ -212,6 +219,7 @@ class CDPConnection:
         self._next_id += 1
 
         loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
         fut: asyncio.Future[dict[str, object]] = loop.create_future()
         self._futures[req_id] = fut
 
@@ -221,46 +229,40 @@ class CDPConnection:
             "params": params or {},
         }
         try:
-            await self.ws.send(json.dumps(payload))
-        except asyncio.CancelledError:
-            self._futures.pop(req_id, None)
-            fut.cancel()
-            raise
-        except Exception as e:
-            self._closed = True
-            self._futures.pop(req_id, None)
-            raise RuntimeError(f"CDP connection closed: {e}") from e
-
-        try:
-            if self._liveness_checker is None:
-                return await asyncio.wait_for(fut, timeout=timeout_s)
-
-            deadline = loop.time() + timeout_s
-            while True:
-                if not self._liveness_checker():
-                    self.fail_pending_futures(RuntimeError("Browser process has died"))
-                    raise RuntimeError(
-                        f"Browser process died while awaiting CDP command {method}"
-                    )
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    self._futures.pop(req_id, None)
-                    raise TimeoutError(
-                        f"CDP command {method} timed out after {timeout_s}s"
-                    )
-                step_timeout = min(remaining, 0.2)
+            # Sending can block on WebSocket backpressure too. One deadline
+            # covers dispatch and reply rather than starting after dispatch.
+            async with asyncio.timeout_at(deadline):
                 try:
-                    return await asyncio.wait_for(
-                        asyncio.shield(fut), timeout=step_timeout
+                    await self.ws.send(json.dumps(payload))
+                except Exception as exc:
+                    self._futures.pop(req_id, None)
+                    self.fail_pending_futures(
+                        RuntimeError("CDP connection closed during command dispatch")
                     )
-                except TimeoutError:
-                    if fut.done():
-                        return fut.result()
-        except BaseException:
+                    raise RuntimeError(
+                        "CDP connection closed during command dispatch"
+                    ) from exc
+
+                if self._liveness_checker is None:
+                    return await fut
+                while True:
+                    if not self._liveness_checker():
+                        self.fail_pending_futures(RuntimeError("Browser process has died"))
+                        raise RuntimeError(
+                            f"Browser process died while awaiting CDP command {method}"
+                        )
+                    try:
+                        return await asyncio.wait_for(asyncio.shield(fut), timeout=0.2)
+                    except TimeoutError:
+                        if fut.done():
+                            return fut.result()
+        finally:
             self._futures.pop(req_id, None)
             if not fut.done():
                 fut.cancel()
-            raise
+            elif not fut.cancelled():
+                # A crash may reject the reply while dispatch is still blocked.
+                fut.exception()
 
     def on(
         self, event: str, callback: Callable[[dict[str, object]], object]
@@ -284,7 +286,25 @@ class CDPConnection:
 
     async def close(self) -> None:
         """Close WebSocket connection cleanly."""
-        self._closed = True
+        # Cancelled listeners may call close from their own cleanup. The first
+        # closer owns the join; reentrant calls must not cancel/join each other.
+        if self._close_in_progress:
+            return
+        self._close_in_progress = True
+        try:
+            await self._close_connection()
+        finally:
+            self._close_in_progress = False
+
+    async def _close_connection(self) -> None:
+        self.fail_pending_futures(RuntimeError("CDP connection closed"))
+        current_task = asyncio.current_task()
+        pending = [task for task in self._background_tasks if task is not current_task]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._background_tasks.difference_update(pending)
         if self._recv_task and not self._recv_task.done():
             self._recv_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

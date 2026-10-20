@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -445,7 +446,9 @@ async def test_closing_client_stream_closes_nested_generators_before_releasing_l
     async def transport(*_args, **_kwargs):
         try:
             yield "status", 200
-            yield "chunk", b"[[[]]]"
+            content = [[[None, "fake piece"]], "model"]
+            chunk = [[[content, None]], None, None]
+            yield "chunk", json.dumps([[chunk]]).encode()
             await asyncio.Event().wait()
         finally:
             finalized.set()

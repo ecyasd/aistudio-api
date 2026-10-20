@@ -69,5 +69,81 @@ function harness() {
   h.unmounts[1](); assert.equal(h.timers.size, 0)
   checks.push('replacing a keyed poller retires old work without removing the current visibility handler')
 }
+function clipboardHarness() {
+  const timers = new Map(), unmounts = [], writes = [], successes = [], errors = []
+  let sequence = 0
+  const module = { exports: {} }
+  const source = ts.transpileModule(fs.readFileSync(path.resolve(here, '../../web/src/composables/useClipboard.ts'), 'utf8'), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText
+  vm.runInNewContext(source, {
+    module, exports: module.exports,
+    require(name) {
+      if (name === 'vue') return { ref: value => ({ value }), onUnmounted: fn => unmounts.push(fn) }
+      assert.equal(name, '@/stores/toast.ts')
+      return { useToastStore: () => ({ success: message => successes.push(message), error: message => errors.push(message) }) }
+    },
+    navigator: { clipboard: { writeText: text => new Promise((resolve, reject) => { writes.push({ text, resolve, reject }) }) } },
+    setTimeout(fn) { const id = ++sequence; timers.set(id, fn); return id },
+    clearTimeout(id) { timers.delete(id) },
+  })
+  return { use: module.exports.useClipboard, timers, unmounts, writes, successes, errors }
+}
+
+{
+  const h = clipboardHarness()
+  const first = h.use(), second = h.use()
+  const firstCopy = first.copy('fixture-one', 'one')
+  h.writes[0].resolve(); await firstCopy
+  const secondCopy = second.copy('fixture-two', 'two')
+  h.writes[1].resolve(); await secondCopy
+  assert.equal(h.timers.size, 2, 'clipboard instances need independent feedback timers')
+  for (const fn of [...h.timers.values()]) fn()
+  assert.equal(first.copied.value, null)
+  assert.equal(second.copied.value, null)
+  checks.push('clipboard feedback expires independently for every mounted instance')
+}
+{
+  const h = clipboardHarness()
+  const clipboard = h.use()
+  const copy = clipboard.copy('fixture-one', 'one')
+  h.writes[0].resolve(); await copy
+  assert.equal(h.timers.size, 1)
+  h.unmounts[0]()
+  assert.equal(h.timers.size, 0, 'unmount must clear clipboard feedback timers')
+  const late = clipboard.copy('fixture-late', 'late')
+  assert.equal(h.writes.length, 1, 'retained clipboard handlers must not run after unmount')
+  await late
+  checks.push('clipboard unmount clears timers and retires retained handlers')
+}
+{
+  const h = clipboardHarness()
+  const clipboard = h.use()
+  const pending = clipboard.copy('fixture-pending', 'pending')
+  h.unmounts[0]()
+  h.writes[0].resolve(); await pending
+  assert.equal(h.timers.size, 0)
+  assert.equal(clipboard.copied.value, null)
+  assert.equal(h.successes.length, 0)
+  const other = h.use()
+  const failed = other.copy('fixture-failed', 'failed')
+  h.unmounts[1]()
+  h.writes[1].reject(new Error('Synthetic clipboard rejection')); await failed
+  assert.equal(h.errors.length, 0)
+  checks.push('pending clipboard success and failure cannot update an unmounted component')
+}
+{
+  const h = clipboardHarness()
+  const clipboard = h.use()
+  const older = clipboard.copy('fixture-old', 'old')
+  const newer = clipboard.copy('fixture-new', 'new')
+  h.writes[1].resolve(); await newer
+  h.writes[0].resolve(); await older
+  assert.equal(clipboard.copied.value, 'new')
+  assert.equal(h.timers.size, 1)
+  assert.equal(h.successes.length, 1)
+  h.unmounts[0]()
+  checks.push('out-of-order clipboard completion keeps feedback on the latest requested item')
+}
 const result = { ok: true, checks, groups: checks.length, modelInferenceInvoked: false }
 console.log(JSON.stringify(result))

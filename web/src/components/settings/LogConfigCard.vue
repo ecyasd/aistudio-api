@@ -2,7 +2,7 @@
 import { ref, watch } from 'vue'
 import { systemApi } from '@/api/system.ts'
 import { useToastStore } from '@/stores/toast.ts'
-import type { SystemConfig } from '@/types/system.ts'
+import type { SystemConfig, UpdateLoggingConfigRequest } from '@/types/system.ts'
 import Button from '@/components/ui/Button.vue'
 import ConfigSelect from '@/components/config/ConfigSelect.vue'
 import ConfigSwitch from '@/components/config/ConfigSwitch.vue'
@@ -32,14 +32,45 @@ const dumpToFile = ref(Boolean(props.initialConfig.dump_to_file))
 const dumpDir = ref(props.initialConfig.dump_dir || 'dumps')
 const debugEnvActive = ref(Boolean(props.initialConfig.debug_env_active))
 const saving = ref(false)
+type LoggingDraft = Required<UpdateLoggingConfigRequest>
+let savedLogging = currentLogging()
+
+function currentLogging(): LoggingDraft {
+  return {
+    level: logLevel.value,
+    dump_requests: dumpRequests.value,
+    dump_to_file: dumpToFile.value,
+    dump_dir: dumpDir.value,
+  }
+}
+
+function serverLogging(config: Pick<SystemConfig, 'log_level' | 'dump_requests' | 'dump_to_file' | 'dump_dir'>): LoggingDraft {
+  return {
+    level: config.log_level || 'INFO',
+    dump_requests: Boolean(config.dump_requests),
+    dump_to_file: Boolean(config.dump_to_file),
+    dump_dir: config.dump_dir || 'dumps',
+  }
+}
+
+function sameLogging(left: LoggingDraft, right: LoggingDraft): boolean {
+  return left.level === right.level && left.dump_requests === right.dump_requests
+    && left.dump_to_file === right.dump_to_file && left.dump_dir === right.dump_dir
+}
+
+function applyLogging(config: LoggingDraft) {
+  logLevel.value = config.level
+  dumpRequests.value = config.dump_requests
+  dumpToFile.value = config.dump_to_file
+  dumpDir.value = config.dump_dir
+}
 
 watch(
   () => props.initialConfig,
   (cfg) => {
-    logLevel.value = cfg.log_level || 'INFO'
-    dumpRequests.value = Boolean(cfg.dump_requests)
-    dumpToFile.value = Boolean(cfg.dump_to_file)
-    dumpDir.value = cfg.dump_dir || 'dumps'
+    const clean = sameLogging(currentLogging(), savedLogging)
+    savedLogging = serverLogging(cfg)
+    if (clean) applyLogging(savedLogging)
     debugEnvActive.value = Boolean(cfg.debug_env_active)
   },
   { deep: true },
@@ -53,18 +84,13 @@ const logLevels = [
 ]
 
 async function handleSave() {
+  if (saving.value) return
+  const submitted = currentLogging()
   saving.value = true
   try {
-    const res = await systemApi.updateLoggingConfig({
-      level: logLevel.value,
-      dump_requests: dumpRequests.value,
-      dump_to_file: dumpToFile.value,
-      dump_dir: dumpDir.value,
-    })
-    logLevel.value = res.log_level
-    dumpRequests.value = res.dump_requests
-    dumpToFile.value = res.dump_to_file
-    dumpDir.value = res.dump_dir
+    const res = await systemApi.updateLoggingConfig(submitted)
+    savedLogging = serverLogging(res)
+    if (sameLogging(currentLogging(), submitted)) applyLogging(savedLogging)
     debugEnvActive.value = res.debug_env_active
     emit('saved')
   } catch (err: unknown) {

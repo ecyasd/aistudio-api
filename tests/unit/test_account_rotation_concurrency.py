@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from datetime import UTC, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from aistudio_api.application import account_rotator as rotator_module
 from aistudio_api.application.account_orchestrator import (
     try_switch_account,
 )
@@ -122,7 +124,8 @@ async def test_account_stats_per_model_cooldown():
     assert stats.get_cooldown_remaining("gemini-2.5-pro") > 0
     assert stats.get_cooldown_remaining("gemini-2.5-flash") == 0
 
-    # 成功请求清除偶发冷却
+    # 冷却到期后的成功请求清理遗留标记；在途成功不能提前清除新冷却。
+    stats.model_cooldowns["gemini-2.5-pro"] = time.time() - 1
     stats.record_success(model="gemini-2.5-pro")
     assert stats.is_available("gemini-2.5-pro")
 
@@ -139,8 +142,15 @@ async def test_account_stats_pacific_midnight_reset():
 
 
 @pytest.mark.asyncio
-async def test_account_stats_clear_cooldown_resets_counter():
+async def test_account_stats_clear_cooldown_resets_counter(monkeypatch):
     """测试手动清除冷却会重置 429 次数计数器，不会在下一次 429 时直接秒锁至午夜。"""
+    # LA noon leaves room for the full daytime 300-second backoff.
+    instant = datetime(2026, 10, 20, 19, tzinfo=UTC)
+    clock = MagicMock(wraps=datetime)
+    clock.now.side_effect = lambda tz=None: instant.astimezone(tz)
+    monkeypatch.setattr(rotator_module, "ZoneInfo", lambda _: timezone(timedelta(hours=-7)))
+    monkeypatch.setattr(rotator_module, "datetime", clock)
+    monkeypatch.setattr(rotator_module.time, "time", instant.timestamp)
     stats = AccountStats(account_id="acc_1")
     # 连续 3 次 429 触发当日锁定
     stats.record_rate_limited(model="gemini-2.5-pro")
