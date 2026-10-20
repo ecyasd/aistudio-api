@@ -39,6 +39,7 @@ from aistudio_api.application.chat_service import (
     normalize_gemini_request,
 )
 from aistudio_api.application.inference_limits import inference_limiter
+from aistudio_api.application.model_selection import parse_model_selection
 from aistudio_api.domain.errors import (
     AccountIdentityMismatchError,
     AccountIdentityUnavailableError,
@@ -468,6 +469,17 @@ async def handle_gemini_generate_content(
     *,
     stream: bool,
 ):
+    # Resolve before account admission, cooldowns, capture caches or statistics.
+    # A virtual selector must never create an independent upstream quota bucket.
+    try:
+        selection = parse_model_selection(model_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    model_path = selection.base_model
+    if selection.auto_continue:
+        # Choosing the variant is itself the opt-in, including clients that send
+        # an explicit default false. Never mutate the caller's request object.
+        req = req.model_copy(update={"autoContinue": True})
     if stream:
         normalized = _preflight_gemini_stream(req, model_path)
         return _build_gemini_streaming_response(

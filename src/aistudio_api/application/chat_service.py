@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 
 from dataclasses import dataclass
 
+from aistudio_api.application.model_selection import parse_model_selection
 from aistudio_api.infrastructure.gateway.model_defaults import resolve_model_defaults
 from aistudio_api.infrastructure.gateway.wire_codec import build_tools_from_names
 from aistudio_api.infrastructure.gateway.wire_spec import JspbArray, SchemaIndex
@@ -571,11 +572,7 @@ def normalize_gemini_request(
     if not req.contents:
         raise ValueError("contents is required")
 
-    model = (
-        requested_model
-        if requested_model.startswith("models/")
-        else f"models/{requested_model}"
-    )
+    model = parse_model_selection(requested_model).base_model
     contents: list[AistudioContent] = []
     capture_prompt = "你好"
     capture_images: list[str | tuple[str, str]] = []

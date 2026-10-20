@@ -204,8 +204,8 @@ async def test_identity_failover_prepares_again_before_success(identity_api, err
     assert payloads[-1]["candidates"][0]["finishReason"] == "STOP"
     assert "synthetic verified reply" in response.text
     service.ensure_active_account.assert_has_awaits([
-        call(0, model="gemini-test"),
-        call(1, model="gemini-test"),
+        call(0, model="models/gemini-test"),
+        call(1, model="models/gemini-test"),
     ])
     assert service.ensure_active_account.await_count == 2
     service.try_switch_account.assert_awaited_once()

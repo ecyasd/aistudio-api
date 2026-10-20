@@ -329,15 +329,23 @@ curl http://localhost:8080/v1beta/models/gemini-3.7-flash:streamGenerateContent?
 
 An upstream response that ends before any response Part is sent receives one retry without
 forced account rotation. Once text, thinking, a signature, a tool call or an image has been sent, the
-request is never replayed. Invalid JSON, resource limits and safety stops do not trigger
+request is never replayed. Definite JSON syntax errors, resource limits and safety stops do not trigger
 this recovery. Success still requires complete transport and a real completion marker.
 
-Both generation endpoints accept the top-level JSON extension `"autoContinue": true`
-(also `auto_continue`), defaulting to `false`. When enabled, a plain-text response ending
+The model catalog lists `抗截断/base-model` variants for supported text models, such as
+`抗截断/gemini-3.1-pro-preview`. Refresh the client model list and select a variant to enable
+continuation. It shares the original model's account, quota and statistics. Selecting the
+variant enables continuation even if the client also sends `"autoContinue": false`.
+Ordinary model names default to no extra generation.
+
+Both generation endpoints also accept the top-level JSON extension `"autoContinue": true`
+(or `auto_continue`) to opt in while using an ordinary model name. A text response ending
 with the actual `MAX_TOKENS` reason can receive at most two extra generation rounds.
 `maxOutputTokens` applies **per round**; the combined answer can exceed it. Extra rounds
 consume additional request quota and tokens. Returned usage sums all rounds, including
 their repeated input. Ordinary requests do not enable extra generation.
+Dashboard and account counters record one successfully completed client request, which is
+not the number of upstream calls. Failures or disconnects may omit earlier rounds' partial usage.
 
 ```json
 {
@@ -349,17 +357,28 @@ their repeated input. Ordinary requests do not enable extra generation.
 ```
 
 All rounds share one account lease, inference slot and `AISTUDIO_TIMEOUT_STREAM` time
-budget. Continuation retains at most 512 KiB of text and uses an estimated 1 MiB input
+budget. Continuation retains at most 512 KiB of Parts, including thinking, signatures and
+per-Part overhead, and uses an estimated 1 MiB input
 history budget; reaching a bound stops extra requests and retains the real finish reason.
-Only plain-text requests and outputs without thinking or signatures are eligible.
-Tools (including default tools), images, executable code and JSON/structured output do
-not continue automatically. Explicit `tools: []` disables default tools. The model may
-repeat text; the service does not guess which text to remove. Disconnects and failures
+Text results may include thinking and signatures. Internal continuation requests preserve
+Part order, each signature's owning Part and each actual response turn. Tool declarations
+and policies remain unchanged. Actual tool calls, images, code, citations or other content
+that cannot be fully replayed stop extra rounds. Input history containing tool calls, code
+or multimodal Parts, and JSON/structured output, are also excluded. Continuation never
+forces tool use, bypasses safety stops or disguises broken transport as normal completion.
+The model may repeat text; the service does not guess which text to remove. Disconnects and failures
 clean up resources and report errors. Complete answers cannot be guaranteed.
+
+The client receives one combined answer. A standard Gemini response cannot represent the
+internal continuation conversation turns. Chat clients that replay complete signed thinking
+history across requests should use ordinary model names and manage continuation themselves.
+Replaying the combined answer as one signed model turn is not guaranteed to pass upstream
+signature validation.
 
 With the official Python SDK, pass
 `config={"http_options": {"extra_body": {"autoContinue": True}}, "tools": []}`
-to opt in for either streaming or non-streaming generation.
+to opt in, or set `model="抗截断/gemini-3.1-pro-preview"` directly. Both streaming and
+non-streaming generation work; the HTTP model path is `models/抗截断/base-model`.
 
 ### Python SDK (google-genai)
 

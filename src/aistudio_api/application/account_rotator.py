@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
+from aistudio_api.application.model_selection import model_quota_key
 from aistudio_api.config import resolve_rotator_state_file, settings
 from aistudio_api.infrastructure.utils.common import atomic_write_json
 
@@ -58,7 +59,7 @@ def normalize_model_key(model: str | None) -> str | None:
     """统一模型标识（去除 models/ 前缀并转小写），确保单模型统计准确隔离。"""
     if not model:
         return None
-    return model.removeprefix("models/").lower()
+    return model_quota_key(model)
 
 
 @dataclass
