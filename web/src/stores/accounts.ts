@@ -111,9 +111,11 @@ export const useAccountsStore = defineStore('accounts', () => {
       await accountsApi.update(id, name)
       toast.success('账号名称已更新')
       await fetchAll()
+      return true
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '更新失败'
       toast.error(msg)
+      return false
     }
   }
 

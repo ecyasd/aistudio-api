@@ -30,7 +30,11 @@ from aistudio_api.infrastructure.utils.logger import (
 )
 
 from .dependencies import require_api_key, require_web_auth
-from .error_middleware import ErrorRecordsMiddleware, record_http_failure
+from .error_middleware import (
+    ErrorRecordsMiddleware,
+    record_http_failure,
+    request_operation,
+)
 from .routes_accounts import router as accounts_router
 from .routes_errors import router as errors_router
 from .routes_gemini import router as gemini_router
@@ -178,6 +182,7 @@ async def logging_and_dump_middleware(request, call_next):
 
     start_time = time.perf_counter()
     path = request.url.path
+    operation = request_operation(request.scope) or "http_request"
 
     is_static = path.startswith(("/static", "/assets")) or path in ("/favicon.ico",)
     dump_enabled = is_dump_requests_enabled() and not is_static
@@ -216,17 +221,22 @@ async def logging_and_dump_middleware(request, call_next):
                 body_text=body_text,
                 status_code=500,
                 elapsed_ms=elapsed_ms,
-                response_text=f"Internal Server Error (Exception: {exc})",
+                response_text="Internal Server Error",
             )
         else:
             logger.error(
-                "HTTP %s %s -> 500 (%.1fms, %s)",
-                request.method,
-                path,
+                "HTTP operation=%s -> 500 (%.1fms, exception_type=%s)",
+                operation,
                 elapsed_ms,
-                exc,
+                type(exc).__name__,
             )
-        raise exc
+        # Retain only safe request-scoped diagnostics. Reraising an unhandled
+        # exception would also let the ASGI server persist its raw arguments.
+        record_http_failure(exc, 500)
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"code": 500, "message": "Internal Server Error", "status": "INTERNAL"}},
+        )
 
     elapsed_ms = (time.perf_counter() - start_time) * 1000
     content_type = response.headers.get("content-type", "")
@@ -267,9 +277,8 @@ async def logging_and_dump_middleware(request, call_next):
         )
     elif not is_static:
         logger.info(
-            "HTTP %s %s -> %d (%.1fms)",
-            request.method,
-            path,
+            "HTTP operation=%s -> %d (%.1fms)",
+            operation,
             response.status_code,
             elapsed_ms,
         )

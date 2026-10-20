@@ -242,6 +242,16 @@ class AccountStats:
                 return max(0.0, cd - now)
         return get_seconds_until_pacific_midnight()
 
+    def _record_model_request(self, model: str | None, now: float) -> str | None:
+        """Keep every outcome in the same local-day usage bucket."""
+        model = normalize_model_key(model)
+        if model:
+            la_date = get_pacific_date_key(now)
+            self._check_date_reset(model, la_date)
+            self.model_requests[model] = self.model_requests.get(model, 0) + 1
+            self.model_requests_dates[model] = la_date
+        return model
+
     def record_success(self, model: str | None = None) -> None:
         now = time.time()
         self.requests += 1
@@ -253,19 +263,14 @@ class AccountStats:
         if not self.session_expired and self.auth_cooldown <= now:
             self.auth_errors = 0
             self.auth_cooldown = 0.0
-        model = normalize_model_key(model)
-        if model:
-            la_date = get_pacific_date_key(now)
-            self._check_date_reset(model, la_date)
-            self.model_requests[model] = self.model_requests.get(model, 0) + 1
-            self.model_requests_dates[model] = la_date
-            # Preserve a newer 429 until its own deadline or an explicit owner
-            # reset. A late success must not reopen the shared model quota.
-            if self.model_cooldowns.get(model, 0.0) <= now:
-                self.model_cooldowns.pop(model, None)
-                self.model_rate_limited_dates.pop(model, None)
-                if not self.model_drip_mode.get(model):
-                    self.model_rate_limited.pop(model, None)
+        model = self._record_model_request(model, now)
+        # Preserve a newer 429 until its own deadline or an explicit owner
+        # reset. A late success must not reopen the shared model quota.
+        if model and self.model_cooldowns.get(model, 0.0) <= now:
+            self.model_cooldowns.pop(model, None)
+            self.model_rate_limited_dates.pop(model, None)
+            if not self.model_drip_mode.get(model):
+                self.model_rate_limited.pop(model, None)
 
     def record_rate_limited(self, model: str | None = None) -> None:
         now = time.time()
@@ -274,15 +279,11 @@ class AccountStats:
         self.last_rate_limited = now
         la_date = get_pacific_date_key(now)
         cooldown_seconds = get_seconds_until_pacific_midnight()
-        model = normalize_model_key(model)
+        model = self._record_model_request(model, now)
 
         if model:
-            self._check_date_reset(model, la_date)
-
             is_drip = bool(self.model_drip_mode.get(model))
             limit_count = self.model_rate_limited.get(model, 0) + 1
-            self.model_requests[model] = self.model_requests.get(model, 0) + 1
-            self.model_requests_dates[model] = la_date
             self.model_rate_limited[model] = limit_count
 
             if is_drip:
@@ -303,9 +304,7 @@ class AccountStats:
         self.requests += 1
         self.errors += 1
         self.last_used = time.time()
-        model = normalize_model_key(model)
-        if model:
-            self.model_requests[model] = self.model_requests.get(model, 0) + 1
+        self._record_model_request(model, self.last_used)
 
     def record_auth_error(
         self, model: str | None = None, cooldown_seconds: float = 300.0
@@ -318,9 +317,7 @@ class AccountStats:
         self.last_auth_error = now
         self.last_used = now
         self.auth_cooldown = now + cooldown_seconds
-        model = normalize_model_key(model)
-        if model:
-            self.model_requests[model] = self.model_requests.get(model, 0) + 1
+        self._record_model_request(model, now)
 
     def record_session_expired(self, model: str | None = None) -> None:
         """记录账号登录态失效（被重定向到登录页），将该账号隔离并在未更新前禁止使用。"""
@@ -334,9 +331,7 @@ class AccountStats:
         self.last_used = now
         # 隔离 24 小时或直至用户重新导入/手动重置
         self.auth_cooldown = now + 86400.0
-        model = normalize_model_key(model)
-        if model:
-            self.model_requests[model] = self.model_requests.get(model, 0) + 1
+        self._record_model_request(model, now)
 
     def clear_cooldown(self, model: str | None = None) -> None:
         """手动清除冷却与 429/403/失效锁定。"""
@@ -449,6 +444,10 @@ class AccountRotator:
         current_la = get_pacific_date_key()
         for account in self._store.list_accounts():
             stats = self._stats.get(account.id, AccountStats(account_id=account.id))
+            # Inactive models must also leave yesterday's bucket before their
+            # counts are displayed, including accounts quarantined by auth.
+            for model in set(stats.model_requests) | set(stats.model_rate_limited_dates):
+                stats._check_date_reset(model, current_la)
             result[account.id] = {
                 "name": account.name,
                 "email": account.email,
