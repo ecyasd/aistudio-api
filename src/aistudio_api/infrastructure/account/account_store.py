@@ -5,19 +5,82 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import threading
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, contextmanager
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from functools import wraps
 from os.path import abspath, basename, join
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Concatenate, ParamSpec, TypeVar
 
-from aistudio_api.infrastructure.account.storage_state import atomic_write_json
+from aistudio_api.infrastructure.account.storage_state import (
+    atomic_write_bytes,
+    atomic_write_json,
+    locked_file,
+)
+
+_P = ParamSpec("_P")
+_T = TypeVar("_T")
+
+
+def _registry_transaction(
+    method: Callable[Concatenate[AccountStore, _P], _T],
+) -> Callable[Concatenate[AccountStore, _P], _T]:
+    """Keep read/modify/commit together when working with registry snapshots."""
+    @wraps(method)
+    def locked(self: AccountStore, *args: _P.args, **kwargs: _P.kwargs) -> _T:
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return locked
 
 
 def _atomic_write_json(path: Path, data: object) -> None:
     """原子写入 JSON 文件（写唯一临时文件后原子替换，防止写穿或损坏）。"""
     atomic_write_json(path, data)
+
+
+@contextmanager
+def _preserve_account_files(*paths: Path) -> Iterator[None]:
+    """Rollback recoverable write failures using only operation-local memory.
+
+    The account registry lock is acquired first; file locks never call back into
+    the store. Holding the shared auth lock prevents a Cookie checkpoint from
+    publishing between an import and restoration of its previous bytes.
+    """
+    snapshots: dict[Path, tuple[bytes, int] | None] = {}
+    previous = None
+    with ExitStack() as locks:
+        for path in sorted(paths):
+            locks.enter_context(locked_file(path))
+        try:
+            for path in paths:
+                snapshots[path] = (
+                    (path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
+                    if path.exists() else None
+                )
+            try:
+                yield
+            except BaseException:
+                failed = False
+                for path, previous in snapshots.items():
+                    try:
+                        if previous is None:
+                            path.unlink(missing_ok=True)
+                        else:
+                            atomic_write_bytes(path, previous[0], mode=previous[1])
+                    except Exception:
+                        failed = True
+                if failed:
+                    raise RuntimeError("Account update failed and file rollback could not complete") from None
+                raise
+        finally:
+            snapshots.clear()
+            previous = None
 
 
 # 默认搜索路径（与 config.py 保持一致）
@@ -118,17 +181,21 @@ class Registry:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, object]) -> Registry:
+    def from_dict(cls, data: object) -> Registry:
+        if not isinstance(data, dict) or not isinstance(data.get("accounts"), dict):
+            raise ValueError("Invalid account registry")
         raw_accounts = data.get("accounts")
         accounts_dict: dict[str, object] = (
             raw_accounts if isinstance(raw_accounts, dict) else {}
         )
-        accounts = {
-            k: AccountMeta.from_dict(v)
-            for k, v in accounts_dict.items()
-            if isinstance(v, dict)
-        }
+        accounts: dict[str, AccountMeta] = {}
+        for key, value in accounts_dict.items():
+            if not isinstance(value, dict) or value.get("id") != key:
+                raise ValueError("Invalid account registry entry")
+            accounts[key] = AccountMeta.from_dict(value)
         raw_active_id = data.get("active_account_id")
+        if raw_active_id is not None and not isinstance(raw_active_id, str):
+            raise ValueError("Invalid active account identity")
         return cls(
             accounts=accounts,
             active_account_id=str(raw_active_id) if raw_active_id is not None else None,
@@ -156,7 +223,7 @@ class AccountStore:
         self._accounts_dir = (accounts_dir or _resolve_accounts_dir()).resolve()
         self._registry_path = self._accounts_dir / "registry.json"
         self._registry: Registry | None = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._ensure_dirs()
         self._migrate_legacy_if_needed()
         self._initialized = True
@@ -199,22 +266,24 @@ class AccountStore:
         """加载注册表（线程安全）。"""
         with self._lock:
             if self._registry is not None:
-                return self._registry
+                return deepcopy(self._registry)
             if not self._registry_path.exists():
                 self._registry = Registry(accounts={})
-                return self._registry
+                return deepcopy(self._registry)
             try:
                 data = json.loads(self._registry_path.read_text(encoding="utf-8"))
                 self._registry = Registry.from_dict(data)
-            except Exception:
-                self._registry = Registry(accounts={})
-            return self._registry
+            except (OSError, ValueError, TypeError):
+                # A transient read failure or malformed file is not an empty
+                # account list. Never let the next import overwrite its bytes.
+                raise RuntimeError("Account registry is unavailable") from None
+            return deepcopy(self._registry)
 
     def _save_registry(self, registry: Registry) -> None:
         """保存注册表（线程安全+原子写入）。"""
         with self._lock:
-            self._registry = registry
             _atomic_write_json(self._registry_path, registry.to_dict())
+            self._registry = deepcopy(registry)
 
     def list_accounts(self) -> list[AccountMeta]:
         """列出所有账号。"""
@@ -226,6 +295,7 @@ class AccountStore:
         registry = self._load_registry()
         return registry.accounts.get(account_id)
 
+    @_registry_transaction
     def get_active_account(self) -> AccountMeta | None:
         """获取当前活跃账号（若未设置或失效，自动兜底至首个账号）。"""
         registry = self._load_registry()
@@ -248,19 +318,19 @@ class AccountStore:
             return None
         return self._accounts_dir / account.id / "auth.json"
 
+    @_registry_transaction
     def set_active_account(self, account_id: str) -> AccountMeta | None:
         """设置活跃账号，返回账号元数据或 None（如果不存在）。"""
         registry = self._load_registry()
         if account_id not in registry.accounts:
             return None
-        changed = registry.active_account_id != account_id
         registry.active_account_id = account_id
         now = datetime.now(UTC).isoformat()
         registry.accounts[account_id].last_used = now
-        if changed:
-            self._save_registry(registry)
+        self._save_registry(registry)
         return registry.accounts[account_id]
 
+    @_registry_transaction
     def save_account(
         self,
         name: str,
@@ -295,32 +365,33 @@ class AccountStore:
         )
         account_dir = _safe_account_dir(self._accounts_dir, account_id)
         account_dir.mkdir(parents=True, exist_ok=True)
-        # 原子写入 auth.json 与 meta.json
-        _atomic_write_json(account_dir / "auth.json", storage_state)
-        _atomic_write_json(account_dir / "meta.json", meta.to_dict())
-        # 更新注册表
-        registry.accounts[account_id] = meta
-        if registry.active_account_id is None:
-            registry.active_account_id = account_id
-        self._save_registry(registry)
+        with _preserve_account_files(account_dir / "auth.json", account_dir / "meta.json"):
+            _atomic_write_json(account_dir / "auth.json", storage_state)
+            _atomic_write_json(account_dir / "meta.json", meta.to_dict())
+            registry.accounts[account_id] = meta
+            if registry.active_account_id is None:
+                registry.active_account_id = account_id
+            self._save_registry(registry)
         return meta
 
+    @_registry_transaction
     def delete_account(self, account_id: str) -> bool:
         """删除账号，返回是否成功。"""
         registry = self._load_registry()
         if account_id not in registry.accounts:
             return False
-        # 删除目录
+        # Commit removal before deleting credentials. A failed registry write
+        # must leave the account and its session directory usable for retry.
         account_dir = _safe_account_dir(self._accounts_dir, account_id)
-        if account_dir.is_dir():
-            shutil.rmtree(account_dir, ignore_errors=True)
-        # 从注册表移除
         del registry.accounts[account_id]
         if registry.active_account_id == account_id:
             registry.active_account_id = next(iter(registry.accounts), None)
         self._save_registry(registry)
+        if account_dir.is_dir():
+            shutil.rmtree(account_dir, ignore_errors=True)
         return True
 
+    @_registry_transaction
     def update_account(self, account_id: str, name: str) -> AccountMeta | None:
         """更新账号名称。"""
         registry = self._load_registry()
@@ -330,11 +401,13 @@ class AccountStore:
         # 同步更新 meta.json
         account_dir = _safe_account_dir(self._accounts_dir, account_id)
         meta_path = account_dir / "meta.json"
-        if meta_path.exists():
-            _atomic_write_json(meta_path, registry.accounts[account_id].to_dict())
-        self._save_registry(registry)
+        with _preserve_account_files(meta_path):
+            if meta_path.exists():
+                _atomic_write_json(meta_path, registry.accounts[account_id].to_dict())
+            self._save_registry(registry)
         return registry.accounts[account_id]
 
+    @_registry_transaction
     def update_account_email(self, account_id: str, email: str) -> bool:
         """更新账号的登录邮箱，并持久化 meta.json 与 registry.json。"""
         registry = self._load_registry()
@@ -346,9 +419,10 @@ class AccountStore:
         acc.email = email
         account_dir = _safe_account_dir(self._accounts_dir, account_id)
         meta_path = account_dir / "meta.json"
-        if meta_path.exists():
-            _atomic_write_json(meta_path, acc.to_dict())
-        self._save_registry(registry)
+        with _preserve_account_files(meta_path):
+            if meta_path.exists():
+                _atomic_write_json(meta_path, acc.to_dict())
+            self._save_registry(registry)
         return True
 
     def get_auth_path(self, account_id: str) -> Path | None:

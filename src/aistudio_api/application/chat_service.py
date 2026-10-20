@@ -236,11 +236,15 @@ def encode_schema_to_wire(
     if include_required and isinstance(required, (list, tuple, set)):
         wire[SchemaIndex.REQUIRED] = [str(x) for x in required]
 
-    min_props = schema.get("minProperties") or schema.get("min_properties")
+    min_props = schema.get("minProperties")
+    if min_props is None:
+        min_props = schema.get("min_properties")
     if isinstance(min_props, int):
         wire[SchemaIndex.MIN_PROPERTIES] = min_props
 
-    max_props = schema.get("maxProperties") or schema.get("max_properties")
+    max_props = schema.get("maxProperties")
+    if max_props is None:
+        max_props = schema.get("max_properties")
     if isinstance(max_props, int):
         wire[SchemaIndex.MAX_PROPERTIES] = max_props
 
@@ -252,11 +256,15 @@ def encode_schema_to_wire(
     if isinstance(maximum, (int, float)) and not isinstance(maximum, bool):
         wire[SchemaIndex.MAXIMUM] = maximum
 
-    min_len = schema.get("minLength") or schema.get("min_length")
+    min_len = schema.get("minLength")
+    if min_len is None:
+        min_len = schema.get("min_length")
     if isinstance(min_len, int):
         wire[SchemaIndex.MIN_LENGTH] = min_len
 
-    max_len = schema.get("maxLength") or schema.get("max_length")
+    max_len = schema.get("maxLength")
+    if max_len is None:
+        max_len = schema.get("max_length")
     if isinstance(max_len, int):
         wire[SchemaIndex.MAX_LENGTH] = max_len
 
@@ -266,11 +274,15 @@ def encode_schema_to_wire(
 
     _encode_schema_combiners(schema, wire, include_required)
 
-    max_items = schema.get("maxItems") or schema.get("max_items")
+    max_items = schema.get("maxItems")
+    if max_items is None:
+        max_items = schema.get("max_items")
     if isinstance(max_items, int):
         wire[SchemaIndex.MAX_ITEMS] = max_items
 
-    min_items = schema.get("minItems") or schema.get("min_items")
+    min_items = schema.get("minItems")
+    if min_items is None:
+        min_items = schema.get("min_items")
     if isinstance(min_items, int):
         wire[SchemaIndex.MIN_ITEMS] = min_items
 

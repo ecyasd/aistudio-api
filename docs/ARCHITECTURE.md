@@ -135,7 +135,7 @@ flowchart TD
   - `botguard_bootstrap.py`：BotGuard WAA 握手、基础请求模板拦截与临时会话管理。
   - `wire_spec.py`：Protobuf-over-JSON (JSPB) 字段索引枚举与 `JspbArray` 稀疏容器定义。
   - `wire_codec.py`：JSPB 请求结构组包、参数动态改写与内置工具注入。
-  - `wire_parser.py`：JSPB 响应解析器，处理 Struct 结构体、ListValue 数组与状态码映射。
+  - `wire_parser.py`：JSPB 响应解析器，处理 Struct 结构体、ListValue 数组与状态码映射；合法元数据块中的默认状态不抹除已取得的完成原因。
   - `wire_types.py`：领域数据结构契约（`AistudioContent`、`AistudioPart`、`AistudioGenerationConfig`）。
   - `stream_parser.py`：流式 JSON 增量状态机解析器，去除 XSSI 前缀并按括号深度切片分块。
   - `transport.py`：基于 CDP Binding 的事件推送管道，支持队列反压控制与时间戳签名注入。
@@ -145,7 +145,7 @@ flowchart TD
   - `model_discovery.py`：可用模型列表动态探测与本地降级。
   - `model_defaults.py`：模型默认规则解析与 mtime 驱动的内存缓存。
 - **账号与持久化子系统 (`account/`)**：
-  - `account_store.py`：账号凭据持久化存储（通过临时文件原子替换保障并发安全）。
+  - `account_store.py`：串行读改写注册表，仅在原子落盘成功后发布内存快照；注册表不可读或格式错误时拒绝写入，避免当作空账号覆盖。账号写入失败时恢复本次涉及的凭据与元数据文件，恢复过程与会话检查点共用文件锁；不保证断电或持续存储故障下的跨文件事务。
   - `cookie_parser.py`：Cookie 格式解析、SAPISIDHASH 计算与多子账号探测。
   - `cookie_refresher.py`：Cookie 凭据规整与会话保活刷新。
 
@@ -258,12 +258,12 @@ sequenceDiagram
 
 | 变更范围 | 优先检查的位置 | 必须保留的行为 |
 |---|---|---|
-| 认证与配置 | `api/dependencies.py`、`api/routes_system.py`、`infrastructure/utils/config_store.py` | 管理/调用权限分离，原子保存且保留未编辑字段 |
+| 认证与配置 | `api/dependencies.py`、`api/routes_system.py`、`infrastructure/utils/config_store.py` | 管理/调用权限分离，原子保存且保留未编辑字段；日志级别与布尔值写前验证，持久化成功后才应用运行设置 |
 | 账号与配额 | `application/account_rotator.py`、`account_orchestrator.py`、`gateway/session.py` | 统计归属原账号、模型冷却独立、退休上下文等待租约释放 |
-| 生成与续写 | `application/continuation.py`、`gateway/wire_parser.py`、`streaming.py` | Part 顺序与签名保真、真实完成、预算有界、不重放已发出的内容 |
+| 生成与续写 | `application/chat_service.py`、`continuation.py`、`gateway/wire_parser.py`、`streaming.py` | Schema 的零值约束保留、Part 顺序与签名保真、真实完成、预算有界、不重放已发出的内容 |
 | 浏览器通信 | `browser/cdp_client.py`、`gateway/transport.py`、`browser/js/` | 同一期限覆盖发送与等待，断连/取消清理队列、任务和请求 |
 | HTTP 诊断 | `api/app.py`、`api/error_middleware.py` | 摘要只记录固定操作名与异常类型，未处理异常返回通用 500，并保留安全的内存诊断；取消继续向外传递 |
-| 管理界面 | `web/src/`、`tests/frontend/` | 筛选编辑保留隐藏配置，过期请求不覆盖新登录，文件读取与保存回调只更新当前弹窗和草稿，卸载清理计时器与请求 |
+| 管理界面 | `web/src/`、`tests/frontend/` | 旧响应不覆盖新快照；文件读取与保存只更新当前弹窗和草稿；模型草稿接收未编辑的日志设置刷新，保留明确编辑的 YAML；卸载取消读取，浏览器状态串行且仅在可见时轮询 |
 
 使用已配置的 Python 环境运行 `python scripts/run_tests.py`。该入口在导入前隔离配置、账号、统计与临时目录并禁用 dotenv；测试中的启动和浏览器路径使用合成响应及替身。Windows 自动排除两项 Linux 专用测试，Linux CI 运行完整检查。
 

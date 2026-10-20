@@ -15,8 +15,8 @@ import type {
 
 
 export const systemApi = {
-  getBrowserStatus(): Promise<BrowserStatusResponse> {
-    return request<BrowserStatusResponse>('/browser/status')
+  getBrowserStatus(signal?: AbortSignal): Promise<BrowserStatusResponse> {
+    return request<BrowserStatusResponse>('/browser/status', { signal })
   },
 
   health(): Promise<HealthCheckResponse> {
@@ -50,8 +50,8 @@ export const systemApi = {
     })
   },
 
-  getConfig(): Promise<SystemConfig> {
-    return request<SystemConfig>('/config')
+  getConfig(signal?: AbortSignal): Promise<SystemConfig> {
+    return request<SystemConfig>('/config', { signal })
   },
 
   updateConfigYaml(yamlContent: string): Promise<{ ok: boolean; message: string }> {
@@ -68,8 +68,8 @@ export const systemApi = {
     })
   },
 
-  listApiKeys(): Promise<ApiKeyItem[]> {
-    return request<ApiKeyItem[]>('/api-keys')
+  listApiKeys(signal?: AbortSignal): Promise<ApiKeyItem[]> {
+    return request<ApiKeyItem[]>('/api-keys', { signal })
   },
 
   createApiKey(req: CreateApiKeyRequest): Promise<ApiKeyItem> {

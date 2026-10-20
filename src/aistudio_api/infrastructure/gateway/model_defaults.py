@@ -472,8 +472,8 @@ def get_configured_logging_settings(
     if isinstance(raw_logging, dict):
         return {
             "level": str(raw_logging.get("level") or "INFO").strip().upper(),
-            "dump_requests": bool(raw_logging.get("dump_requests", False)),
-            "dump_to_file": bool(raw_logging.get("dump_to_file", False)),
+            "dump_requests": raw_logging.get("dump_requests") is True,
+            "dump_to_file": raw_logging.get("dump_to_file") is True,
             "dump_dir": str(raw_logging.get("dump_dir") or "").strip(),
         }
     return {

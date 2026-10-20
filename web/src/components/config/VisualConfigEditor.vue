@@ -41,6 +41,7 @@ const yamlParseError = ref<string | null>(null)
 const saving = ref(false)
 const dictModalOpen = ref(false)
 const filterKeyword = ref('')
+let pendingLoggingRefresh: { present: boolean; value: unknown } | undefined
 
 const filteredProfilesWithIndex = computed(() => {
   const list = parsedConfig.value.model_defaults?.profiles || []
@@ -111,12 +112,57 @@ function syncStateToYaml(): string {
   }
 }
 
+function applyPendingLoggingRefresh() {
+  const refresh = pendingLoggingRefresh
+  if (!refresh) return
+  try {
+    const baseline = readEditorYaml(savedYaml.value).config
+    const draft = activeTab.value === 'visual'
+      ? parsedConfig.value
+      : readEditorYaml(rawYaml.value).config
+    // A model draft must not restore logging saved by the separate card.
+    // Explicit edits to logging in YAML remain the owner's local draft.
+    if (serializeConfig({ logging: draft.logging }) === serializeConfig({ logging: baseline.logging })) {
+      if (activeTab.value === 'yaml') {
+        const doc = YAML.parseDocument(readEditorYaml(rawYaml.value).yaml)
+        if (refresh.present) doc.set('logging', refresh.value)
+        else doc.delete('logging')
+        if (!parseYamlToState(doc.toString())) return
+      } else {
+        const updated = { ...draft }
+        if (refresh.present) updated.logging = refresh.value
+        else delete updated.logging
+        parsedConfig.value = updated
+      }
+    }
+    if (refresh.present) baseline.logging = refresh.value
+    else delete baseline.logging
+    savedYaml.value = serializeConfig(baseline)
+    pendingLoggingRefresh = undefined
+  } catch {
+    // Retain the refresh until the owner repairs the invalid YAML draft.
+  }
+}
+
 watch(
   () => props.initialYaml,
   (val) => {
     // Refreshes from the other settings cards must not discard a model draft.
-    if (val === undefined || hasUnsavedChanges.value) return
-    if (parseYamlToState(val)) savedYaml.value = serializeConfig(parsedConfig.value)
+    if (val === undefined) return
+    if (hasUnsavedChanges.value) {
+      try {
+        const incoming = readEditorYaml(val).config
+        pendingLoggingRefresh = { present: 'logging' in incoming, value: incoming.logging }
+        applyPendingLoggingRefresh()
+      } catch {
+        // Invalid YAML is still an unsaved draft; leave its text untouched.
+      }
+      return
+    }
+    if (parseYamlToState(val)) {
+      savedYaml.value = serializeConfig(parsedConfig.value)
+      pendingLoggingRefresh = undefined
+    }
   },
   { immediate: true }
 )
@@ -133,6 +179,7 @@ function switchTab(tab: 'visual' | 'yaml') {
     }
   }
   activeTab.value = tab
+  applyPendingLoggingRefresh()
 }
 
 function handleAddProfile() {
@@ -276,6 +323,7 @@ function handleResetDefaults() {
 }
 
 async function handleSave() {
+  applyPendingLoggingRefresh()
   saving.value = true
   let contentToSave: string
   if (activeTab.value === 'visual') {

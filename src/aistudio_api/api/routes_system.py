@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool, ValidationError, field_validator
 
 from aistudio_api.api.dependencies import get_runtime_state
 from aistudio_api.api.response_models import (
@@ -212,6 +212,41 @@ async def force_next_account(
 # ========== 系统与模型配置 API ==========
 
 
+class LoggingConfigRequest(BaseModel):
+    level: str | None = None
+    dump_requests: StrictBool | None = None
+    dump_to_file: StrictBool | None = None
+    dump_dir: str | None = None
+
+    @field_validator("level")
+    @classmethod
+    def valid_level(cls, level: str | None) -> str | None:
+        if level is None:
+            return None
+        level = level.strip().upper()
+        if level not in {"NOTSET", "DEBUG", "INFO", "WARN", "WARNING", "ERROR", "FATAL", "CRITICAL"}:
+            raise ValueError("Invalid logging level")
+        return level
+
+
+def _apply_logging_settings(config: LoggingConfigRequest) -> None:
+    from aistudio_api.infrastructure.utils.logger import (
+        set_dump_dir,
+        set_dump_requests,
+        set_dump_to_file,
+        set_log_level,
+    )
+
+    if config.level is not None:
+        set_log_level(config.level)
+    if config.dump_requests is not None:
+        set_dump_requests(config.dump_requests)
+    if config.dump_to_file is not None:
+        set_dump_to_file(config.dump_to_file)
+    if config.dump_dir is not None:
+        set_dump_dir(config.dump_dir)
+
+
 class ConfigYamlUpdateRequest(BaseModel):
     yaml_content: str
 
@@ -258,41 +293,32 @@ async def update_config_yaml(req: ConfigYamlUpdateRequest) -> dict[str, object]:
         if parsed is not None and not isinstance(parsed, dict):
             raise HTTPException(400, detail="YAML 顶层必须为字典结构")
     except yaml.YAMLError as e:
-        raise HTTPException(400, detail=f"YAML 语法格式错误: {e}") from e
+        raise HTTPException(400, detail="YAML 语法格式错误") from e
+    logging_config = None
+    if isinstance(parsed, dict) and parsed.get("logging") is not None:
+        raw_logging = parsed["logging"]
+        if not isinstance(raw_logging, dict):
+            raise HTTPException(400, detail="日志配置必须为字典结构")
+        raw_logging = dict(raw_logging)
+        for key, default in (("level", "INFO"), ("dump_requests", False), ("dump_to_file", False), ("dump_dir", "")):
+            if key in raw_logging and raw_logging[key] is None:
+                raw_logging[key] = default
+        try:
+            logging_config = LoggingConfigRequest.model_validate(raw_logging)
+        except ValidationError as e:
+            raise HTTPException(400, detail="日志配置格式或级别无效") from e
+        parsed["logging"] = {**raw_logging, **logging_config.model_dump(exclude_unset=True)}
     config_yaml_path = _resolve_config_path(None)
     try:
         save_model_config(config_yaml_path, parsed or {})
         invalidate_config_cache()
 
-        if isinstance(parsed, dict) and "logging" in parsed:
-            raw_logging = parsed["logging"]
-            if isinstance(raw_logging, dict):
-                from aistudio_api.infrastructure.utils.logger import (
-                    set_dump_dir,
-                    set_dump_requests,
-                    set_dump_to_file,
-                    set_log_level,
-                )
-
-                if "level" in raw_logging:
-                    set_log_level(str(raw_logging["level"]))
-                if "dump_requests" in raw_logging:
-                    set_dump_requests(bool(raw_logging["dump_requests"]))
-                if "dump_to_file" in raw_logging:
-                    set_dump_to_file(bool(raw_logging["dump_to_file"]))
-                if "dump_dir" in raw_logging:
-                    set_dump_dir(str(raw_logging["dump_dir"]))
+        if logging_config is not None:
+            _apply_logging_settings(logging_config)
         logger.info("配置文件 config.yaml 已更新并重新加载")
         return {"ok": True, "message": "配置已保存并重载"}
     except Exception as e:
-        raise HTTPException(500, detail=f"写入配置文件失败: {e}") from e
-
-
-class LoggingConfigRequest(BaseModel):
-    level: str | None = None
-    dump_requests: bool | None = None
-    dump_to_file: bool | None = None
-    dump_dir: str | None = None
+        raise HTTPException(500, detail="写入配置文件失败") from e
 
 
 @protected_router.put("/config/logging")
@@ -307,27 +333,18 @@ async def update_logging_config(req: LoggingConfigRequest) -> dict[str, object]:
         is_debug_env_active,
         is_dump_requests_enabled,
         is_dump_to_file_enabled,
-        set_dump_dir,
-        set_dump_requests,
-        set_dump_to_file,
-        set_log_level,
     )
 
-    if req.level is not None:
-        set_log_level(req.level)
-    if req.dump_requests is not None:
-        set_dump_requests(req.dump_requests)
-    if req.dump_to_file is not None:
-        set_dump_to_file(req.dump_to_file)
-    if req.dump_dir is not None:
-        set_dump_dir(req.dump_dir)
-
-    update_configured_logging_settings(
-        level=req.level,
-        dump_requests=req.dump_requests,
-        dump_to_file=req.dump_to_file,
-        dump_dir=req.dump_dir,
-    )
+    try:
+        update_configured_logging_settings(
+            level=req.level,
+            dump_requests=req.dump_requests,
+            dump_to_file=req.dump_to_file,
+            dump_dir=req.dump_dir,
+        )
+    except Exception as e:
+        raise HTTPException(500, detail="保存日志配置失败") from e
+    _apply_logging_settings(req)
     logger.info(
         "日志配置已更新: 级别=%s, 请求转储=%s, 文件转储=%s, 目录=%s",
         req.level,
