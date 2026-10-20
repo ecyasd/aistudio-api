@@ -56,6 +56,7 @@ WIRE_USAGE_REASONING_TOKENS = 9  # Field 10 thinking/reasoning token count
 # Candidate indexes inside chunk[0][0] (WIRE_SPECIFICATION.md §7.2)
 WIRE_CANDIDATE_CONTENT = 0  # Field 1 [parts, role]
 WIRE_CANDIDATE_FINISH_REASON = 1  # Field 2 finish reason enum code
+WIRE_CANDIDATE_INDEX = 2  # Field 3 candidate index (only candidate zero supported)
 WIRE_CANDIDATE_FINISH_MESSAGE = 3  # Field 4 finish message string
 WIRE_CANDIDATE_SAFETY_RATINGS = 4  # Field 5 safety ratings array
 
@@ -467,6 +468,30 @@ def parse_chunk_usage(chunk: object) -> dict[str, object]:
     )
 
 
+def _has_unreplayable_part(raw: object) -> bool:
+    """Refuse continuation when decoding would omit any original payload."""
+    if not isinstance(raw, list):
+        return True
+    text_fields = {WIRE_PART_TEXT_INDEX, WIRE_PART_THOUGHT_SIGNATURE_INDEX}
+    boolean_thought_fields = {
+        WIRE_PART_THOUGHT_LEAD_INDEX,
+        WIRE_PART_THOUGHT_FLAG_INDEX,
+    }
+    for index, value in enumerate(raw):
+        if value is None:
+            continue
+        if index in text_fields and isinstance(value, str):
+            continue
+        if index in boolean_thought_fields and type(value) is bool:
+            continue
+        if index == WIRE_PART_THOUGHT_ALT_FLAG_INDEX and (
+            type(value) is bool or (type(value) is int and value in (0, 1))
+        ):
+            continue
+        return True
+    return False
+
+
 def parse_response_chunk(chunk: list[object]) -> Candidate:
     candidate = Candidate()
     if (
@@ -484,6 +509,23 @@ def parse_response_chunk(chunk: list[object]) -> Candidate:
     if not isinstance(raw_candidate, list):
         return candidate
 
+    known_candidate_fields = {
+        WIRE_CANDIDATE_CONTENT,
+        WIRE_CANDIDATE_FINISH_REASON,
+        WIRE_CANDIDATE_FINISH_MESSAGE,
+        WIRE_CANDIDATE_SAFETY_RATINGS,
+    }
+    # Unknown grounding/citation metadata cannot safely be reconstructed as text
+    # history. Preserve normal responses, but do not initiate another generation.
+    candidate.continuation_unsafe = len(candidates_container) != 1 or any(
+        (
+            value is not None and not (type(value) is int and value == 0)
+            if index == WIRE_CANDIDATE_INDEX
+            else index not in known_candidate_fields and value not in (None, [], "")
+        )
+        for index, value in enumerate(raw_candidate)
+    )
+
     raw_content = (
         raw_candidate[WIRE_CANDIDATE_CONTENT]
         if len(raw_candidate) > WIRE_CANDIDATE_CONTENT
@@ -491,6 +533,13 @@ def parse_response_chunk(chunk: list[object]) -> Candidate:
     )
     raw_parts = (
         raw_content[0] if isinstance(raw_content, list) and len(raw_content) > 0 else []
+    )
+    candidate.continuation_unsafe |= raw_content is not None and (
+        not isinstance(raw_content, list)
+        or len(raw_content) < 2
+        or raw_content[1] != "model"
+        or not isinstance(raw_parts, list)
+        or any(value is not None for value in raw_content[2:])
     )
 
     text_parts: list[str] = []
@@ -503,6 +552,7 @@ def parse_response_chunk(chunk: list[object]) -> Candidate:
     code_outputs: list[str] = []
 
     for raw_part in raw_parts if isinstance(raw_parts, list) else []:
+        candidate.continuation_unsafe |= _has_unreplayable_part(raw_part)
         part = parse_response_part(raw_part)
         content_part = ContentPart(
             text=(
@@ -545,18 +595,12 @@ def parse_response_chunk(chunk: list[object]) -> Candidate:
                 content_part.image = decoded_images[0]
         if (
             content_part.text is not None
+            or content_part.thought
             or content_part.image is not None
             or content_part.function_call is not None
             or content_part.function_response is not None
             or content_part.thought_signature
         ):
-            if (
-                content_part.text is None
-                and content_part.image is None
-                and content_part.function_call is None
-                and content_part.function_response is None
-            ):
-                content_part.text = ""
             candidate.parts.append(content_part)
         if part.executable_code:
             code_outputs.append(str(part.executable_code))
@@ -629,6 +673,7 @@ def parse_text_output(raw: str) -> ModelOutput:
     merged = Candidate()
     for chunk in chunks:
         parsed = parse_response_chunk(chunk)
+        merged.continuation_unsafe |= parsed.continuation_unsafe
         merged.parts.extend(parsed.parts)
         if parsed.text:
             merged.text += parsed.text

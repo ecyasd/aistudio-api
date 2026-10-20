@@ -184,7 +184,8 @@ class GeminiGenerateContentRequest(BaseModel):
         default=False,
         validation_alias=AliasChoices("autoContinue", "auto_continue"),
         description=(
-            "Opt in to at most two extra plain-text generations after MAX_TOKENS. "
+            "Opt in to at most two extra text generations after MAX_TOKENS, "
+            "preserving thinking and Part signatures. "
             "maxOutputTokens applies per round, not to the combined answer. "
             "Each round may consume additional upstream quota and tokens."
         ),

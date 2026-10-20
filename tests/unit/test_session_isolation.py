@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -452,18 +451,13 @@ async def test_closing_client_stream_closes_nested_generators_before_releasing_l
             finalized.set()
 
     session._transport.send_streaming_request = transport
-    from aistudio_api.domain.models import ContentPart
+    from aistudio_api.domain.models import Candidate, ContentPart
 
     content_part = ContentPart(text="fake piece")
-    candidate = SimpleNamespace(
+    candidate = Candidate(
         parts=[content_part],
         finish_reason=None,
-        thinking=None,
-        reasoning_images=None,
-        function_calls=None,
-        images=None,
         text="fake piece",
-        thought_signature=None,
     )
     with (
         patch(

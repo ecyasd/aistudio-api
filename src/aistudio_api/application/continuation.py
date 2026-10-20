@@ -12,7 +12,7 @@ from collections.abc import AsyncGenerator
 from contextlib import aclosing
 from copy import deepcopy
 from dataclasses import replace
-from io import StringIO
+from itertools import chain
 from typing import TypedDict
 
 from aistudio_api.application.chat_service import NormalizedGeminiRequest
@@ -27,6 +27,8 @@ MAX_EXTRA_ROUNDS = 2
 MAX_CONTINUATION_BYTES = 512 * 1024
 MAX_HISTORY_BYTES = 1024 * 1024
 MAX_TOKENS_FINISH_REASON = 2
+PART_OVERHEAD_BYTES = 128
+CONTENT_OVERHEAD_BYTES = 64
 CONTINUE_PROMPT = (
     "Continue the preceding response from the exact point where it stopped. "
     "Output only the continuation, without repeating the preceding text."
@@ -82,9 +84,9 @@ def _arguments(
 
 def _plain_input_part(part: AistudioPart) -> bool:
     return (
-        isinstance(part.text, str)
-        and not part.thought
-        and not part.thought_signature
+        (part.text is None or isinstance(part.text, str))
+        and type(part.thought) is bool
+        and (part.thought_signature is None or isinstance(part.thought_signature, str))
         and all(
             value is None
             for value in (
@@ -101,7 +103,7 @@ def _plain_input_part(part: AistudioPart) -> bool:
 
 def _history_budget(normalized: NormalizedGeminiRequest) -> int:
     """Return remaining history bytes, or zero when continuation is unsafe."""
-    if normalized.tools or normalized.tool_config or normalized.capture_images:
+    if normalized.capture_images:
         return 0
     if resolve_model_defaults(normalized.model).is_image_model:
         return 0
@@ -113,58 +115,50 @@ def _history_budget(normalized: NormalizedGeminiRequest) -> int:
         for key in ("response_schema", "image_output_mode", "output_resolution")
     ):
         return 0
-    remaining = MAX_HISTORY_BYTES - len(CONTINUE_PROMPT.encode("utf-8")) - 128
-    contents = normalized.contents
-    if normalized.system_instruction is not None:
-        contents = [*contents, normalized.system_instruction]
+    remaining = MAX_HISTORY_BYTES
+    contents = chain(
+        normalized.contents,
+        (normalized.system_instruction,)
+        if normalized.system_instruction is not None
+        else (),
+    )
     for content in contents:
-        remaining -= 32
+        remaining -= CONTENT_OVERHEAD_BYTES + len(content.role.encode("utf-8"))
+        if remaining <= 0:
+            return 0
         for part in content.parts:
             if not _plain_input_part(part):
                 return 0
             # The character check avoids allocating an encoded copy of a huge
             # already-rejected string. Object overhead is bounded as well.
-            text = part.text or ""
-            if len(text) > remaining:
+            cost = _part_cost(part.text, part.thought_signature, remaining)
+            if cost > remaining:
                 return 0
-            remaining -= len(text.encode("utf-8")) + 32
+            remaining -= cost
             if remaining <= 0:
                 return 0
-    return min(remaining, MAX_CONTINUATION_BYTES)
+    return remaining
 
 
 def _plain_part(part: ContentPart) -> bool:
     return (
-        isinstance(part.text, str)
-        and not part.thought
-        and not part.thought_signature
+        (part.text is None or isinstance(part.text, str))
+        and type(part.thought) is bool
+        and isinstance(part.thought_signature, str)
         and part.image is None
         and part.function_call is None
         and part.function_response is None
     )
 
 
-def _plain_candidate(candidate: Candidate) -> bool:
-    return (
-        bool(candidate.text)
-        and not any(
-            (
-                candidate.thinking,
-                candidate.images,
-                candidate.reasoning_images,
-                candidate.function_calls,
-                candidate.function_responses,
-                candidate.thought_signature,
-                candidate.sources,
-                candidate.code_output,
-            )
-        )
-        and all(_plain_part(part) for part in candidate.parts)
-        and (
-            not candidate.parts
-            or "".join(part.text or "" for part in candidate.parts) == candidate.text
-        )
-    )
+def _part_cost(text: str | None, signature: str | None, remaining: int) -> int:
+    cost = PART_OVERHEAD_BYTES
+    for value in (text, signature):
+        if value is not None:
+            if len(value) > remaining - cost:
+                return remaining + 1
+            cost += len(value.encode("utf-8"))
+    return cost
 
 
 def _merge_usage(
@@ -184,14 +178,136 @@ def _merge_usage(
     return merged
 
 
-def _next_contents(
-    normalized: NormalizedGeminiRequest, text: str
-) -> list[AistudioContent]:
-    return [
-        *deepcopy(normalized.contents),
-        AistudioContent(role="model", parts=[AistudioPart(text=text)]),
-        AistudioContent(role="user", parts=[AistudioPart(text=CONTINUE_PROMPT)]),
-    ]
+class _History:
+    """Bound retained Parts and append each signed response as its own turn."""
+
+    def __init__(self, normalized: NormalizedGeminiRequest, remaining: int):
+        self.normalized = normalized
+        self.remaining = remaining
+        self.output_remaining = MAX_CONTINUATION_BYTES
+        self.contents: list[AistudioContent] | None = None
+        self.safe = True
+
+    def consume(self, part: ContentPart) -> bool:
+        if not self.safe or not _plain_part(part):
+            self.safe = False
+            return False
+        cost = _part_cost(
+            part.text,
+            part.thought_signature,
+            min(self.remaining, self.output_remaining),
+        )
+        if cost > min(self.remaining, self.output_remaining):
+            self.safe = False
+            return False
+        self.remaining -= cost
+        self.output_remaining -= cost
+        return True
+
+    def next_contents(self, parts: list[ContentPart]) -> list[AistudioContent] | None:
+        turn_cost = (
+            2 * CONTENT_OVERHEAD_BYTES
+            + PART_OVERHEAD_BYTES
+            + len(CONTINUE_PROMPT.encode("utf-8"))
+            + len("modeluser")
+        )
+        if not self.safe or turn_cost > self.remaining:
+            self.safe = False
+            return None
+        self.remaining -= turn_cost
+        # Keep the actual round boundaries: signatures must never migrate into
+        # an accumulated model turn containing content from another response.
+        self.contents = [
+            *deepcopy(
+                self.normalized.contents if self.contents is None else self.contents
+            ),
+            AistudioContent(
+                role="model",
+                parts=[
+                    AistudioPart(
+                        text=part.text,
+                        thought=part.thought,
+                        thought_signature=part.thought_signature or None,
+                    )
+                    for part in parts
+                ],
+            ),
+            AistudioContent(role="user", parts=[AistudioPart(text=CONTINUE_PROMPT)]),
+        ]
+        return self.contents
+
+
+class _RoundParts:
+    """Accept complete native Parts or unsigned legacy body events, never both."""
+
+    def __init__(self, history: _History):
+        self.history = history
+        self.parts: list[ContentPart] = []
+        self.mode: str | None = None
+        self.has_visible_text = False
+
+    def disable(self) -> None:
+        self.history.safe = False
+        self.parts.clear()
+
+    def append(self, part: ContentPart, *, mode: str = "parts") -> None:
+        if self.mode is not None and self.mode != mode:
+            self.disable()
+            return
+        self.mode = mode
+        if not self.history.consume(part):
+            self.disable()
+            return
+        self.parts.append(replace(part))
+        self.has_visible_text = self.has_visible_text or bool(
+            part.text and not part.thought
+        )
+
+    def candidate(self, candidate: Candidate) -> None:
+        if candidate.continuation_unsafe or any(
+            (
+                candidate.images,
+                candidate.reasoning_images,
+                candidate.function_calls,
+                candidate.function_responses,
+                candidate.sources,
+                candidate.code_output,
+            )
+        ):
+            self.disable()
+            return
+        if candidate.parts:
+            for part in candidate.parts:
+                self.append(part)
+                if not self.history.safe:
+                    return
+            visible = "".join(
+                part.text or "" for part in self.parts if not part.thought
+            )
+            thinking = "".join(part.text or "" for part in self.parts if part.thought)
+            last_signature = next(
+                (
+                    part.thought_signature
+                    for part in reversed(self.parts)
+                    if part.thought_signature
+                ),
+                "",
+            )
+            if (
+                visible != candidate.text
+                or thinking != candidate.thinking
+                or (
+                    candidate.thought_signature
+                    and candidate.thought_signature != last_signature
+                )
+            ):
+                self.disable()
+        elif candidate.thinking or candidate.thought_signature:
+            # A flattened summary cannot identify which original Part owned a
+            # signature, nor its order relative to thinking and visible text.
+            self.disable()
+        else:
+            self.append(ContentPart(text=candidate.text), mode="body")
 
 
 def _candidate_parts(candidate: Candidate) -> list[ContentPart]:
@@ -228,6 +344,7 @@ def _merge_outputs(previous: ModelOutput, current: ModelOutput) -> ModelOutput:
         reasoning_images=[*before.reasoning_images, *after.reasoning_images],
         function_calls=[*before.function_calls, *after.function_calls],
         function_responses=[*before.function_responses, *after.function_responses],
+        thought_signature=after.thought_signature or before.thought_signature,
         sources=[*before.sources, *after.sources],
         code_output=before.code_output + after.code_output,
         parts=[*_candidate_parts(before), *_candidate_parts(after)],
@@ -252,23 +369,29 @@ async def generate_content(
         return await client.generate_content(**_arguments(normalized))
 
     output: ModelOutput | None = None
+    history = _History(normalized, budget)
     try:
         async with asyncio.timeout(settings.timeout_stream):
             output = await client.generate_content(**_arguments(normalized))
+            current = output
             for _ in range(MAX_EXTRA_ROUNDS):
-                if len(output.candidates) != 1:
+                if len(current.candidates) != 1:
                     break
-                candidate = output.candidates[0]
+                candidate = current.candidates[0]
+                retained = _RoundParts(history)
+                retained.candidate(candidate)
                 if (
                     type(candidate.finish_reason) is not int
                     or candidate.finish_reason != MAX_TOKENS_FINISH_REASON
-                    or not _plain_candidate(candidate)
-                    or len(candidate.text) > budget
-                    or len(candidate.text.encode("utf-8")) > budget
+                    or not history.safe
+                    or not retained.has_visible_text
                 ):
                     break
+                contents = history.next_contents(retained.parts)
+                if contents is None:
+                    break
                 current = await client.generate_content(
-                    **_arguments(normalized, _next_contents(normalized, candidate.text))
+                    **_arguments(normalized, contents)
                 )
                 output = _merge_outputs(output, current)
             return output
@@ -283,31 +406,6 @@ async def generate_content(
         if failure is not exc:
             raise failure from exc
         raise
-
-
-class _TextBuffer:
-    """Retain only bounded text needed for a potential continuation request."""
-
-    def __init__(self, budget: int):
-        self.remaining = budget
-        self.buffer = StringIO()
-        self.safe = True
-
-    def disable(self) -> None:
-        self.safe = False
-        self.buffer.close()
-
-    def append(self, text: str) -> None:
-        if not self.safe:
-            return
-        if len(text) > self.remaining:
-            self.disable()
-            return
-        self.remaining -= len(text.encode("utf-8"))
-        if self.remaining < 0:
-            self.disable()
-            return
-        self.buffer.write(text)
 
 
 async def stream_generate_content(
@@ -325,10 +423,11 @@ async def stream_generate_content(
             )
         ) as upstream:
             async for event in upstream:
-                yield event
+                if event[0] != "continuation_unsafe":
+                    yield event
         return
 
-    retained = _TextBuffer(budget)
+    history = _History(normalized, budget)
     contents: list[AistudioContent] | None = None
     usage: dict[str, object] = {}
     loop = asyncio.get_running_loop()
@@ -338,7 +437,7 @@ async def stream_generate_content(
             finish: int | None = None
             completed = False
             round_usage: dict[str, object] = {}
-            round_has_text = False
+            retained = _RoundParts(history)
             async with aclosing(
                 client.stream_generate_content(
                     **_arguments(normalized, contents),
@@ -363,18 +462,17 @@ async def stream_generate_content(
                         round_usage = payload if isinstance(payload, dict) else {}
                     elif event_type == "done":
                         completed = True
+                    elif event_type == "continuation_unsafe":
+                        retained.disable()
                     else:
                         if event_type == "parts" and isinstance(payload, list):
                             for part in payload:
-                                if isinstance(part, ContentPart) and _plain_part(part):
-                                    text = part.text or ""
-                                    retained.append(text)
-                                    round_has_text = round_has_text or bool(text)
+                                if isinstance(part, ContentPart):
+                                    retained.append(part)
                                 else:
                                     retained.disable()
                         elif event_type == "body" and isinstance(payload, str):
-                            retained.append(payload)
-                            round_has_text = round_has_text or bool(payload)
+                            retained.append(ContentPart(text=payload), mode="body")
                         elif event_type != "response_id":
                             retained.disable()
                         yield event_type, payload
@@ -386,11 +484,12 @@ async def stream_generate_content(
             if (
                 finish == MAX_TOKENS_FINISH_REASON
                 and round_index < MAX_EXTRA_ROUNDS
-                and retained.safe
-                and round_has_text
+                and history.safe
+                and retained.has_visible_text
             ):
-                contents = _next_contents(normalized, retained.buffer.getvalue())
-                continue
+                contents = history.next_contents(retained.parts)
+                if contents is not None:
+                    continue
             yield "finish_reason", finish
             yield "usage", usage or None
             yield "done", None
@@ -399,8 +498,6 @@ async def stream_generate_content(
         raise RequestError(
             504, "Automatic continuation exceeded the request time budget"
         ) from exc
-    finally:
-        retained.buffer.close()
 
 
 __all__ = ["ContinuationError", "generate_content", "stream_generate_content"]

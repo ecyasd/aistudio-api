@@ -180,10 +180,11 @@ async def test_exact_text_history_same_client_two_extra_limit_and_no_mutation():
     assert len(client.calls) == 3
     assert normalized == original
     assert rounds == originals
-    for index, text in ((1, "A "), (2, "A  A\n")):
+    for index, text in ((1, "A "), (2, " A\n")):
         call = client.calls[index]
         assert call["max_tokens"] == 10  # Per-round cap, unchanged.
-        assert call["contents"][:-2] == original.contents
+        assert call["contents"][: len(original.contents)] == original.contents
+        assert len(call["contents"]) == len(original.contents) + 2 * index
         assert call["contents"][0] is not normalized.contents[0]
         assert call["contents"][-2] == AistudioContent(
             "model", [AistudioPart(text=text)]
@@ -214,8 +215,6 @@ async def test_only_real_numeric_max_tokens_can_continue(finish):
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"tools": [["function"]]},
-        {"tool_config": [1]},
         {"capture_images": [("image/png", "synthetic")]},
         {"generation_config_overrides": {"response_mime_type": "application/json"}},
         {"generation_config_overrides": {"response_schema": []}},
@@ -223,7 +222,7 @@ async def test_only_real_numeric_max_tokens_can_continue(finish):
         {"generation_config_overrides": {"output_resolution": ["1:1", "1K"]}},
     ],
 )
-async def test_request_tools_images_and_structured_output_skip_continuation(overrides):
+async def test_request_images_and_structured_output_skip_continuation(overrides):
     client = FakeClient([output()])
     await continuation.generate_content(
         client, request(**overrides), auto_continue=True
@@ -242,12 +241,10 @@ async def test_request_tools_images_and_structured_output_skip_continuation(over
         AistudioPart(function_response=("f", {})),
         AistudioPart(executable_code=("PYTHON", "pass")),
         AistudioPart(code_execution_result=("OUTCOME_OK", "")),
-        AistudioPart(text="reason", thought=True),
-        AistudioPart(text="signed", thought_signature="synthetic"),
     ],
 )
 @pytest.mark.parametrize("system", [False, True])
-async def test_multimodal_or_signed_history_and_system_are_excluded(part, system):
+async def test_multimodal_history_and_system_are_excluded(part, system):
     normalized = request()
     content = AistudioContent("user", [part])
     if system:
@@ -259,7 +256,9 @@ async def test_multimodal_or_signed_history_and_system_are_excluded(part, system
     assert len(client.calls) == 1
 
 
-async def test_default_tools_injected_by_normalization_are_excluded(monkeypatch):
+async def test_default_tools_are_preserved_and_do_not_disable_text_continuation(
+    monkeypatch,
+):
     from aistudio_api.api.schemas import GeminiGenerateContentRequest
 
     monkeypatch.setattr(
@@ -274,9 +273,10 @@ async def test_default_tools_injected_by_normalization_are_excluded(monkeypatch)
         "gemini-3.7-flash",
     )
     assert normalized.tools
-    client = FakeClient([output()])
+    client = FakeClient([output(), output("B", 1)])
     await continuation.generate_content(client, normalized, auto_continue=True)
-    assert len(client.calls) == 1
+    assert len(client.calls) == 2
+    assert all(call["tools"] == normalized.tools for call in client.calls)
 
 
 async def test_image_model_defaults_are_excluded(monkeypatch):
@@ -313,7 +313,6 @@ async def test_non_plain_candidate_content_is_never_continued(fields):
     "part",
     [
         ContentPart(text="A", thought=True),
-        ContentPart(text="A", thought_signature="synthetic"),
         ContentPart(image=GeneratedImage("image/png", b"synthetic", 9)),
         ContentPart(function_call={"name": "f"}),
         ContentPart(function_response={"name": "f"}),
@@ -411,8 +410,8 @@ async def test_stream_preserves_parts_ids_exact_history_and_first_refresh_only()
         False,
         False,
     ]
-    assert client.calls[2]["contents"][-2].parts[0].text == "a  a\n"
-    assert len(client.calls[2]["contents"]) == len(normalized.contents) + 2
+    assert client.calls[2]["contents"][-2].parts[0].text == " a\n"
+    assert len(client.calls[2]["contents"]) == len(normalized.contents) + 4
     assert normalized == original
     assert client.closed == [0, 1, 2]
 
@@ -550,7 +549,9 @@ async def test_stream_consumer_disconnect_during_later_round_closes_it():
 async def test_output_byte_cap_stops_future_calls_but_keeps_genuine_response(
     monkeypatch, text
 ):
-    monkeypatch.setattr(continuation, "MAX_CONTINUATION_BYTES", 4)
+    monkeypatch.setattr(
+        continuation, "MAX_CONTINUATION_BYTES", continuation.PART_OVERHEAD_BYTES + 4
+    )
     client = FakeClient([output(text)])
     result = await continuation.generate_content(client, request(), auto_continue=True)
     assert (result.text, result.candidates[0].finish_reason) == (text, 2)
@@ -564,7 +565,9 @@ async def test_output_byte_cap_stops_future_calls_but_keeps_genuine_response(
 async def test_accumulated_stream_cap_stops_third_round_without_losing_chunks(
     monkeypatch,
 ):
-    monkeypatch.setattr(continuation, "MAX_CONTINUATION_BYTES", 3)
+    monkeypatch.setattr(
+        continuation, "MAX_CONTINUATION_BYTES", 2 * continuation.PART_OVERHEAD_BYTES + 3
+    )
     client = FakeClient([events("ab"), events("cd"), events("forbidden")])
     received = await stream(client, auto_continue=True)
     assert [item[1][0].text for item in received if item[0] == "parts"] == ["ab", "cd"]
@@ -575,7 +578,9 @@ async def test_accumulated_stream_cap_stops_third_round_without_losing_chunks(
 async def test_accumulated_nonstream_cap_keeps_second_response_and_stops_third(
     monkeypatch,
 ):
-    monkeypatch.setattr(continuation, "MAX_CONTINUATION_BYTES", 3)
+    monkeypatch.setattr(
+        continuation, "MAX_CONTINUATION_BYTES", 2 * continuation.PART_OVERHEAD_BYTES + 3
+    )
     client = FakeClient([output("ab"), output("cd"), output("forbidden")])
     result = await continuation.generate_content(client, request(), auto_continue=True)
     assert result.text == "abcd"

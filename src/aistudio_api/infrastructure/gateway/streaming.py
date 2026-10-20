@@ -146,6 +146,14 @@ class StreamingGateway:
                             yield ("response_id", latest_response_id)
                         candidate = parse_response_chunk(parsed_chunk)
                         if (
+                            candidate.continuation_unsafe
+                            or candidate.code_output
+                            or candidate.sources
+                        ):
+                            # Internal eligibility marker, consumed by the
+                            # continuation wrapper and never rendered as SSE.
+                            yield ("continuation_unsafe", True)
+                        if (
                             candidate.finish_reason is not None
                             and candidate.finish_reason > 0
                         ):

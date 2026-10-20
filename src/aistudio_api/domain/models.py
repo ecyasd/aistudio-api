@@ -40,6 +40,8 @@ class Candidate:
     finish_message: str = ""
     safety_ratings: list[dict[str, object]] = field(default_factory=list)
     parts: list[ContentPart] = field(default_factory=list)
+    # Internal eligibility only: never exposed as a public response field.
+    continuation_unsafe: bool = field(default=False, repr=False)
 
     @property
     def has_content(self) -> bool:
