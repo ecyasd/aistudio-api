@@ -22,6 +22,7 @@ export const useAccountsStore = defineStore('accounts', () => {
   const loading = ref(false)
   const activatingId = ref<string | null>(null)
   const importing = ref(false)
+  let refreshRequest = 0
 
   const activeId = computed(() => activeAccount.value?.id || '')
 
@@ -36,6 +37,7 @@ export const useAccountsStore = defineStore('accounts', () => {
   })
 
   async function fetchAll() {
+    const request = ++refreshRequest
     loading.value = true
     try {
       const [accsRes, activeRes] = await Promise.allSettled([
@@ -43,6 +45,7 @@ export const useAccountsStore = defineStore('accounts', () => {
         accountsApi.getActive(),
         systemStore.fetchRotation(),
       ])
+      if (request !== refreshRequest) return
 
       if (accsRes.status === 'fulfilled') {
         accounts.value = accsRes.value
@@ -54,13 +57,12 @@ export const useAccountsStore = defineStore('accounts', () => {
 
       if (activeRes.status === 'fulfilled') {
         activeAccount.value = activeRes.value
-      } else if (accounts.value.length > 0 && !activeAccount.value) {
-        activeAccount.value = accounts.value[0]
-      } else if (accounts.value.length === 0) {
+      } else if (accsRes.status === 'fulfilled' &&
+          !accounts.value.some(account => account.id === activeAccount.value?.id)) {
         activeAccount.value = null
       }
     } finally {
-      loading.value = false
+      if (request === refreshRequest) loading.value = false
     }
   }
 

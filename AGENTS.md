@@ -34,7 +34,7 @@
 - 保持分层与类型明确；外部输入先收窄类型。wire 字段使用已有具名常量，不在业务层散布下标。
 - 先复现缺陷，再补覆盖行为的回归；使用离线协议回放和合成浏览器替身，不以真实推理作为测试。
 - 改后运行相关测试。涉及并发、取消、认证或协议时，覆盖成功、失败、重试和资源释放；前端改动检查卸载及异步完成后的状态。
-- 常用检查：`uv run pytest tests/unit`、`uv run ruff check <changed-files>`；前端按 `web/package.json` 执行类型检查、lint 与构建。完整发布以 CI 中的检查和发布流程为准。
+- 在仓库目录用已配置环境运行 `python scripts/run_tests.py`，确保导入前隔离配置和数据；Python lint 使用 `python -m ruff check .`。前端按 `web/package.json` 执行类型检查、lint 与构建，完整发布以 CI 为准。
 - 使用已配置的虚拟环境。临时目录使用 `tempfile` 或环境指定路径，兼容 Windows、Linux 与 Termux。
 - 提交前检查完整 diff，确认没有凭据、临时文件、测试输出或无关改动；报告实际执行的验证及其限制。
 

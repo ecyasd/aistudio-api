@@ -700,7 +700,10 @@ def parse_text_output(raw: str) -> ModelOutput:
             merged.code_output = "\n".join(
                 filter(None, [merged.code_output, parsed.code_output])
             )
-        if parsed.finish_reason is not None:
+        # Unspecified/default markers in later metadata chunks must not erase
+        # a completed generation. Match the streaming gateway's positive marker
+        # rule while still requiring completion before accepting EOF.
+        if parsed.finish_reason is not None and parsed.finish_reason > 0:
             merged.finish_reason = parsed.finish_reason
         if parsed.finish_message:
             merged.finish_message = parsed.finish_message

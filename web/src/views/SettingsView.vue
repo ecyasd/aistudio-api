@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { systemApi } from '@/api/system.ts'
 import { useToastStore } from '@/stores/toast.ts'
+import { usePolling } from '@/composables/usePolling.ts'
 import type { BrowserStatusResponse, SystemConfig } from '@/types/system.ts'
 import ApiKeyManagerCard from '@/components/settings/ApiKeyManagerCard.vue'
 import LogConfigCard from '@/components/settings/LogConfigCard.vue'
@@ -27,34 +28,61 @@ const browserStatusText = computed(() => {
     ready: '已就绪', failed: '启动失败，调用时重试', closed: '已停止，调用时启动',
   }[browser.value.status]
 })
-let browserTimer: ReturnType<typeof setInterval> | undefined
+let mounted = true
+let configRequest = 0
+let browserRequest = 0
+let configController: AbortController | undefined
+let browserController: AbortController | undefined
 
 async function loadBrowserStatus() {
+  if (!mounted) return
+  const request = ++browserRequest
+  browserController?.abort()
+  const controller = new AbortController()
+  browserController = controller
   try {
-    browser.value = await systemApi.getBrowserStatus()
+    const result = await systemApi.getBrowserStatus(controller.signal)
+    if (mounted && request === browserRequest) browser.value = result
   } catch {
-    browser.value = null
+    if (mounted && request === browserRequest) browser.value = null
+  } finally {
+    if (request === browserRequest) browserController = undefined
   }
 }
 
 async function loadConfig() {
+  if (!mounted) return
+  const request = ++configRequest
+  configController?.abort()
+  const controller = new AbortController()
+  configController = controller
   loading.value = true
   try {
-    config.value = await systemApi.getConfig()
+    const result = await systemApi.getConfig(controller.signal)
+    if (mounted && request === configRequest) config.value = result
   } catch (err: unknown) {
+    if (!mounted || request !== configRequest) return
     const msg = err instanceof Error ? err.message : '获取系统配置失败'
     toast.error(msg)
   } finally {
-    loading.value = false
+    if (mounted && request === configRequest) {
+      loading.value = false
+      configController = undefined
+    }
   }
 }
 
 onMounted(() => {
   void loadConfig()
-  void loadBrowserStatus()
-  browserTimer = setInterval(() => { void loadBrowserStatus() }, 15000)
 })
-onUnmounted(() => { if (browserTimer) clearInterval(browserTimer) })
+usePolling(loadBrowserStatus, 15000)
+onUnmounted(() => {
+  mounted = false
+  configRequest++
+  browserRequest++
+  configController?.abort()
+  browserController?.abort()
+})
 </script>
 
 <template>

@@ -9,6 +9,7 @@ import os
 import stat
 import tempfile
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 _locks: dict[Path, threading.RLock] = {}
@@ -19,6 +20,13 @@ _ANY_VERSION = object()
 def _path_lock(path: Path) -> threading.RLock:
     with _locks_guard:
         return _locks.setdefault(path.resolve(), threading.RLock())
+
+
+@contextlib.contextmanager
+def locked_file(path: Path) -> Iterator[None]:
+    """Share the checkpoint lock across an account import and its rollback."""
+    with _path_lock(path):
+        yield
 
 
 def auth_file_version(path: str | Path) -> str | None:
@@ -42,13 +50,23 @@ def atomic_write_json(
     with _path_lock(target):
         if expected_version is not _ANY_VERSION and auth_file_version(target) != expected_version:
             return False
+        contents = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        atomic_write_bytes(target, contents)
+        return True
+
+
+def atomic_write_bytes(path: Path, contents: bytes, *, mode: int | None = None) -> None:
+    """Atomically restore an operation-local snapshot without changing its bytes."""
+    target = path.resolve()
+    with _path_lock(target):
         target.parent.mkdir(parents=True, exist_ok=True)
-        mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else 0o600
+        if mode is None:
+            mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else 0o600
         fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
         temporary_path = Path(temporary)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump(data, stream, ensure_ascii=False, separators=(",", ":"))
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(contents)
                 stream.flush()
                 os.fsync(stream.fileno())
             temporary_path.chmod(mode)
@@ -56,4 +74,3 @@ def atomic_write_json(
         finally:
             with contextlib.suppress(FileNotFoundError):
                 temporary_path.unlink()
-        return True
