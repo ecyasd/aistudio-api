@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -197,3 +198,52 @@ def test_runtime_save_failure_preserves_disk_and_does_not_log_raw_exception(
     assert path.read_text(encoding="utf-8") == original
     assert sentinel not in caplog.text
     assert "ValueError" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("before_midnight", "utc_offset_hours", "old_date", "new_date"),
+    [
+        ("2026-10-20T06:59:26+00:00", -7, "2026-10-19", "2026-10-20"),
+        ("2026-12-20T07:59:26+00:00", -8, "2026-12-19", "2026-12-20"),
+    ],
+    ids=["daylight-saving-time", "standard-time"],
+)
+def test_model_backoff_near_pacific_midnight_resets_on_the_new_local_date(
+    monkeypatch, before_midnight, utc_offset_hours, old_date, new_date,
+):
+    # This reproduces the CI boundary explicitly rather than weakening daytime
+    # backoff assertions: the stored deadline has a 60-second minimum, while
+    # the old local-day quota bucket is retired when midnight arrives earlier.
+    clock = [datetime.fromisoformat(before_midnight).timestamp()]
+    fake_datetime = MagicMock(wraps=datetime)
+    fake_datetime.now.side_effect = lambda tz=None: datetime.fromtimestamp(clock[0], tz)
+    # Windows need not have the optional IANA tzdata package installed.
+    monkeypatch.setattr(module, "ZoneInfo", lambda _: timezone(timedelta(hours=utc_offset_hours)))
+    monkeypatch.setattr(module, "datetime", fake_datetime)
+    monkeypatch.setattr(module.time, "time", lambda: clock[0])
+    stats = module.AccountStats(account_id="offline-midnight-account")
+    assert module.get_pacific_date_key() == old_date
+    assert module.get_seconds_until_pacific_midnight() == 34
+    for _ in range(3):
+        stats.record_rate_limited(MODEL)
+    assert stats.model_rate_limited[MODEL_KEY] == 3
+    assert stats.model_drip_mode[MODEL_KEY]
+    assert stats.get_cooldown_remaining(MODEL) == 60
+
+    clock[0] += 33
+    assert module.get_pacific_date_key() == old_date
+    assert not stats.is_available(MODEL)
+    assert stats.get_cooldown_remaining(MODEL) == 27
+
+    clock[0] += 2
+    assert module.get_pacific_date_key() == new_date
+    assert stats.is_available(MODEL)
+    assert stats.model_requests[MODEL_KEY] == 0
+    assert MODEL_KEY not in stats.model_cooldowns
+    assert MODEL_KEY not in stats.model_rate_limited
+    assert MODEL_KEY not in stats.model_drip_mode
+    assert MODEL_KEY not in stats.model_rate_limited_dates
+    stats.record_rate_limited(MODEL)
+    assert stats.model_requests[MODEL_KEY] == 1
+    assert stats.model_rate_limited[MODEL_KEY] == 1
+    assert stats.get_cooldown_remaining(MODEL) == 60
