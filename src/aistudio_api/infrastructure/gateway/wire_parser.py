@@ -111,7 +111,8 @@ def is_incomplete_json_error(text: str, exc: json.JSONDecodeError) -> bool:
     )
 
 
-def _looks_like_response_chunk(value: object) -> bool:
+def is_response_chunk(value: object) -> bool:
+    """Recognize a generation chunk, including finish-only and usage trailers."""
     if not isinstance(value, list) or not value or not isinstance(value[0], list):
         return False
     candidates = value[0]
@@ -133,7 +134,7 @@ def _looks_like_response_chunk(value: object) -> bool:
 
 def _iter_response_chunks(outer: object) -> list[list[object]]:
     def collect(value: object) -> list[list[object]] | None:
-        if _looks_like_response_chunk(value) and isinstance(value, list):
+        if is_response_chunk(value) and isinstance(value, list):
             return [value]
         if not isinstance(value, list):
             return None
@@ -196,8 +197,14 @@ def parse_response_part(raw_part: object) -> ResponsePart:
     if len(raw_part) > 0 and isinstance(raw_part[0], list):
         return ResponsePart()
 
-    # Guard against role name in 2-element structure where index 1 is role
-    if len(raw_part) == 2 and raw_part[1] in ("model", "user", "system", "assistant"):
+    # A compact text Part is [None/bool-thought, text]. Its text may itself be
+    # a role word; only reject role tuples with an invalid leading payload.
+    if (
+        len(raw_part) == 2
+        and raw_part[1] in ("model", "user", "system", "assistant")
+        and raw_part[0] is not None
+        and type(raw_part[0]) is not bool
+    ):
         return ResponsePart()
 
     thought = False
@@ -747,6 +754,7 @@ __all__ = [
     "WIRE_USAGE_TOTAL_TOKENS",
     "WIRE_USAGE_VISIBLE_COMPLETION",
     "ResponsePart",
+    "is_response_chunk",
     "parse_chunk_usage",
     "parse_image_output",
     "parse_response_chunk",

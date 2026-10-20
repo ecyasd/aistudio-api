@@ -57,18 +57,7 @@ const filteredProfilesWithIndex = computed(() => {
     })
 })
 
-const filteredModels = computed(() => {
-  const allModels = parsedConfig.value.model_defaults?.models || {}
-  const kw = filterKeyword.value.trim().toLowerCase()
-  if (!kw) return allModels
-  const result: ModelOverrideMap = {}
-  for (const [key, val] of Object.entries(allModels)) {
-    if (key.toLowerCase().includes(kw)) {
-      result[key] = val
-    }
-  }
-  return result
-})
+const modelOverrides = computed(() => parsedConfig.value.model_defaults?.models || {})
 
 // API keys belong to the key manager. Never retain or submit a cached copy
 // through the model editor, including when the user pastes an old config file.
@@ -518,7 +507,8 @@ onBeforeRouteLeave((_to, _from, next) => {
 
       <!-- Section 2: Specific Model Overrides -->
       <ModelOverrideCard
-        :models="filteredModels"
+        :models="modelOverrides"
+        :filter-keyword="filterKeyword"
         @update:models="updateModelsOverride"
       />
     </div>

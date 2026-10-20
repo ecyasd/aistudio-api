@@ -122,7 +122,8 @@ async def test_account_stats_per_model_cooldown():
     assert stats.get_cooldown_remaining("gemini-2.5-pro") > 0
     assert stats.get_cooldown_remaining("gemini-2.5-flash") == 0
 
-    # 成功请求清除偶发冷却
+    # 冷却到期后的成功请求清理遗留标记；在途成功不能提前清除新冷却。
+    stats.model_cooldowns["gemini-2.5-pro"] = time.time() - 1
     stats.record_success(model="gemini-2.5-pro")
     assert stats.is_available("gemini-2.5-pro")
 

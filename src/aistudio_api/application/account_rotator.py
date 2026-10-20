@@ -247,18 +247,25 @@ class AccountStats:
         self.requests += 1
         self.success += 1
         self.last_used = now
-        self.auth_errors = 0
-        self.auth_cooldown = 0.0
+        # Another in-flight request can quarantine this account before an older
+        # successful request completes. Completion is usage evidence, not proof
+        # that a still-active authentication failure has recovered.
+        if not self.session_expired and self.auth_cooldown <= now:
+            self.auth_errors = 0
+            self.auth_cooldown = 0.0
         model = normalize_model_key(model)
         if model:
             la_date = get_pacific_date_key(now)
             self._check_date_reset(model, la_date)
             self.model_requests[model] = self.model_requests.get(model, 0) + 1
             self.model_requests_dates[model] = la_date
-            self.model_cooldowns.pop(model, None)
-            self.model_rate_limited_dates.pop(model, None)
-            if not self.model_drip_mode.get(model):
-                self.model_rate_limited.pop(model, None)
+            # Preserve a newer 429 until its own deadline or an explicit owner
+            # reset. A late success must not reopen the shared model quota.
+            if self.model_cooldowns.get(model, 0.0) <= now:
+                self.model_cooldowns.pop(model, None)
+                self.model_rate_limited_dates.pop(model, None)
+                if not self.model_drip_mode.get(model):
+                    self.model_rate_limited.pop(model, None)
 
     def record_rate_limited(self, model: str | None = None) -> None:
         now = time.time()

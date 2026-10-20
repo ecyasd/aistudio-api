@@ -344,8 +344,9 @@ with the actual `MAX_TOKENS` reason can receive at most two extra generation rou
 `maxOutputTokens` applies **per round**; the combined answer can exceed it. Extra rounds
 consume additional request quota and tokens. Returned usage sums all rounds, including
 their repeated input. Ordinary requests do not enable extra generation.
-Dashboard and account counters record one successfully completed client request, which is
-not the number of upstream calls. Failures or disconnects may omit earlier rounds' partial usage.
+Continuation rounds record one combined success; error retries still record their respective
+failure and success events. Dashboard and account request counters therefore represent neither
+client request counts nor upstream call counts. Failures or disconnects may omit earlier rounds' partial usage.
 
 ```json
 {

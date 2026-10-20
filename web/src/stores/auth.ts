@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { authApi } from '@/api/auth.ts'
-import { getToken, setToken, clearToken } from '@/api/client.ts'
+import { ApiError, getToken, setToken, clearToken } from '@/api/client.ts'
 
 export const useAuthStore = defineStore('auth', () => {
   const authEnabled = ref(false)
@@ -22,12 +22,15 @@ export const useAuthStore = defineStore('auth', () => {
         return false
       }
 
+      const verifiedToken = token.value
       try {
-        await authApi.verifyToken(token.value)
+        await authApi.verifyToken(verifiedToken)
         return true
-      } catch {
-        clearToken()
-        token.value = ''
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 401 && token.value === verifiedToken) {
+          if (getToken() === verifiedToken) clearToken()
+          token.value = getToken()
+        }
         return false
       }
     } catch {
