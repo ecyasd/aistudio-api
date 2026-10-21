@@ -58,6 +58,26 @@ mode；严格 umask 可能移除服务用户的读取权限。
 重置调用密钥；只有专用密钥管理操作会更改它。上游 Google 登录失效与调用密钥失效
 分别处理，不应通过轮换 API 密钥解决 Google 登录问题。
 
+### 模型选择器的公网路由
+
+若 HTTPS 网关按模型路径设置白名单，必须同时接受普通模型和目录中列出的
+`抗截断/原模型名`。只允许单段 ASCII 模型名的旧规则会让模型列表正常返回，
+但选择抗截断模型时在网关直接返回 `404`，请求不会到达 API。
+
+Caddy 的两个命名匹配器应保留各自的 GET、POST 方法限制，并使用以下路径规则：
+
+```caddyfile
+path_regexp public_model_read ^/v1beta/models(/(抗截断/)?[A-Za-z0-9][A-Za-z0-9._-]*)?$
+path_regexp public_model_generate ^/v1beta/models/(抗截断/)?[A-Za-z0-9][A-Za-z0-9._-]*:(generateContent|streamGenerateContent)$
+```
+
+[Caddy 的 `path_regexp`](https://caddyserver.com/docs/caddyfile/matchers#path-regexp)
+匹配 URL 解码后的路径；客户端把中文或分隔斜杠编码为 `%xx` 时仍使用同一规则。
+只追加这个明确的选择器前缀，保留现有认证、其他路由、未知方法的 `404` 和私有端口。
+先校验候选 Caddy 配置，再 reload；常规代码工件不会替换现有网关配置。
+无模型调用验证可确认：未认证的普通和抗截断生成路径均进入认证守卫返回 `401`，
+而未知方法仍为 `404`；认证后的真实模型调用须单独按授权验证。
+
 ## 发布检查
 
 发布前检查受影响的后端测试及前端类型、lint 和构建，并使用合成数据验证。

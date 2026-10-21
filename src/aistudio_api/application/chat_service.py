@@ -677,6 +677,16 @@ def normalize_gemini_request(
                 continue
             if part.fileData is not None:
                 raise ValueError("fileData is not supported yet")
+            if part.thoughtSignature is not None:
+                # A native signature can occupy its own Part without text.
+                # Keep that position and thought ownership when clients replay
+                # a response rather than silently dropping the signed Part.
+                parts.append(
+                    AistudioPart(
+                        thought=bool(part.thought),
+                        thought_signature=part.thoughtSignature,
+                    )
+                )
         contents.append(AistudioContent(role=role, parts=parts))
 
         if role == "user":
@@ -696,13 +706,18 @@ def normalize_gemini_request(
                 )
                 if part.text is not None
                 else AistudioPart(
-                    inline_data=(part.inlineData.mimeType, part.inlineData.data)
-                    if part.inlineData
-                    else ("", ""),
+                    inline_data=(part.inlineData.mimeType, part.inlineData.data),
+                    thought_signature=part.thoughtSignature,
+                )
+                if part.inlineData is not None
+                else AistudioPart(
+                    thought=bool(part.thought),
                     thought_signature=part.thoughtSignature,
                 )
                 for part in req.systemInstruction.parts
-                if part.text is not None or part.inlineData is not None
+                if part.text is not None
+                or part.inlineData is not None
+                or part.thoughtSignature is not None
             ],
         )
 

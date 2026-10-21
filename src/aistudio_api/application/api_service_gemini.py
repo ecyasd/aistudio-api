@@ -611,6 +611,8 @@ def format_sse_event(
             part.model_dump(mode="json", exclude_none=True)
             for part in to_gemini_parts("", source_parts=text if isinstance(text, list) else [])
         ]
+        if not parts:
+            return None
     elif event_type == "thought_signature":
         parts.append({"text": "", "thoughtSignature": str(text)})
     elif event_type == "body":
