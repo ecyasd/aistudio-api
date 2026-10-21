@@ -69,7 +69,18 @@ def to_gemini_parts(
     source_parts: list[ContentPart] | None = None,
 ) -> list[GeminiPartResponse]:
     if source_parts is not None:
-        return [_to_gemini_part(part) for part in source_parts]
+        # Native thought markers remain in internal history, but without any
+        # payload they must not start another public reasoning phase. An
+        # explicitly empty text or a signature still belongs to its own Part.
+        return [
+            _to_gemini_part(part)
+            for part in source_parts
+            if part.text is not None
+            or part.image is not None
+            or part.function_call is not None
+            or part.function_response is not None
+            or part.thought_signature
+        ]
     parts: list[GeminiPartResponse] = []
     if thinking:
         parts.append(GeminiPartResponse(text=thinking, thought=True))

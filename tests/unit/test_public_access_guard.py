@@ -112,6 +112,26 @@ class PublicGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.request("/v1beta/models", headers=[(b"x-goog-api-key", b"fresh-key"), (b"x-api-key", b"wrong")]))[0], 204)
         self.assertEqual((await self.request("/v1beta/models", headers=[(b"x-api-key", b"fresh-key")]))[0], 204)
 
+    async def test_alias_model_paths_keep_api_authentication(self):
+        # ASGI exposes the decoded path, including the selector's extra slash.
+        # The public guard must authenticate aliases exactly like base models.
+        selectors = ("gemini-offline", "抗截断/gemini-offline")
+        suffixes = ("", ":generateContent", ":streamGenerateContent")
+        for selector in selectors:
+            for suffix in suffixes:
+                path = f"/v1beta/models/{selector}{suffix}"
+                method = "POST" if suffix else "GET"
+                with self.subTest(path=path):
+                    self.assertEqual((await self.request(path, method=method))[0], 401)
+                    self.assertEqual((await self.request(
+                        path, method=method, token="configured-api",
+                    ))[0], 204)
+                    self.assertEqual((await self.request(
+                        path, method=method, token=self.settings.web_password,
+                        client="203.0.113.3",
+                    ))[0], 401)
+        self.assertEqual(self.received, 0)
+
     async def test_empty_or_failed_api_configuration_fails_closed(self):
         self.configured_keys.clear()
         for token in (None, "runtime-api", self.settings.web_password):
