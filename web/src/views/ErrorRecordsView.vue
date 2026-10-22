@@ -5,12 +5,12 @@ import { ChevronLeft, ChevronRight, FileWarning, RefreshCw, Search } from 'lucid
 import { useErrorsStore } from '@/stores/errors.ts'
 import { usePolling } from '@/composables/usePolling.ts'
 import { formatDate } from '@/utils/format.ts'
-import type { ErrorRecord } from '@/types/errors.ts'
+import type { ErrorRecord, ResponseDiagnostic } from '@/types/errors.ts'
 import Button from '@/components/ui/Button.vue'
 import Modal from '@/components/ui/Modal.vue'
 
 const errorsStore = useErrorsStore()
-const { result, items, statusFilter, categoryFilter, loading, error, lastUpdated, page, matchesFilters } = storeToRefs(errorsStore)
+const { result, items, diagnosticItems, statusFilter, categoryFilter, loading, error, lastUpdated, page, matchesFilters } = storeToRefs(errorsStore)
 const selected = ref<ErrorRecord | null>(null)
 const detailsOpen = computed({
   get: () => selected.value !== null,
@@ -36,6 +36,49 @@ const outcomeLabels: Record<ErrorRecord['outcome'], string> = {
   recovered: '重试后成功',
   cancelled: '已取消',
   warning: '警告',
+}
+const diagnosticOutcomeLabels: Record<ResponseDiagnostic['outcome'], string> = {
+  success: '成功',
+  recovered: '重试后成功',
+  failed: '失败',
+  cancelled: '已取消',
+}
+const phaseLabels: Record<ResponseDiagnostic['phase_sequence'][number], string> = {
+  body: '正文',
+  thought: '思考',
+  empty_thought: '空思考 / 签名',
+  finish: '结束',
+}
+const finishReasonLabels: Record<number, string> = {
+  0: '未指定 (0)',
+  1: '正常结束 (STOP)',
+  2: '达到输出上限 (MAX_TOKENS)',
+  3: '安全限制 (SAFETY)',
+  4: '引用限制 (RECITATION)',
+  5: '语言限制 (LANGUAGE)',
+  6: '其他原因 (OTHER)',
+}
+
+function diagnosticOutcomeClass(outcome: ResponseDiagnostic['outcome']) {
+  return outcomeClass(outcome === 'success' ? 'recovered' : outcome)
+}
+
+function diagnosticSequence(record: ResponseDiagnostic) {
+  return record.phase_sequence.map(phase => phaseLabels[phase]).join(' → ') || '未收到内容片段'
+}
+
+function diagnosticFinish(record: ResponseDiagnostic) {
+  return record.finish_reasons.map(reason => finishReasonLabels[reason] ?? `代码 ${reason}`).join(' → ') || '未收到结束原因'
+}
+
+function diagnosticSignals(record: ResponseDiagnostic) {
+  const signals: string[] = []
+  if (record.thought_after_body) signals.push(`正文后思考片段 ${record.thought_after_body} 个`)
+  if (record.marker_count) signals.push(`正文含 [:数字] 标记 ${record.marker_count} 处`)
+  if (record.empty_thought_parts) signals.push(`空思考 / 签名片段 ${record.empty_thought_parts} 个`)
+  if (record.flags.includes('content_after_finish')) signals.push('结束信号后仍有内容')
+  if (record.flags.includes('sequence_limited')) signals.push('顺序记录已达上限')
+  return signals
 }
 
 function categoryLabel(category: string) {
@@ -91,6 +134,131 @@ onUnmounted(errorsStore.cancel)
       不包含请求正文、模型回复或凭据。
       <span>重试成功的记录会标为“重试后成功”；流式请求即使 HTTP 返回 200，也可能有后续失败记录。</span>
     </div>
+
+    <section
+      aria-labelledby="response-diagnostics-title"
+      class="bg-white border border-gray-200 rounded-2xl overflow-hidden"
+    >
+      <div class="px-4 sm:px-5 py-4 border-b border-gray-100">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <h3
+            id="response-diagnostics-title"
+            class="text-sm font-semibold text-gray-900"
+          >
+            响应探测
+          </h3>
+          <span class="text-xs text-gray-500">最近 {{ diagnosticItems.length }} 次请求 · 与错误筛选、页码无关</span>
+        </div>
+        <p class="mt-2 text-xs text-gray-500 leading-relaxed">
+          成功与失败请求均记录，只保留顺序和计数，不含思考、正文或签名原文。
+          最近 {{ result?.diagnostics?.retention.minutes ?? 10 }} 分钟，最多 {{ result?.diagnostics?.retention.max_records ?? 100 }} 条，过期或服务重启后清空。
+          本页显示最新 25 条。
+          上游次数按开始重放的尝试计数。
+          观察信号用于定位响应过程，不直接判定为故障。
+        </p>
+        <p
+          v-if="error && diagnosticItems.length"
+          class="mt-2 text-xs text-amber-800"
+        >
+          显示上次读取且未过期的响应探测，最新状态尚未确认。
+        </p>
+      </div>
+      <div
+        v-if="!result"
+        class="px-5 py-8 text-center text-sm text-gray-500"
+      >
+        {{ error ? '响应探测读取未成功，请重试。' : '正在读取最近响应…' }}
+      </div>
+      <div
+        v-else-if="!diagnosticItems.length"
+        class="px-5 py-8 text-center text-sm text-gray-500"
+      >
+        {{ error ? '没有尚未过期的响应探测缓存，请重试读取。' : '暂无响应探测记录，下一次生成结束后会自动显示。' }}
+      </div>
+      <div
+        v-else
+        class="divide-y divide-gray-100"
+      >
+        <details
+          v-for="record in diagnosticItems"
+          :key="record.request_id"
+          class="group px-4 sm:px-5 py-3 open:bg-gray-50/50"
+        >
+          <summary class="cursor-pointer list-none rounded-lg focus-visible:outline-2 focus-visible:outline-brand-500">
+            <div class="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs">
+              <span class="text-gray-500">{{ formatDate(record.time, { withSeconds: true }) }}</span>
+              <span
+                :class="diagnosticOutcomeClass(record.outcome)"
+                class="rounded-lg border px-2 py-0.5 font-medium"
+              >{{ diagnosticOutcomeLabels[record.outcome] }}</span>
+              <span class="rounded-md bg-gray-100 px-2 py-0.5 text-gray-600">{{ record.auto_continue ? '抗截断' : '普通模式' }}</span>
+              <span class="text-gray-500">{{ record.stream ? '流式' : '非流式' }}</span>
+              <span class="text-gray-700 break-all">{{ record.model || '未记录模型' }}</span>
+              <span class="ml-auto text-gray-500">上游 {{ record.upstream_calls }} 次 · 重试 {{ record.retries }} 次</span>
+              <ChevronRight class="w-3.5 h-3.5 text-gray-400 transition-transform group-open:rotate-90" />
+            </div>
+            <p class="mt-2 text-xs text-gray-700 break-words leading-relaxed">
+              顺序：{{ diagnosticSequence(record) }}
+            </p>
+            <div
+              v-if="diagnosticSignals(record).length"
+              class="mt-2 flex flex-wrap gap-1.5"
+            >
+              <span
+                v-for="signal in diagnosticSignals(record)"
+                :key="signal"
+                class="rounded-md border border-amber-100 bg-amber-50 px-2 py-0.5 text-[11px] text-amber-800"
+              >{{ signal }}</span>
+            </div>
+            <p class="mt-2 text-xs text-gray-500 break-words">
+              结束：{{ diagnosticFinish(record) }}
+            </p>
+          </summary>
+          <dl class="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-x-5 gap-y-3 border-t border-gray-100 pt-3 text-xs">
+            <div class="sm:col-span-2">
+              <dt class="text-gray-400">
+                关联请求 ID
+              </dt>
+              <dd class="mt-1 font-mono text-gray-700 break-all select-all">
+                {{ record.request_id }}
+              </dd>
+            </div>
+            <div>
+              <dt class="text-gray-400">
+                内容计数
+              </dt>
+              <dd class="mt-1 text-gray-700">
+                正文 {{ record.body_chars }} 字符 · 思考 {{ record.thought_chars }} 字符
+              </dd>
+            </div>
+            <div>
+              <dt class="text-gray-400">
+                耗时 / HTTP 传输状态
+              </dt>
+              <dd class="mt-1 text-gray-700">
+                {{ (record.duration_ms / 1000).toFixed(1) }} 秒 · {{ record.transport_status == null ? '未发送响应' : `HTTP ${record.transport_status}` }}
+              </dd>
+            </div>
+            <div>
+              <dt class="text-gray-400">
+                顺序观察计数
+              </dt>
+              <dd class="mt-1 text-gray-700">
+                正文后思考片段 {{ record.thought_after_body }} 个 · 空思考 / 签名 {{ record.empty_thought_parts }} · 标记 {{ record.marker_count }}
+              </dd>
+            </div>
+            <div>
+              <dt class="text-gray-400">
+                错误分类
+              </dt>
+              <dd class="mt-1 text-gray-700 break-all">
+                {{ record.error_kind ? categoryLabel(record.error_kind) : '无' }}
+              </dd>
+            </div>
+          </dl>
+        </details>
+      </div>
+    </section>
 
     <div class="bg-white border border-gray-200 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-end gap-3">
       <label class="flex-1 text-xs font-medium text-gray-600">
