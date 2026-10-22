@@ -23,6 +23,11 @@ export const useErrorsStore = defineStore('errors', () => {
     const cutoff = observedAt.value - (result.value?.retention.minutes ?? 10) * 60_000
     return result.value?.items.filter(record => Date.parse(record.time) >= cutoff) ?? []
   })
+  const diagnosticItems = computed(() => {
+    const diagnostics = result.value?.diagnostics
+    const cutoff = observedAt.value - (diagnostics?.retention.minutes ?? 10) * 60_000
+    return diagnostics?.items.filter(record => Date.parse(record.time) >= cutoff) ?? []
+  })
   const page = computed(() => previousCursors.value.length + 1)
   const matchesFilters = computed(() => displayedStatus.value === statusFilter.value
     && displayedCategory.value === categoryFilter.value)
@@ -42,6 +47,7 @@ export const useErrorsStore = defineStore('errors', () => {
         status: status ? Number(status) : undefined,
         category: category || undefined,
         cursor,
+        include_diagnostics: true,
       }, controller.signal)
       if (requestSequence !== sequence) return false
       result.value = response
@@ -97,7 +103,7 @@ export const useErrorsStore = defineStore('errors', () => {
   }
 
   return {
-    result, items, statusFilter, categoryFilter, loading, error, lastUpdated,
+    result, items, diagnosticItems, statusFilter, categoryFilter, loading, error, lastUpdated,
     page, matchesFilters, refresh, reload, nextPage, previousPage, cancel,
   }
 })

@@ -60,6 +60,10 @@ from aistudio_api.infrastructure.utils.error_records import (
     record_failure,
 )
 from aistudio_api.infrastructure.utils.logger import get_logger
+from aistudio_api.infrastructure.utils.response_diagnostics import (
+    configure_generation,
+    note_attempt,
+)
 
 logger = get_logger("api.gemini")
 SSE_HEARTBEAT_INTERVAL_SECONDS = 15.0
@@ -480,6 +484,7 @@ async def handle_gemini_generate_content(
         # Choosing the variant is itself the opt-in, including clients that send
         # an explicit default false. Never mutate the caller's request object.
         req = req.model_copy(update={"autoContinue": True})
+    configure_generation(model=model_path, auto_continue=req.autoContinue)
     if stream:
         normalized = _preflight_gemini_stream(req, model_path)
         return _build_gemini_streaming_response(
@@ -496,6 +501,7 @@ async def _generate_non_streaming(
 
     last_error: Exception | None = None
     for attempt in range(MAX_RETRIES):
+        note_attempt(attempt)
         normalized = None
         account_id: str | None = None
         request_context_id: int | None = None
@@ -848,6 +854,7 @@ def _build_gemini_streaming_response(
             final_finish_reason: str = "FINISH_REASON_UNSPECIFIED"
             latest_response_id: str | None = None
             for stream_attempt in range(MAX_RETRIES):
+                note_attempt(stream_attempt)
                 has_yielded_data = False
                 account_id = None
                 request_context_id = None

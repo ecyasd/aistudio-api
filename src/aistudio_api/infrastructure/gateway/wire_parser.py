@@ -17,6 +17,7 @@ from aistudio_api.domain.models import (
     ModelOutput,
 )
 from aistudio_api.infrastructure.utils.common import decode_base64_images
+from aistudio_api.infrastructure.utils.response_diagnostics import observe_candidate
 
 # ==============================================================================
 # Google Protobuf-over-JSON Wire Array Specifications (docs/WIRE_SPECIFICATION.md)
@@ -651,6 +652,7 @@ def parse_response_chunk(chunk: list[object]) -> Candidate:
         else None
     )
     candidate.safety_ratings = raw_ratings if isinstance(raw_ratings, list) else []
+    observe_candidate(candidate)
     return candidate
 
 

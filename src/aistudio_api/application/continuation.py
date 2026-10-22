@@ -22,6 +22,7 @@ from aistudio_api.domain.models import Candidate, ContentPart, ModelOutput
 from aistudio_api.infrastructure.gateway.client import AIStudioClient
 from aistudio_api.infrastructure.gateway.model_defaults import resolve_model_defaults
 from aistudio_api.infrastructure.gateway.wire_types import AistudioContent, AistudioPart
+from aistudio_api.infrastructure.utils.response_diagnostics import note_continuation
 
 MAX_EXTRA_ROUNDS = 2
 MAX_CONTINUATION_BYTES = 512 * 1024
@@ -390,6 +391,7 @@ async def generate_content(
                 contents = history.next_contents(retained.parts)
                 if contents is None:
                     break
+                note_continuation()
                 current = await client.generate_content(
                     **_arguments(normalized, contents)
                 )
@@ -438,6 +440,8 @@ async def stream_generate_content(
             completed = False
             round_usage: dict[str, object] = {}
             retained = _RoundParts(history)
+            if round_index:
+                note_continuation()
             async with aclosing(
                 client.stream_generate_content(
                     **_arguments(normalized, contents),

@@ -75,6 +75,7 @@ class RequestErrorContext:
     warning: bool = False
     transport_status: int | None = None
     start_monotonic: float = field(default_factory=time.monotonic)
+    response_diagnostics: Any | None = field(default=None, repr=False)
 
 
 _REQUEST_CONTEXT: contextvars.ContextVar[RequestErrorContext | None] = (

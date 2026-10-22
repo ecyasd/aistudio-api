@@ -17,6 +17,10 @@ from aistudio_api.infrastructure.utils.error_records import (
     record_failure,
     reset_request_context,
 )
+from aistudio_api.infrastructure.utils.response_diagnostics import (
+    finish_response_diagnostics,
+    initialize_response_diagnostics,
+)
 
 
 def request_operation(scope: Scope) -> str | None:
@@ -77,6 +81,8 @@ class ErrorRecordsMiddleware:
         context = get_request_context()
         assert context is not None
         context.operation = operation
+        if operation in {"generate_content", "stream_generate_content"}:
+            initialize_response_diagnostics(stream=operation == "stream_generate_content")
         scope.setdefault("state", {})["error_record_context"] = context
         status = None
         completed = False
@@ -137,4 +143,11 @@ class ErrorRecordsMiddleware:
                 elif has_recorded_failure():
                     finish_request("warning" if getattr(context, "warning", False) else "recovered", transport_status=status)
             finally:
+                outcome = (
+                    "cancelled" if cancelled or (disconnected and not completed)
+                    else "failed" if raised or has_final_failure() or not completed
+                    or (status is not None and status >= 400)
+                    else "recovered" if has_recorded_failure() else "success"
+                )
+                finish_response_diagnostics(outcome, transport_status=status)
                 reset_request_context(token)

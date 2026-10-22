@@ -33,6 +33,7 @@ from aistudio_api.infrastructure.gateway.wire_parser import (
 )
 from aistudio_api.infrastructure.gateway.wire_types import AistudioContent
 from aistudio_api.infrastructure.utils.logger import get_logger
+from aistudio_api.infrastructure.utils.response_diagnostics import begin_upstream_call
 
 logger = get_logger("client")
 
@@ -203,6 +204,7 @@ class AIStudioClient:
             )
             if not captured:
                 raise RequestError(0, "无法拦截请求")
+            begin_upstream_call()
             async with aclosing(
                 self._streaming_gateway.stream_chat(captured=captured, model=model)
             ) as events:
@@ -250,6 +252,7 @@ class AIStudioClient:
 
             modified_body = captured.body
 
+            begin_upstream_call()
             status, raw = await self._replay_service.replay(
                 captured, body=modified_body
             )
