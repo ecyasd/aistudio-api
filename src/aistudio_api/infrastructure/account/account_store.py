@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shutil
 import stat
 import threading
@@ -13,7 +14,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from functools import wraps
-from os.path import abspath, basename, join
+from os.path import basename
 from pathlib import Path
 from typing import ClassVar, Concatenate, ParamSpec, TypeVar
 
@@ -96,14 +97,14 @@ def _safe_account_dir(accounts_dir: Path, account_id: str) -> Path:
     raw = str(account_id or "").strip()
     clean_id = "".join(c for c in raw if c.isalnum() or c in ("-", "_", ".", "@"))
     safe_name = basename(clean_id)
-    if not safe_name or safe_name != account_id or ".." in safe_name:
+    if not safe_name or safe_name == "." or safe_name != account_id or ".." in safe_name:
         raise ValueError(f"Invalid or unsafe account_id: {account_id!r}")
-    base_str = abspath(str(accounts_dir.resolve()))
-    target_str = abspath(join(base_str, safe_name))
-    prefix = base_str if base_str.endswith(os.sep) else base_str + os.sep
-    if not target_str.startswith(prefix) and target_str != base_str:
+    base = accounts_dir.resolve()
+    candidate = base / safe_name
+    target = candidate.resolve()
+    if target.parent != base or target != candidate or candidate.is_symlink():
         raise ValueError(f"Account path escapes base directory: {account_id!r}")
-    return Path(target_str)
+    return target
 
 
 def _resolve_accounts_dir() -> Path:
@@ -146,6 +147,7 @@ class AccountMeta:
     last_used: str | None = None
     auth_user: str = "0"
     cookie_id: str | None = None
+    auth_generation: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -159,6 +161,9 @@ class AccountMeta:
             created_at=str(data.get("created_at") or ""),
             last_used=str(data["last_used"])
             if data.get("last_used") is not None
+            else None,
+            auth_generation=str(data["auth_generation"])
+            if data.get("auth_generation") is not None
             else None,
             auth_user=str(data.get("auth_user") or "0"),
             cookie_id=str(data["cookie_id"])
@@ -362,6 +367,7 @@ class AccountStore:
             last_used=now,
             auth_user=auth_user,
             cookie_id=cookie_id,
+            auth_generation=secrets.token_hex(16),
         )
         account_dir = _safe_account_dir(self._accounts_dir, account_id)
         account_dir.mkdir(parents=True, exist_ok=True)

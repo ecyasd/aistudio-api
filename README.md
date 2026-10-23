@@ -8,6 +8,7 @@
 100 条，页面可见时每 5 秒刷新，重启后清空。Cookie 被 Google 撤销或登录过期时，
 仍需重新导入有效登录状态，现有调用密钥保持不变。公开 HTTPS 运行与自动发布说明见
 [deploy/README.md](deploy/README.md)。
+协议保真、账号隔离和失败处理的实现边界见 [反代契约](docs/PROXY_CONTRACT.md)。
 上游 Docker Hub 镜像不包含本分支修复；使用
 `docker build -t aistudio-api:local .` 从本仓库构建，才能使用对应的前后端。
 
@@ -204,22 +205,33 @@ uv run python3 main.py server --port 8080
 从本分支构建包含对应后端、前端与 CloakBrowser 的镜像：
 
 ```bash
+test -f .env || cp .env.example .env
+# Set AISTUDIO_WEB_PASSWORD in .env before starting management access.
 docker build -t aistudio-api:local .
 docker run -d \
   --name aistudio-api \
   --restart unless-stopped \
   -p 127.0.0.1:8080:8080 \
   -v aistudio-api-data:/app/data \
+  --mount type=bind,source="$(pwd)/.env",target=/app/.env,readonly \
   aistudio-api:local
 ```
 
 使用 Docker Compose 启动：
 
 ```bash
-test -f config.yaml || cp config.example.yaml config.yaml
+python3 scripts/prepare_compose_config.py
 test -f .env || cp .env.example .env
+# Set AISTUDIO_WEB_PASSWORD in .env before starting management access.
 docker compose up -d --build
 ```
+
+首次启动或从旧版 Compose 迁移时，上述工具将原 `config.yaml` 完整复制到
+`runtime-config/config.yaml`，保留原文件；没有旧配置时才使用示例。若两份配置已存在且
+内容不同，工具拒绝覆盖，需先明确保留哪一份。后续管理界面保存只更新
+`runtime-config/config.yaml`，常规重启直接运行 `docker compose up -d`。
+Compose 挂载配置父目录，允许原子保存调用密钥和模型设置；不要改回单文件挂载。
+`runtime-config/` 与账号数据一样必须保留在版本控制和构建上下文之外。
 
 启动后访问 **`http://localhost:8080`** 进入管理控制台。上游镜像不会自动包含本分支修改；
 服务器自动发布使用仓库 CI 生成的代码工件，详见[部署说明](deploy/README.md)。

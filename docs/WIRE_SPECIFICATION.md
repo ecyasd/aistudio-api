@@ -85,9 +85,11 @@ Google AI Studio 在 Web 端（`alkalimakersuite-pa.clients6.google.com`）与�
 | **工具调用 (FunctionCall)** | `[..., [name, args_struct, call_id]]` | 请求中位于下标 `10` (Field 11)；响应中主路径位于下标 `3` (Field 4)，变体回退兼容下标 `10` |
 | **工具结果 (FunctionResponse)** | `[..., [name, response_struct, call_id]]` | 请求中位于下标 `11` (Field 12)；响应中主路径位于下标 `4` (Field 5)，变体回退兼容下标 `11` |
 | **资源引用 (FileData)** | `[null, null, null, null, null, ["file_id"]]` | 下标 `5` (Field 6) 为 `[file_id]` |
-| **可执行代码 (ExecutableCode)** | `[..., "print('hello')", ...]` | 下标 `8` (Field 9) 为模型生成的待执行代码脚本源码 |
-| **代码执行结果 (CodeResult)** | `[..., "output: hello", ...]` | 下标 `9` (Field 10) 为代码执行沙箱返回的输出结果 |
+| **可执行代码 (ExecutableCode)** | `[..., [1, "print('hello')"], ...]` | 下标 `8` (Field 9) 为 `[language, code]`；语言枚举 `0` 为未指定、`1` 为 Python；兼容旧版源码字符串 |
+| **代码执行结果 (CodeResult)** | `[..., [1, "output: hello"], ...]` | 下标 `9` (Field 10) 为 `[outcome, output]`；结果枚举 `0/1/2/3` 分别为未指定、成功、失败、超时；兼容旧版输出字符串 |
 | **思维签名 (ThoughtSignature)** | 位于任意 Part 的下标 `14` (`part[14] = "signature"`) | Google 官方校验思维链真实性的签名字符串 |
+
+思考归属和签名独立于 Part 载荷类型。请求中的文本、图片、函数调用/结果、代码/执行结果均保留原有 `thought` 与 `thoughtSignature`；请求端思考标记使用下标 `12 = 1`。响应中的代码和执行结果以 `executableCode` / `codeExecutionResult` 完整 Part 返回，保留原顺序、思考归属与签名；旧版纯字符串缺少枚举时返回对应的未指定值，不推断执行成功。已知代码枚举转换为标准名称，未知数字保留数字并允许原值回放；请求中的未知符号名称明确拒绝，不映射为 Python 或执行成功。
 
 #### 参数与返回值的 Protobuf 结构体编码 (Struct & Value)
 在 `FunctionCall.args` 与 `FunctionResponse.response` 中，键值数据遵循 `google.protobuf.Struct` 紧凑数组格式：
@@ -262,6 +264,8 @@ Google AI Studio 响应为 Protobuf JSON 数组，每个流式分块或单次响
 - `candidate[3]`：FinishMessage 说明；
 - `candidate[4]`：安全评估结果数组（SafetyRatings）；
 - `chunk[7]`：响应唯一标识（Response ID）。
+
+不存在 content 的完成/阻止帧，以及空的 protobuf 消息/重复字段仍可作为元数据。非空 content 与 parts 必须保持数组结构，Part 必须为数组，存在的文本字段必须为字符串；代码和执行结果只接受旧版字符串或枚举/文本数组，其他已存在的载荷类型返回协议错误。畸形内容即使附有 STOP 或出现于合法完成标记后，也不能丢弃载荷并宣告正常结束。此处校验支持的结构边界，不宣称识别所有未知 wire 字段。
 
 ### 7.2.1 函数调用参数 JSPB 映射规范
 

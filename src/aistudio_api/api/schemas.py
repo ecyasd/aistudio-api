@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from pydantic import AliasChoices, BaseModel, Field, StrictBool, field_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    Field,
+    StrictBool,
+    StrictInt,
+    field_validator,
+)
 
 
 class GeminiInlineData(BaseModel):
@@ -37,14 +44,30 @@ class GeminiFunctionResponse(BaseModel):
 
 class GeminiExecutableCode(BaseModel):
     code: str
-    language: str = Field(default="PYTHON")
+    language: str | StrictInt = Field(default="PYTHON")
     id: str | None = None
+
+    @field_validator("language")
+    @classmethod
+    def valid_language(cls, value: str | int) -> str | int:
+        if isinstance(value, str) and value.upper() not in {"LANGUAGE_UNSPECIFIED", "PYTHON"}:
+            raise ValueError("Unsupported executableCode language")
+        return value
 
 
 class GeminiCodeExecutionResult(BaseModel):
-    outcome: str
+    outcome: str | StrictInt
     output: str
     id: str | None = None
+
+    @field_validator("outcome")
+    @classmethod
+    def valid_outcome(cls, value: str | int) -> str | int:
+        if isinstance(value, str) and value.upper() not in {
+            "OUTCOME_UNSPECIFIED", "OUTCOME_OK", "OUTCOME_FAILED", "OUTCOME_DEADLINE_EXCEEDED",
+        }:
+            raise ValueError("Unsupported codeExecutionResult outcome")
+        return value
 
 
 class GeminiPart(BaseModel):

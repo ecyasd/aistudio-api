@@ -8,7 +8,7 @@ import re
 import traceback
 from collections.abc import AsyncGenerator
 from contextlib import aclosing, suppress
-from typing import cast
+from typing import TypedDict, cast
 
 from anyio import CancelScope
 from fastapi import HTTPException
@@ -26,8 +26,10 @@ from aistudio_api.api.schemas import GeminiGenerateContentRequest
 from aistudio_api.api.state import runtime_state
 from aistudio_api.application import continuation
 from aistudio_api.application.account_orchestrator import (
+    AUTH_GENERATION_UNTRACKED,
     MAX_RETRIES,
     AccountPreparationError,
+    account_generation_is_current,
     account_id_for_auth_file,
     ensure_active_account,
     record_rotator_event,
@@ -78,6 +80,10 @@ ACCOUNT_IDENTITY_MESSAGES = {
         "Retry later or check the account on the management page; keep your API key."
     ),
 }
+
+
+class _GenerationSwitchKwargs(TypedDict, total=False):
+    failed_auth_generation: object
 
 
 WIRE_TO_GEMINI_FINISH_REASON: dict[int, str] = {
@@ -199,13 +205,29 @@ async def handle_attempt_exception(
     has_yielded_data: bool = False,
     account_id: str | None = None,
     request_context_id: int | None = None,
+    request_auth_generation: object = AUTH_GENERATION_UNTRACKED,
 ) -> bool:
     """Preserve the account and error type when browser preparation fails."""
     operation = "account_prepare" if isinstance(exc, AccountPreparationError) else "generate_attempt"
     if isinstance(exc, AccountPreparationError):
         account_id = exc.account_id
         request_context_id = None
+        request_auth_generation = exc.auth_generation
         exc = exc.original_error
+    if (
+        account_id is not None
+        and request_auth_generation is not AUTH_GENERATION_UNTRACKED
+        and not account_generation_is_current(account_id, request_auth_generation)
+    ):
+        # The owner replaced these credentials while this request held its old
+        # lease. Retrying before output may use the new generation; failures
+        # after output still terminate, without quarantining the replacement.
+        if not has_yielded_data and attempt < MAX_RETRIES - 1:
+            record_failure(exc, source="gemini", operation=operation,
+                           model=normalized_model or model_path, account_id=account_id,
+                           attempt=attempt + 1, retrying=True)
+            return True
+        account_id = None
     try:
         retry = await _handle_attempt_exception(
             exc,
@@ -216,11 +238,23 @@ async def handle_attempt_exception(
             has_yielded_data=has_yielded_data,
             account_id=account_id,
             request_context_id=request_context_id,
+            request_auth_generation=request_auth_generation,
         )
     except AccountPreparationError as preparation_error:
         record_failure(exc, source="gemini", operation=operation,
                        model=normalized_model or model_path, account_id=account_id,
                        attempt=attempt + 1, retrying=True)
+        if (
+            preparation_error.auth_generation is not AUTH_GENERATION_UNTRACKED
+            and not account_generation_is_current(
+                preparation_error.account_id, preparation_error.auth_generation,
+            )
+        ):
+            record_failure(preparation_error.original_error, source="gemini",
+                           operation="account_prepare", model=normalized_model or model_path,
+                           account_id=preparation_error.account_id, attempt=attempt + 1,
+                           retrying=True)
+            return True
         # Switching itself can fail while preparing a different account. Mark
         # that actual target once and finish; do not recursively rotate forever.
         try:
@@ -268,6 +302,7 @@ async def _handle_attempt_exception(
     account_id: str | None = None,
     request_context_id: int | None = None,
     allow_retry: bool = True,
+    request_auth_generation: object = AUTH_GENERATION_UNTRACKED,
 ) -> bool:
     """Handle per-attempt error classification and account switching.
 
@@ -275,6 +310,10 @@ async def _handle_attempt_exception(
     """
     target_model = normalized_model or model_path
     can_retry = allow_retry and not has_yielded_data and attempt < MAX_RETRIES - 1
+    generation_kwargs: _GenerationSwitchKwargs = (
+        {} if request_auth_generation is AUTH_GENERATION_UNTRACKED
+        else {"failed_auth_generation": request_auth_generation}
+    )
 
     if isinstance(exc, HTTPException):
         raise exc
@@ -311,6 +350,7 @@ async def _handle_attempt_exception(
                 failed_account_id=account_id,
                 failed_context_id=request_context_id,
                 is_auth_error=True,
+                **generation_kwargs,
             ):
                 logger.info("账号身份验证失败后切换至可用账号重试 (%d/%d)", attempt + 1, MAX_RETRIES)
                 return True
@@ -331,6 +371,7 @@ async def _handle_attempt_exception(
             is_auth_error=True,
             is_session_expired=True,
             failure_recorded=True,
+            **generation_kwargs,
         ):
             logger.info(
                 "已切换至其他可用健康账号重试 (%d/%d)", attempt + 1, MAX_RETRIES
@@ -355,6 +396,7 @@ async def _handle_attempt_exception(
                 failed_account_id=account_id,
                 failed_context_id=request_context_id,
                 is_auth_error=True,
+                **generation_kwargs,
             ):
                 logger.info("切换至可用账号重试 (%d/%d)", attempt + 1, MAX_RETRIES)
                 return True
@@ -368,7 +410,7 @@ async def _handle_attempt_exception(
         runtime_state.record(target_model, "rate_limited")
         record_rotator_event("rate_limited", model=target_model, account_id=account_id)
         if can_retry and await try_switch_account(
-            model=target_model, failed_account_id=account_id
+            model=target_model, failed_account_id=account_id, **generation_kwargs,
         ):
             logger.info(
                 "429 触发限额，切换账号 (%d/%d): model=%s",
@@ -417,7 +459,8 @@ async def _handle_attempt_exception(
         )
         client.clear_templates()
         if can_retry and await try_switch_account(
-            model=target_model, failed_account_id=account_id, is_auth_error=False
+            model=target_model, failed_account_id=account_id, is_auth_error=False,
+            **generation_kwargs,
         ):
             logger.info("已切换账号重试 (%d/%d)", attempt + 1, MAX_RETRIES)
             return True
@@ -505,6 +548,7 @@ async def _generate_non_streaming(
         normalized = None
         account_id: str | None = None
         request_context_id: int | None = None
+        request_auth_generation: object = AUTH_GENERATION_UNTRACKED
         try:
             normalized = normalize_gemini_request(req, model_path)
             await ensure_active_account(attempt, model=model_path)
@@ -519,13 +563,18 @@ async def _generate_non_streaming(
             async with client.session.request_scope() as ctx:
                 account_id = account_id_for_auth_file(ctx.auth_file)
                 request_context_id = ctx.context_id
+                request_auth_generation = getattr(ctx, "auth_generation", AUTH_GENERATION_UNTRACKED)
                 output = await continuation.generate_content(
                     client, normalized, auto_continue=req.autoContinue,
                 )
 
                 await _persist_successful_cookies(client, ctx)
 
-            record_rotator_event("success", model=normalized.model, account_id=account_id)
+            if request_auth_generation is AUTH_GENERATION_UNTRACKED:
+                record_rotator_event("success", model=normalized.model, account_id=account_id)
+            else:
+                record_rotator_event("success", model=normalized.model, account_id=account_id,
+                                     auth_generation=request_auth_generation)
             runtime_state.record(normalized.model, "success", output.usage)
             logger.info(
                 "Gemini 生成完成: model=%s, 输入Tokens=%s, 输出Tokens=%s",
@@ -574,6 +623,7 @@ async def _generate_non_streaming(
                 has_yielded_data=generated_before_failure,
                 account_id=account_id,
                 request_context_id=request_context_id,
+                request_auth_generation=request_auth_generation,
             ):
                 continue
             raise
@@ -844,6 +894,7 @@ def _build_gemini_streaming_response(
     async def stream_response():
         normalized = None
         account_id: str | None = None
+        request_auth_generation: object = AUTH_GENERATION_UNTRACKED
         try:
             logger.info(
                 "Gemini 流式请求: model=%s, 对话轮数=%s",
@@ -858,6 +909,7 @@ def _build_gemini_streaming_response(
                 has_yielded_data = False
                 account_id = None
                 request_context_id = None
+                request_auth_generation = AUTH_GENERATION_UNTRACKED
                 # Metadata from an attempt that emitted no body belongs to that
                 # attempt only, including signatures and any partial usage.
                 final_usage = None
@@ -869,6 +921,7 @@ def _build_gemini_streaming_response(
                     async with client.session.request_scope() as ctx:
                         account_id = account_id_for_auth_file(ctx.auth_file)
                         request_context_id = ctx.context_id
+                        request_auth_generation = getattr(ctx, "auth_generation", AUTH_GENERATION_UNTRACKED)
                         async with aclosing(continuation.stream_generate_content(
                             client, normalized, auto_continue=req.autoContinue,
                             force_refresh_capture=stream_attempt > 0,
@@ -919,12 +972,17 @@ def _build_gemini_streaming_response(
                         has_yielded_data=has_yielded_data,
                         account_id=account_id,
                         request_context_id=request_context_id,
+                        request_auth_generation=request_auth_generation,
                     ):
                         continue
                     raise
 
             target_model = normalized.model if normalized else model_path
-            record_rotator_event("success", model=target_model, account_id=account_id)
+            if request_auth_generation is AUTH_GENERATION_UNTRACKED:
+                record_rotator_event("success", model=target_model, account_id=account_id)
+            else:
+                record_rotator_event("success", model=target_model, account_id=account_id,
+                                     auth_generation=request_auth_generation)
             if normalized is not None:
                 runtime_state.record(normalized.model, "success", final_usage)
             logger.info(

@@ -334,6 +334,7 @@ class CDPPage:
         self._cached_cookies: dict[str, str] | None = None
         self._auth_file_path: str | None = None
         self._auth_file_version: str | None = None
+        self._auth_generation: str | None = None
 
     def _track_listener(self, unsub: Callable[[], None]) -> Callable[[], None]:
         self._unsubscribers.append(unsub)

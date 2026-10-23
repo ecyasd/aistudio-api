@@ -306,61 +306,16 @@ def test_decode_wire_list_empty_list_returns_list_not_dict():
 
 
 def test_parse_response_chunk_with_ask_tool_payload():
-    # Full chunk containing ask tool call with single question dict
-    chunk: list[object] = [
-        [
-            [
-                [
-                    [
-                        [
-                            None,
-                            None,
-                            None,
-                            [
-                                "ask",
-                                [
-                                    [
-                                        "questions",
-                                        [
-                                            None,
-                                            None,
-                                            None,
-                                            None,
-                                            None,
-                                            [
-                                                [
-                                                    [
-                                                        None,
-                                                        None,
-                                                        None,
-                                                        None,
-                                                        [
-                                                            [
-                                                                "id",
-                                                                [None, None, "storage"],
-                                                            ],
-                                                            [
-                                                                "multi",
-                                                                [None, None, None, 0],
-                                                            ],
-                                                            ["recommended", [None, 0]],
-                                                        ],
-                                                    ]
-                                                ]
-                                            ],
-                                        ],
-                                    ]
-                                ],
-                                "call_ask_123",
-                            ],
-                        ]
-                    ]
-                ],
-                "model",
-            ],
-            1,
-        ]
-    ]
+    # Use the real [candidates, metadata, usage] wrapper. The old fixture
+    # accidentally treated content and a finish enum as two candidates.
+    question = [None, None, None, None, [
+        ["id", [None, None, "storage"]],
+        ["multi", [None, None, None, 0]],
+        ["recommended", [None, 0]],
+    ]]
+    arguments = [["questions", [None, None, None, None, None, [[question]]]]]
+    part = [None, None, None, ["ask", arguments, "call_ask_123"]]
+    chunk: list[object] = [[[[[part], "model"], 1]], None, None]
     candidate = parse_response_chunk(chunk)
     assert len(candidate.function_calls) == 1
     fc = candidate.function_calls[0]

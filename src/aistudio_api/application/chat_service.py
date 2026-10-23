@@ -612,6 +612,7 @@ def normalize_gemini_request(
                 parts.append(
                     AistudioPart(
                         inline_data=img_data,
+                        thought=bool(part.thought),
                         thought_signature=part.thoughtSignature,
                     )
                 )
@@ -625,6 +626,7 @@ def normalize_gemini_request(
                         function_call=(fc.name, args_payload, fc.id)
                         if fc.id
                         else (fc.name, args_payload),
+                        thought=bool(part.thought),
                         thought_signature=part.thoughtSignature,
                     )
                 )
@@ -637,6 +639,8 @@ def normalize_gemini_request(
                         function_response=(fr.name, resp_payload, fr.id)
                         if fr.id
                         else (fr.name, resp_payload),
+                        thought=bool(part.thought),
+                        thought_signature=part.thoughtSignature,
                     )
                 )
                 if fr.parts:
@@ -649,12 +653,19 @@ def normalize_gemini_request(
                             parts.append(
                                 AistudioPart(
                                     inline_data=img_data,
+                                    thought=bool(subpart.thought),
                                     thought_signature=subpart.thoughtSignature,
                                 )
                             )
                             content_images.append(img_data)
                         elif subpart.text is not None:
-                            parts.append(AistudioPart(text=subpart.text))
+                            parts.append(
+                                AistudioPart(
+                                    text=subpart.text,
+                                    thought=bool(subpart.thought),
+                                    thought_signature=subpart.thoughtSignature,
+                                )
+                            )
                             text_parts.append(subpart.text)
                 continue
             if part.executableCode is not None:
@@ -662,6 +673,7 @@ def normalize_gemini_request(
                 parts.append(
                     AistudioPart(
                         executable_code=(ec.language, ec.code),
+                        thought=bool(part.thought),
                         thought_signature=part.thoughtSignature,
                     )
                 )
@@ -671,6 +683,7 @@ def normalize_gemini_request(
                 parts.append(
                     AistudioPart(
                         code_execution_result=(cer.outcome, cer.output),
+                        thought=bool(part.thought),
                         thought_signature=part.thoughtSignature,
                     )
                 )
@@ -702,11 +715,13 @@ def normalize_gemini_request(
             parts=[
                 AistudioPart(
                     text=part.text,
+                    thought=bool(part.thought),
                     thought_signature=part.thoughtSignature,
                 )
                 if part.text is not None
                 else AistudioPart(
                     inline_data=(part.inlineData.mimeType, part.inlineData.data),
+                    thought=bool(part.thought),
                     thought_signature=part.thoughtSignature,
                 )
                 if part.inlineData is not None

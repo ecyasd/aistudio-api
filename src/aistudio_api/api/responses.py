@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 
 from aistudio_api.api.response_models import (
+    GeminiCodeExecutionResultPayload,
+    GeminiExecutableCodePayload,
     GeminiFunctionCallPayload,
     GeminiFunctionResponsePayload,
     GeminiInlineDataResponse,
@@ -79,6 +81,8 @@ def to_gemini_parts(
             or part.image is not None
             or part.function_call is not None
             or part.function_response is not None
+            or part.executable_code is not None
+            or part.code_execution_result is not None
             or part.thought_signature
         ]
     parts: list[GeminiPartResponse] = []
@@ -165,4 +169,12 @@ def _to_gemini_part(part: ContentPart) -> GeminiPartResponse:
         result.functionResponse = to_gemini_parts(
             "", function_responses=[part.function_response]
         )[0].functionResponse
+    if part.executable_code is not None:
+        result.executableCode = GeminiExecutableCodePayload.model_validate(
+            part.executable_code
+        )
+    if part.code_execution_result is not None:
+        result.codeExecutionResult = GeminiCodeExecutionResultPayload.model_validate(
+            part.code_execution_result
+        )
     return result

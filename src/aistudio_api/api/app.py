@@ -82,21 +82,8 @@ async def lifespan(_app: FastAPI):
         len(account_store.list_accounts()),
     )
 
-    # 后台预热浏览器，避免首次请求延迟
-    warmup_task = None
-
-    async def _warmup():
-        for attempt in range(3):
-            try:
-                await client.warmup()
-                return
-            except Exception as e:
-                if attempt < 2:
-                    await asyncio.sleep(1.0)
-                    continue
-                logger.warning("浏览器预热失败: %s", e)
-
-    warmup_task = asyncio.create_task(_warmup())
+    # Browser/session bootstrap belongs to an actual inference request. Merely
+    # starting any supported launcher must not send Google probes or warmups.
 
     idle_task = None
     if settings.browser_idle_timeout > 0:
@@ -116,8 +103,6 @@ async def lifespan(_app: FastAPI):
 
     yield
     logger.info("服务正在关闭")
-    if warmup_task and not warmup_task.done():
-        warmup_task.cancel()
     if idle_task and not idle_task.done():
         idle_task.cancel()
     if client:
@@ -300,9 +285,9 @@ if static_dir.is_dir():
 @app.get("/auth/check")
 async def auth_check():
     """检查认证状态，用于前端判断是否需要登录。"""
-    from aistudio_api.config import settings
-
-    return {"auth_enabled": settings.auth_enabled}
+    # An absent management password locks management routes. It must never
+    # advertise anonymous access to the frontend or disable its login gate.
+    return {"auth_enabled": True}
 
 
 @app.middleware("http")

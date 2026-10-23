@@ -232,15 +232,18 @@ class XHRStreamTransport:
     ) -> tuple[int, bytes]:
         """Replay request via XHR inside the browser page context."""
         timeout_s = max(timeout_ms / 1000, 0.001)
-        clean_headers = await _ensure_authorization_header(
-            page, headers, auth_user=auth_user
-        )
+        deadline = asyncio.get_running_loop().time() + timeout_s
+        async with asyncio.timeout_at(deadline):
+            clean_headers = await _ensure_authorization_header(
+                page, headers, auth_user=auth_user
+            )
+        remaining = max(deadline - asyncio.get_running_loop().time(), 0.001)
         rid = uuid.uuid4().hex
         args = build_hooked_request_args(
             url=url,
             headers=clean_headers,
             body=body,
-            timeout_s=timeout_s,
+            timeout_s=remaining,
             rid=rid,
             max_response_bytes=MAX_RESPONSE_BYTES,
             max_read_bytes=MAX_READ_BYTES,
@@ -248,8 +251,8 @@ class XHRStreamTransport:
 
         try:
             result = await asyncio.wait_for(
-                page.evaluate(HOOKED_REQUEST_JS, args, timeout_s=timeout_s + 1.0),
-                timeout=timeout_s + 1.0,
+                page.evaluate(HOOKED_REQUEST_JS, args, timeout_s=remaining + 1.0),
+                timeout=remaining + 1.0,
             )
             res_dict: dict[str, object] = result if isinstance(result, dict) else {}
             status = int(str(res_dict.get("status") or 0))
@@ -289,21 +292,23 @@ class XHRStreamTransport:
         Guarantees V8 window cleanup on termination/timeout and prevents silent truncation.
         """
         timeout_s = max(timeout_ms / 1000, 0.001)
-        clean_headers = await _ensure_authorization_header(
-            page, headers, auth_user=auth_user
-        )
+        deadline = asyncio.get_running_loop().time() + timeout_s
+        # Cookie refresh, binding registration and request initialization share
+        # the first-response budget. A stalled CDP command must not bypass it.
+        async with asyncio.timeout_at(deadline):
+            clean_headers = await _ensure_authorization_header(
+                page, headers, auth_user=auth_user
+            )
+            self._ensure_page_binding(page)
+            if hasattr(page, "add_binding"):
+                with suppress(Exception):
+                    await page.add_binding("__aistudio_stream_push__")
+            elif hasattr(page, "cdp") and hasattr(page.cdp, "send"):
+                with suppress(Exception):
+                    await page.cdp.send(
+                        "Runtime.addBinding", {"name": "__aistudio_stream_push__"}
+                    )
         rid = uuid.uuid4().hex
-
-        # Ensure native binding on page and register local async queue
-        self._ensure_page_binding(page)
-        if hasattr(page, "add_binding"):
-            with suppress(Exception):
-                await page.add_binding("__aistudio_stream_push__")
-        elif hasattr(page, "cdp") and hasattr(page.cdp, "send"):
-            with suppress(Exception):
-                await page.cdp.send(
-                    "Runtime.addBinding", {"name": "__aistudio_stream_push__"}
-                )
 
         queue: asyncio.Queue[dict[str, object]] = asyncio.Queue(
             maxsize=MAX_STREAM_EVENTS
@@ -323,12 +328,16 @@ class XHRStreamTransport:
             max_read_bytes=MAX_READ_BYTES,
             consumer_timeout_s=min(timeout_s, CONSUMER_TIMEOUT_S),
         )
-        deadline = asyncio.get_running_loop().time() + timeout_s
         status_sent = False
         is_terminal = False
 
         try:
-            await page.evaluate(STREAMING_INIT_JS, init_args)
+            async with asyncio.timeout_at(deadline):
+                await page.evaluate(
+                    STREAMING_INIT_JS,
+                    init_args,
+                    timeout_s=max(deadline - asyncio.get_running_loop().time(), 0.001),
+                )
             while not is_terminal:
                 if page.is_closed() is True:
                     raise RuntimeError("Browser page closed during streaming")

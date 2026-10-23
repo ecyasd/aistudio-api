@@ -63,9 +63,6 @@ def _extract_request_token(request: Request) -> str | None:
 
 def require_web_auth(request: Request) -> None:
     """保护管理控制台路由 (通过环境变量 AISTUDIO_WEB_PASSWORD 配置密码)。"""
-    if not settings.auth_enabled:
-        return
-
     # Management credentials must never be accepted in URLs or API-key headers.
     authorization = (request.headers.get("authorization") or "").strip()
     scheme, _, bearer = authorization.partition(" ")

@@ -20,6 +20,7 @@ from aistudio_api.domain.errors import (
 from aistudio_api.infrastructure.account.storage_state import (
     atomic_write_json,
     auth_file_version,
+    locked_file,
 )
 from aistudio_api.infrastructure.browser.cdp_client import CDPPage
 from aistudio_api.infrastructure.browser.scripts import (
@@ -83,6 +84,18 @@ def get_auth_user_from_meta(auth_file: str | None) -> str:
     return "0"
 
 
+def get_auth_generation(auth_file: str | None) -> str | None:
+    """Read the owner's import generation, independent of Cookie checkpoints."""
+    if not auth_file:
+        return None
+    try:
+        meta = json.loads((Path(auth_file).parent / "meta.json").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    generation = meta.get("auth_generation") if isinstance(meta, dict) else None
+    return generation if isinstance(generation, str) else None
+
+
 def get_aistudio_urls(
     auth_user: str = "0", model: str = "gemini-3.7-flash"
 ) -> list[str]:
@@ -108,6 +121,7 @@ def bind_auth_file(
         return False
     page._auth_file_path = str(Path(auth_file).resolve())
     page._auth_file_version = version
+    page._auth_generation = get_auth_generation(auth_file)
     return True
 
 
@@ -125,6 +139,7 @@ async def load_cookies_to_page(page: CDPPage, auth_file: str | None) -> bool:
         # Record the exact bytes loaded, before yielding to a concurrent import.
         page._auth_file_path = str(Path(auth_file).resolve())
         page._auth_file_version = hashlib.sha256(raw_data).hexdigest()
+        page._auth_generation = get_auth_generation(auth_file)
 
         await page.clear_cookies()
 
@@ -268,9 +283,13 @@ async def save_browser_cookies(
             # family; do not resurrect it or block rotation of its replacement.
             return False
         data = {"cookies": current_cookies, "origins": existing.get("origins", [])}
-        if not atomic_write_json(auth_path, data, expected_version=version):
-            log.debug("Cookie checkpoint skipped after a newer credential import")
-            return False
+        with locked_file(auth_path):
+            if (
+                vars(page).get("_auth_generation") != get_auth_generation(auth_file)
+                or not atomic_write_json(auth_path, data, expected_version=version)
+            ):
+                log.debug("Cookie checkpoint skipped after a newer credential import")
+                return False
         page._auth_file_version = hashlib.sha256(
             json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         ).hexdigest()

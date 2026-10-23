@@ -40,12 +40,14 @@ class ProfileManager(
     fun addProfile(
         name: String,
         email: String? = null,
+        authUser: String = "0",
     ): ProfileItem {
         val profiles = getProfiles().toMutableList()
         val newProfile =
             ProfileItem(
                 name = name.trim().ifBlank { "资料 ${profiles.size + 1}" },
                 email = email?.trim()?.ifBlank { null },
+                authUser = authUser.trim().ifBlank { "0" },
             )
         profiles.add(newProfile)
         saveProfilesInternal(profiles)
@@ -166,6 +168,7 @@ class ProfileManager(
                     current[existingIdx].copy(
                         cookies = item.cookies,
                         email = item.email ?: current[existingIdx].email,
+                        authUser = item.authUser,
                         updatedAt = System.currentTimeMillis(),
                     )
             } else {

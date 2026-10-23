@@ -500,6 +500,61 @@ def _has_unreplayable_part(raw: object) -> bool:
     return False
 
 
+def _validate_content(raw_candidate: list[object]) -> None:
+    """Reject nonempty content that would otherwise disappear behind STOP.
+
+    Absent/empty protobuf messages and repeated fields are valid finish-only
+    metadata. A present content/Part container must retain its array shape, and
+    a present text field must be a string, even after an earlier finish marker.
+    """
+    content = raw_candidate[WIRE_CANDIDATE_CONTENT] if raw_candidate else None
+    if content is None:
+        return
+    if not isinstance(content, list):
+        raise RequestError(502, "Upstream response contains malformed content")
+    parts = content[0] if content else None
+    if parts is None:
+        return
+    if not isinstance(parts, list):
+        raise RequestError(502, "Upstream response contains malformed content")
+    for part in parts:
+        if (
+            not isinstance(part, list)
+            or (part and isinstance(part[WIRE_PART_THOUGHT_LEAD_INDEX], list))
+            or (
+                len(part) > WIRE_PART_TEXT_INDEX
+                and part[WIRE_PART_TEXT_INDEX] is not None
+                and not isinstance(part[WIRE_PART_TEXT_INDEX], str)
+            )
+        ):
+            raise RequestError(502, "Upstream response contains a malformed Part")
+
+
+def _code_payload(raw: object, *, result: bool = False) -> dict[str, object] | None:
+    """Retain native enum/text code messages and the older scalar variant."""
+    if result:
+        enum_key, text_key = "outcome", "output"
+        enums = {
+            0: "OUTCOME_UNSPECIFIED",
+            1: "OUTCOME_OK",
+            2: "OUTCOME_FAILED",
+            3: "OUTCOME_DEADLINE_EXCEEDED",
+        }
+    else:
+        enum_key, text_key = "language", "code"
+        enums = {0: "LANGUAGE_UNSPECIFIED", 1: "PYTHON"}
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return {enum_key: enums[0], text_key: raw}
+    if isinstance(raw, list):
+        enum = raw[0] if raw and raw[0] is not None else 0
+        text = raw[1] if len(raw) > 1 and raw[1] is not None else ""
+        if type(enum) in (int, str) and isinstance(text, str):
+            return {enum_key: enums.get(enum, enum), text_key: text}
+    raise RequestError(502, "Upstream response contains a malformed code Part")
+
+
 def parse_response_chunk(chunk: list[object]) -> Candidate:
     candidate = Candidate()
     if (
@@ -516,6 +571,10 @@ def parse_response_chunk(chunk: list[object]) -> Candidate:
     raw_candidate = candidates_container[0]
     if not isinstance(raw_candidate, list):
         return candidate
+    for sibling in candidates_container:
+        if not isinstance(sibling, list):
+            raise RequestError(502, "Upstream response contains a malformed candidate")
+        _validate_content(sibling)
 
     known_candidate_fields = {
         WIRE_CANDIDATE_CONTENT,
@@ -573,6 +632,8 @@ def parse_response_chunk(chunk: list[object]) -> Candidate:
             thought=part.thought,
             function_call=part.function_call,
             function_response=part.function_response,
+            executable_code=_code_payload(part.executable_code),
+            code_execution_result=_code_payload(part.code_execution_result, result=True),
             thought_signature=part.thought_signature,
         )
         if part.inline_data:
@@ -607,6 +668,8 @@ def parse_response_chunk(chunk: list[object]) -> Candidate:
             or content_part.image is not None
             or content_part.function_call is not None
             or content_part.function_response is not None
+            or content_part.executable_code is not None
+            or content_part.code_execution_result is not None
             or content_part.thought_signature
         ):
             candidate.parts.append(content_part)
