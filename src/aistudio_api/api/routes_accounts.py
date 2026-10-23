@@ -23,6 +23,7 @@ from aistudio_api.infrastructure.utils.logger import get_logger
 log = get_logger("accounts")
 
 router = APIRouter(prefix="/accounts")
+ACCOUNT_ID_PATTERN = r"^[a-zA-Z0-9_.@-]*[a-zA-Z0-9_@-][a-zA-Z0-9_.@-]*$"
 
 
 class AccountResponse(BaseModel):
@@ -60,7 +61,7 @@ class ImportCookiesRequest(BaseModel):
     cookies: str
     name: str | None = None
     email: str | None = None
-    account_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_\-\.@]+$")
+    account_id: str | None = Field(default=None, pattern=ACCOUNT_ID_PATTERN)
     auth_user: str = "0"
 
 
@@ -124,7 +125,7 @@ async def get_active_account(
 
 @router.post("/{account_id}/activate", response_model=AccountResponse)
 async def activate_account(
-    account_id: str = FastApiPath(..., pattern=r"^[a-zA-Z0-9_\-\.@]+$"),
+    account_id: str = FastApiPath(..., pattern=ACCOUNT_ID_PATTERN),
     account_service: AccountService = Depends(get_account_service),
     runtime_state: RuntimeState = Depends(get_runtime_state),
 ) -> AccountResponse:
@@ -145,7 +146,7 @@ async def activate_account(
 
 @router.post("/{account_id}/detect-email", response_model=AccountResponse)
 async def detect_account_email(
-    account_id: str = FastApiPath(..., pattern=r"^[a-zA-Z0-9_\-\.@]+$"),
+    account_id: str = FastApiPath(..., pattern=ACCOUNT_ID_PATTERN),
     account_service: AccountService = Depends(get_account_service),
     runtime_state: RuntimeState = Depends(get_runtime_state),
 ) -> AccountResponse:
@@ -173,7 +174,7 @@ async def detect_account_email(
 
 @router.delete("/{account_id}")
 async def delete_account(
-    account_id: str = FastApiPath(..., pattern=r"^[a-zA-Z0-9_\-\.@]+$"),
+    account_id: str = FastApiPath(..., pattern=ACCOUNT_ID_PATTERN),
     account_service: AccountService = Depends(get_account_service),
     runtime_state: RuntimeState = Depends(get_runtime_state),
 ) -> dict[str, bool]:
@@ -202,7 +203,7 @@ async def delete_account(
                 )
         else:
             if browser_session is not None:
-                await browser_session.switch_auth(None)
+                await browser_session.clear_account()
 
     log.info("已删除账号: %s", account_id)
     return {"ok": True}
@@ -248,14 +249,14 @@ async def delete_cookie_group(
                 )
         else:
             if browser_session is not None:
-                await browser_session.switch_auth(None)
+                await browser_session.clear_account()
 
     return {"deleted": deleted_count}
 
 
 @router.put("/{account_id}", response_model=AccountResponse)
 async def update_account(
-    account_id: str = FastApiPath(..., pattern=r"^[a-zA-Z0-9_\-\.@]+$"),
+    account_id: str = FastApiPath(..., pattern=ACCOUNT_ID_PATTERN),
     req: UpdateAccountRequest = Body(...),
     account_service: AccountService = Depends(get_account_service),
 ) -> AccountResponse:

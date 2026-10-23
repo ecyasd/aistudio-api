@@ -134,10 +134,12 @@ function applyPendingLoggingRefresh() {
         else delete updated.logging
         parsedConfig.value = updated
       }
+      if (refresh.present) baseline.logging = refresh.value
+      else delete baseline.logging
+      savedYaml.value = serializeConfig(baseline)
     }
-    if (refresh.present) baseline.logging = refresh.value
-    else delete baseline.logging
-    savedYaml.value = serializeConfig(baseline)
+    // Explicit logging edits keep their original baseline. Advancing it here
+    // would hide a same-field conflict with the separately saved logging card.
     pendingLoggingRefresh = undefined
   } catch {
     // Retain the refresh until the owner repairs the invalid YAML draft.
@@ -323,6 +325,7 @@ function handleResetDefaults() {
 }
 
 async function handleSave() {
+  if (saving.value) return
   applyPendingLoggingRefresh()
   saving.value = true
   let contentToSave: string
@@ -340,7 +343,7 @@ async function handleSave() {
   }
 
   try {
-    await systemApi.updateConfigYaml(contentToSave)
+    await systemApi.updateConfigYaml(contentToSave, savedYaml.value)
     savedYaml.value = serializeConfig(readEditorYaml(contentToSave).config)
     toast.success('模型规则配置已成功保存并完成热重载！')
     emit('saved')

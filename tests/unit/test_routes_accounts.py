@@ -13,11 +13,13 @@ import pytest
 from aistudio_api.api.app import app
 from aistudio_api.api.state import runtime_state
 from aistudio_api.application.account_service import AccountService
+from aistudio_api.config import settings
 from aistudio_api.infrastructure.account.account_store import AccountMeta
 
 
 @pytest.fixture(autouse=True)
-def setup_mock_account_service():
+def setup_mock_account_service(monkeypatch):
+    monkeypatch.setattr(settings, "web_password", "synthetic-management-only")
     mock_svc = MagicMock(spec=AccountService)
     sample_acc = AccountMeta(
         id="acc_1",
@@ -41,7 +43,8 @@ def setup_mock_account_service():
 
 def _client() -> httpx.AsyncClient:
     return httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+        headers={"Authorization": "Bearer synthetic-management-only"},
     )
 
 

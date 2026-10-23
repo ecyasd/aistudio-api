@@ -72,10 +72,39 @@ def mutate_config(
         return updated
 
 
-def save_model_config(path: Path, document: dict[str, object]) -> dict[str, object]:
-    """Model settings cannot add, delete, restore or rotate API calling keys."""
+class ConfigConflictError(ValueError):
+    """A field edited from an old snapshot has changed in the stored config."""
+
+
+def save_model_config(
+    path: Path,
+    document: dict[str, object],
+    *,
+    baseline: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Preserve keys and merge only fields changed from an editor's snapshot.
+
+    Legacy callers without a baseline explicitly replace the YAML document.
+    Baseline comparisons and publication share the same lock as key/log saves.
+    """
     def preserve_keys(current: dict[str, object]) -> dict[str, object]:
-        updated = dict(document)
+        if baseline is None:
+            updated = dict(document)
+        else:
+            missing = object()
+            updated = dict(current)
+            for key in (document.keys() | baseline.keys()) - {"api_keys"}:
+                previous = baseline.get(key, missing)
+                desired = document.get(key, missing)
+                if desired == previous:
+                    continue
+                stored = current.get(key, missing)
+                if stored != previous and stored != desired:
+                    raise ConfigConflictError("Configuration changed since it was loaded")
+                if desired is missing:
+                    updated.pop(key, None)
+                else:
+                    updated[key] = desired
         if "api_keys" in current:
             updated["api_keys"] = current["api_keys"]
         else:

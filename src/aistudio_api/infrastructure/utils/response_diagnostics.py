@@ -237,8 +237,11 @@ def observe_candidate(candidate: Candidate) -> None:
             return
         for part in candidate.parts:
             text = part.text if isinstance(part.text, str) else ""
-            if current.finished and (text or part.image is not None
-                                     or part.function_call is not None or part.function_response is not None):
+            has_nontext_payload = any(value is not None for value in (
+                part.image, part.function_call, part.function_response,
+                part.executable_code, part.code_execution_result,
+            ))
+            if current.finished and (text or has_nontext_payload):
                 current.flags.add("content_after_finish")
             if part.thought:
                 if text:
@@ -247,7 +250,7 @@ def observe_candidate(candidate: Candidate) -> None:
                         current.thought_after_body = _count(current.thought_after_body + 1)
                         current.flags.add("thought_after_body")
                     current.phase("thought")
-                elif part.image is None and part.function_call is None and part.function_response is None:
+                elif not has_nontext_payload:
                     current.empty_thought_parts = _count(current.empty_thought_parts + 1)
                     current.flags.add("empty_thought")
                     current.phase("empty_thought")

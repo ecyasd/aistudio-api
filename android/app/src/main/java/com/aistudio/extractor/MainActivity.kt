@@ -92,7 +92,7 @@ class MainActivity : ComponentActivity() {
                                     currentScreen = Screen.Login(profile)
                                 },
                                 onAddProfile = { name, email, authUser ->
-                                    profileManager.addProfile(name, email)
+                                    profileManager.addProfile(name, email, authUser)
                                     refreshProfiles()
                                 },
                                 onUpdateProfile = { updated ->

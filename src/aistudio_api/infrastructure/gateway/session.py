@@ -31,6 +31,7 @@ from aistudio_api.infrastructure.gateway.session_auth import (
     derive_profile_dir,
     extract_account_email,
     get_auth_file_version,
+    get_auth_generation,
     get_auth_user_from_meta,
     is_login_page_url,
     load_cookies_to_page,
@@ -70,6 +71,7 @@ class BrowserSession:
         self.port = port
         self._auth_file: str | None = settings.auth_file or None
         self._auth_user: str | None = None
+        self._account_cleared = False
         self._profile_dir = derive_profile_dir(self._auth_file)
         self._proc: ChromiumProcess | None = None
         self._cdp_client: CDPClient | None = None
@@ -185,13 +187,22 @@ class BrowserSession:
         bound = self._request_context.get()
         if bound is not None:
             return bound
-        if self.is_ready and self._gate.active_context is not None:
-            return self._gate.active_context
+        async with asyncio.timeout(timeout_s):
+            while True:
+                if self._account_cleared:
+                    raise RuntimeError("No account is selected")
+                if (
+                    self.is_ready and self._gate.active_context is not None
+                    and self._gate.active_context.auth_generation == get_auth_generation(self._auth_file)
+                ):
+                    return self._gate.active_context
 
-        if self.state != SessionState.PREPARING:
-            await self.transition_to_account(self._auth_file, force_refresh=False)
+                if self.state != SessionState.PREPARING:
+                    await self.transition_to_account(self._auth_file, force_refresh=False)
 
-        return await self._gate.wait_ready(timeout_s=timeout_s)
+                # Owner imports and deletions can finish after READY is signaled
+                # but before a queued waiter resumes. Recheck before leasing.
+                await self._gate.wait_ready(timeout_s=timeout_s)
 
     async def ensure_context(self) -> CDPPage:
         """Ensure active verified CDPPage is available, auto-reconnecting if dropped."""
@@ -239,17 +250,37 @@ class BrowserSession:
         """Switch auth using blue-green transition without killing in-flight streams."""
         await self.transition_to_account(auth_file, force_refresh=True)
 
+    async def clear_account(self) -> None:
+        """Stop new leases without authenticating; drain existing account work."""
+        async with self._transition_lock:
+            self._account_cleared = True
+            self._auth_file = None
+            self._auth_user = None
+            self._profile_dir = None
+            old_context = self.active_context
+            self._gate.reset()
+            self._last_stop_reason = "no_account"
+            if old_context is not None:
+                self._retiring_contexts.append(old_context)
+                drain = asyncio.create_task(
+                    self._drain_retiring_context(old_context), name="drain_deleted_account",
+                )
+                self._background_tasks.add(drain)
+                drain.add_done_callback(self._background_tasks.discard)
+
     async def transition_to_account(
         self, auth_file: str | None, force_refresh: bool = False
     ) -> SessionContext:
         """Execute atomic session transition to target auth file."""
         async with self._transition_lock:
             self._last_activity_time = time.time()
+            auth_generation = get_auth_generation(auth_file)
             if (
                 not force_refresh
                 and self.is_ready
                 and self._gate.active_context is not None
                 and self._gate.active_context.auth_file == auth_file
+                and self._gate.active_context.auth_generation == auth_generation
             ):
                 return self._gate.active_context
 
@@ -332,10 +363,15 @@ class BrowserSession:
                     auth_user=target_auth_user,
                     auth_file=auth_file,
                     base_template=base_template,
+                    auth_generation=auth_generation,
                 )
                 await self.persist_context_cookies(new_context)
 
+                if get_auth_generation(auth_file) != auth_generation:
+                    raise RuntimeError("Account credentials changed during session preparation")
+
                 self._auth_file = auth_file
+                self._account_cleared = False
                 self._auth_user = target_auth_user
                 self._profile_dir = derive_profile_dir(auth_file)
                 self._last_stop_reason = "not_started"

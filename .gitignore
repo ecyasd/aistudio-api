@@ -25,6 +25,7 @@ dumps/
 !.env.example
 !.env.*.example
 /config.yaml
+/runtime-config/
 /config.local.*
 !config.example.yaml
 **/secrets.json

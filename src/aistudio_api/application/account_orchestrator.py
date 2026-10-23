@@ -14,6 +14,7 @@ from aistudio_api.infrastructure.utils.logger import get_logger
 
 logger = get_logger("orchestrator")
 MAX_RETRIES = 5
+AUTH_GENERATION_UNTRACKED = object()
 
 _switch_lock: asyncio.Lock | None = None
 _switch_lock_loop: asyncio.AbstractEventLoop | None = None
@@ -23,10 +24,14 @@ _last_switch_time: float = 0.0
 class AccountPreparationError(Exception):
     """Preserve the identity attempted before a request obtained a session lease."""
 
-    def __init__(self, account_id: str, original_error: Exception) -> None:
+    def __init__(
+        self, account_id: str, original_error: Exception,
+        *, auth_generation: object = AUTH_GENERATION_UNTRACKED,
+    ) -> None:
         super().__init__("Could not prepare account session")
         self.account_id = account_id
         self.original_error = original_error
+        self.auth_generation = auth_generation
 
 
 def _get_switch_lock() -> asyncio.Lock:
@@ -49,6 +54,7 @@ async def try_switch_account(
     is_session_expired: bool = False,
     failure_recorded: bool = False,
     failed_context_id: int | None = None,
+    failed_auth_generation: object = AUTH_GENERATION_UNTRACKED,
 ) -> bool:
     """尝试切换到下一个对目标 model 可用的账号。防止并发级联切号。"""
     global _last_switch_time
@@ -85,6 +91,15 @@ async def try_switch_account(
 
         current_active = account_service.get_active_account()
         current_id = current_active.id if current_active else None
+
+        # An owner import can complete while a 403 waits for this lock. Check
+        # again before recording a quarantine or starting any recovery work.
+        if (
+            failed_account_id is not None
+            and failed_auth_generation is not AUTH_GENERATION_UNTRACKED
+            and not account_generation_is_current(failed_account_id, failed_auth_generation)
+        ):
+            return bool(current_id and rotator.is_account_available(current_id, model=model))
 
         active_context = client.session.active_context
         active_context_id = active_context.context_id if active_context else None
@@ -169,7 +184,9 @@ async def try_switch_account(
             except AccountPreparationError:
                 raise
             except Exception as exc:
-                raise AccountPreparationError(next_account.id, exc) from exc
+                raise AccountPreparationError(
+                    next_account.id, exc, auth_generation=next_account.auth_generation,
+                ) from exc
             if result is not None:
                 rotator.clear_auth_lockout(next_account.id)
                 _last_switch_time = time.time()
@@ -196,7 +213,9 @@ async def try_switch_account(
             except AccountPreparationError:
                 raise
             except Exception as exc:
-                raise AccountPreparationError(current_id, exc) from exc
+                raise AccountPreparationError(
+                    current_id, exc, auth_generation=current_active.auth_generation if current_active else None,
+                ) from exc
             if result is not None:
                 rotator.clear_auth_lockout(current_id)
                 _last_switch_time = time.time()
@@ -276,13 +295,23 @@ async def ensure_active_account(attempt: int, model: str | None = None) -> None:
         if auth_path is None:
             raise RuntimeError("Active account credentials are unavailable")
         target_auth = str(auth_path)
-        if session._auth_file != target_auth or not session.is_ready:
+        context = getattr(session, "active_context", None)
+        context_generation = getattr(context, "auth_generation", AUTH_GENERATION_UNTRACKED)
+        if (
+            session._auth_file != target_auth or not session.is_ready
+            or (
+                context_generation is not AUTH_GENERATION_UNTRACKED
+                and context_generation != current.auth_generation
+            )
+        ):
             try:
                 await session.transition_to_account(target_auth)
             except AccountPreparationError:
                 raise
             except Exception as exc:
-                raise AccountPreparationError(current.id, exc) from exc
+                raise AccountPreparationError(
+                    current.id, exc, auth_generation=current.auth_generation,
+                ) from exc
         # Browser preparation yields to other requests. A concurrent failure
         # can quarantine this account while its context is being prepared.
         if not rotator.is_account_available(current.id, model=model):
@@ -308,10 +337,16 @@ def record_rotator_event(
     model: str | None = None,
     *,
     account_id: str | None,
+    auth_generation: object = AUTH_GENERATION_UNTRACKED,
 ) -> None:
     """Record an event against its leased account, never the later active account."""
     rotator = runtime_state.rotator
     if not rotator or account_id is None:
+        return
+    if (
+        auth_generation is not AUTH_GENERATION_UNTRACKED
+        and not account_generation_is_current(account_id, auth_generation)
+    ):
         return
     if event == "success":
         rotator.record_success(account_id, model=model)
@@ -323,6 +358,15 @@ def record_rotator_event(
         rotator.record_session_expired(account_id, model=model)
     elif event == "error":
         rotator.record_error(account_id, model=model)
+
+
+def account_generation_is_current(account_id: str, auth_generation: object) -> bool:
+    """Retired request outcomes cannot change reimported/deleted account state."""
+    service = runtime_state.account_service
+    if service is None:
+        return False
+    account = service.get_account(account_id)
+    return account is not None and account.auth_generation == auth_generation
 
 
 __all__ = [

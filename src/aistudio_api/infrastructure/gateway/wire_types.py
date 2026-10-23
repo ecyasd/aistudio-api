@@ -251,21 +251,25 @@ class AistudioPart:
     file_id: str | None = None
     function_call: tuple[str, object] | tuple[str, object, str] | None = None
     function_response: tuple[str, object] | tuple[str, object, str] | None = None
-    executable_code: tuple[str, str] | None = None
-    code_execution_result: tuple[str, str] | None = None
+    executable_code: tuple[str | int, str] | None = None
+    code_execution_result: tuple[str | int, str] | None = None
     thought_signature: str | None = None
     thought: bool = False
 
     def to_wire(self) -> list[object]:
         wire = JspbArray()
+        # Thought ownership and signatures belong to every Part payload type.
+        # In particular, signed reasoning images must survive client replay.
+        if self.thought:
+            wire[PartIndex.THOUGHT_ALT_FLAG] = 1
+        if self.thought_signature:
+            wire[PartIndex.THOUGHT_SIGNATURE] = self.thought_signature
         if self.file_id:
             wire[PartIndex.FILE_DATA] = [self.file_id]
             return wire.compact()
         if self.inline_data:
             mime, b64 = self.inline_data
             wire[PartIndex.INLINE_DATA] = [mime, b64]
-            if self.thought_signature:
-                wire[PartIndex.THOUGHT_SIGNATURE] = self.thought_signature
             return wire.compact()
         if self.function_call:
             name, args = self.function_call[0], self.function_call[1]
@@ -274,8 +278,6 @@ class AistudioPart:
             if call_id:
                 function_call.append(call_id)
             wire[PartIndex.FUNCTION_CALL_ALT] = function_call
-            if self.thought_signature:
-                wire[PartIndex.THOUGHT_SIGNATURE] = self.thought_signature
             return wire.compact()
         if self.function_response:
             name, response = self.function_response[0], self.function_response[1]
@@ -286,42 +288,35 @@ class AistudioPart:
             if call_id:
                 function_response.append(call_id)
             wire[PartIndex.FUNCTION_RESPONSE_ALT] = function_response
-            if self.thought_signature:
-                wire[PartIndex.THOUGHT_SIGNATURE] = self.thought_signature
             return wire.compact()
         if self.executable_code:
             lang, code = self.executable_code
-            lang_code = 1 if str(lang).upper() in ("1", "PYTHON") else 0
+            language_map = {"LANGUAGE_UNSPECIFIED": 0, "PYTHON": 1}
+            if type(lang) is int:
+                lang_code = lang
+            else:
+                key = str(lang).upper()
+                if key not in language_map:
+                    raise ValueError("Unsupported executableCode language")
+                lang_code = language_map[key]
             wire[PartIndex.EXECUTABLE_CODE] = [lang_code, code]
-            if self.thought_signature:
-                wire[PartIndex.THOUGHT_SIGNATURE] = self.thought_signature
             return wire.compact()
         if self.code_execution_result:
             outcome, output = self.code_execution_result
             outcome_map = {
+                "OUTCOME_UNSPECIFIED": 0,
                 "OUTCOME_OK": 1,
                 "OUTCOME_FAILED": 2,
                 "OUTCOME_DEADLINE_EXCEEDED": 3,
             }
-            outcome_code = (
-                outcome_map.get(str(outcome).upper(), 1)
-                if isinstance(outcome, str)
-                else int(outcome)
-            )
+            if type(outcome) is int:
+                outcome_code = outcome
+            else:
+                key = str(outcome).upper()
+                if key not in outcome_map:
+                    raise ValueError("Unsupported codeExecutionResult outcome")
+                outcome_code = outcome_map[key]
             wire[PartIndex.CODE_RESULT] = [outcome_code, output]
-            if self.thought_signature:
-                wire[PartIndex.THOUGHT_SIGNATURE] = self.thought_signature
-            return wire.compact()
-        # Text part — mark as thinking when thought=True (wire index 12 = 1).
-        if self.thought:
-            wire[PartIndex.TEXT] = self.text
-            wire[PartIndex.THOUGHT_ALT_FLAG] = 1
-            if self.thought_signature:
-                wire[PartIndex.THOUGHT_SIGNATURE] = self.thought_signature
-            return wire.compact()
-        if self.thought_signature:
-            wire[PartIndex.TEXT] = self.text
-            wire[PartIndex.THOUGHT_SIGNATURE] = self.thought_signature
             return wire.compact()
         wire[PartIndex.TEXT] = self.text
         return wire.compact()

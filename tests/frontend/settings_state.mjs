@@ -227,10 +227,10 @@ checks.push('key lists reject stale and unmounted results; creation and renaming
 checks.push('key mutation failures preserve drafts and permit retry; unmounted mutations cannot refresh or close dialogs')
 
 for (const mode of ['visual', 'yaml', 'explicit logging', 'invalid yaml']) {
-  const submissions = []
+  const submissions = [], baselines = []
   const config = level => YAML.stringify({ logging: { level, dump_requests: false }, model_defaults: { drop_unsupported_params: false } })
   const props = vue.reactive({ initialYaml: config('INFO') })
-  const h = setup('components/config/VisualConfigEditor.vue', { updateConfigYaml: async content => { submissions.push(content) } }, props)
+  const h = setup('components/config/VisualConfigEditor.vue', { updateConfigYaml: async (content, baseline) => { submissions.push(content); baselines.push(baseline) } }, props)
   h.state.updateGlobalDropUnsupported(true)
   if (mode !== 'visual') h.state.switchTab('yaml')
   if (mode === 'explicit logging') h.state.rawYaml.value = h.state.rawYaml.value.replace('INFO', 'DEBUG')
@@ -251,6 +251,8 @@ for (const mode of ['visual', 'yaml', 'explicit logging', 'invalid yaml']) {
     assert.equal(submitted.logging.level, mode === 'explicit logging' ? 'DEBUG' : 'ERROR',
       'saving a model draft must not revert logging saved by the other settings card')
   }
+  assert.equal(YAML.parse(baselines[0]).logging.level, mode === 'explicit logging' ? 'INFO' : 'ERROR',
+    'explicit logging edits retain their old baseline so a concurrent update cannot be silently overwritten')
   h.stop()
 }
 for (const scenario of ['latest refresh', 'explicit logging repair', 'repair to visual']) {
@@ -276,5 +278,27 @@ for (const scenario of ['latest refresh', 'explicit logging repair', 'repair to 
   h.stop()
 }
 checks.push('model drafts retain the latest logging refresh through YAML syntax repair while explicit logging edits survive')
+
+{
+  const submissions = [], saving = deferred()
+  const baseline = { logging: { level: 'INFO' }, model_defaults: { drop_unsupported_params: false } }
+  const props = vue.reactive({ initialYaml: YAML.stringify(baseline) })
+  const h = setup('components/config/VisualConfigEditor.vue', {
+    updateConfigYaml: (content, snapshot) => { submissions.push({ content, snapshot }); return saving.promise },
+  }, props)
+  h.state.updateGlobalDropUnsupported(true)
+  // The independent logging save finished, but its GET /config refresh has not.
+  const pending = h.state.handleSave()
+  await h.state.handleSave()
+  assert.equal(submissions.length, 1, 'pending model saves must not duplicate mutations')
+  assert.deepEqual(YAML.parse(submissions[0].snapshot), baseline,
+    'the original snapshot must reach the server so unchanged logging is preserved atomically')
+  assert.equal(YAML.parse(submissions[0].content).model_defaults.drop_unsupported_params, true)
+  saving.reject(new Error('Synthetic configuration conflict'))
+  await pending
+  assert.equal(h.state.hasUnsavedChanges.value, true, 'a rejected conflict must retain the model draft')
+  h.stop()
+}
+checks.push('model saves include their baseline before a logging refresh arrives and conflicts retain drafts')
 
 console.log(JSON.stringify({ passed: true, checks, groups: checks.length, syntheticOnly: true }))

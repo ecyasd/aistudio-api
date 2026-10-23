@@ -21,6 +21,7 @@ build
 .env
 .env.local
 config.yaml
+runtime-config/
 data/
 data2/
 accounts/

@@ -5,14 +5,14 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:8080:8080"    # Put an HTTPS proxy in front of the private API
-      # - "9222:9222"  # Optional: expose only when debugging browser
+      # - "127.0.0.1:9222:9222"  # Optional: local-only browser debugging
     volumes:
       - ./data:/app/data           # Account data, stats.json and rotator_state.json persistence
-      # Initialize once with: cp config.example.yaml config.yaml
-      # Existing runtime configuration remains mounted and is never replaced.
+      # Initialize/migrate once: python scripts/prepare_compose_config.py
+      # Mount the parent so atomic configuration saves can replace config.yaml.
       - type: bind
-        source: ./config.yaml
-        target: /app/config.yaml
+        source: ./runtime-config
+        target: /app/runtime-config
         bind:
           create_host_path: false
       - ./.env:/app/.env:ro        # Environment config (read-only)
@@ -24,7 +24,7 @@ services:
       - AISTUDIO_ACCOUNTS_DIR=/app/data/accounts
       - AISTUDIO_STATS_FILE=/app/data/stats.json
       - AISTUDIO_ROTATOR_STATE_FILE=/app/data/rotator_state.json
-      - AISTUDIO_CONFIG_FILE=/app/config.yaml
+      - AISTUDIO_CONFIG_FILE=/app/runtime-config/config.yaml
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s

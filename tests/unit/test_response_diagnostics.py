@@ -193,6 +193,30 @@ def test_marker_state_crosses_parts_but_not_upstream_rounds_and_sequences_are_bo
     assert len(item["phase_sequence"]) == len(item["finish_reasons"]) == 32
 
 
+@pytest.mark.parametrize("field,payload", [
+    ("executable_code", {"language": "PYTHON", "code": "SYNTHETIC_PRIVATE_CODE"}),
+    ("code_execution_result", {"outcome": "OUTCOME_OK", "output": "SYNTHETIC_PRIVATE_OUTPUT"}),
+])
+@pytest.mark.parametrize("after_finish", [False, True])
+def test_code_payload_is_not_an_empty_thought_and_is_never_retained(
+    diagnostic_store, field, payload, after_finish,
+):
+    with trace():
+        diagnostics.begin_upstream_call()
+        if after_finish:
+            diagnostics.observe_candidate(Candidate(finish_reason=1))
+        diagnostics.observe_candidate(Candidate(parts=[
+            ContentPart(thought=True, **{field: payload}),
+        ]))
+        diagnostics.finish_response_diagnostics("success", 200)
+    item = diagnostic_store.list_records()["items"][0]
+    assert item["empty_thought_parts"] == item["thought_chars"] == 0
+    assert "empty_thought" not in item["flags"]
+    assert ("content_after_finish" in item["flags"]) is after_finish
+    assert item["phase_sequence"][-1] == "thought"
+    assert "SYNTHETIC_PRIVATE" not in json.dumps(item)
+
+
 async def test_request_contexts_isolate_concurrent_and_sequential_requests(diagnostic_store):
     gate = asyncio.Event()
 

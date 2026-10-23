@@ -18,9 +18,9 @@ def sse_env(monkeypatch):
     from aistudio_api.application import api_service_gemini as service
     from aistudio_api.application.account_rotator import AccountStats
 
-    accounts = [SimpleNamespace(id="test-account")]
+    accounts = [SimpleNamespace(id="test-account", auth_generation=None)]
     stats = {"test-account": AccountStats(account_id="test-account")}
-    context = SimpleNamespace(auth_file="offline/test-account", context_id=1)
+    context = SimpleNamespace(auth_file="offline/test-account", context_id=1, auth_generation=None)
     leased = []
 
     @asynccontextmanager
@@ -40,6 +40,7 @@ def sse_env(monkeypatch):
     account_service = SimpleNamespace(
         list_accounts=lambda: accounts,
         get_active_account=lambda: accounts[0] if accounts else None,
+        get_account=lambda account_id: next((account for account in accounts if account.id == account_id), None),
         get_account_auth_path=lambda account_id: f"offline/{account_id}",
     )
     rotator = SimpleNamespace(get_account_stats=lambda account_id: stats.get(account_id))
@@ -501,7 +502,8 @@ async def test_in_flight_result_is_attributed_to_its_leased_account_after_switch
         assert caught.value.status_code == status
 
     service.record_rotator_event.assert_called_once_with(
-        event, model="models/gemini-test", account_id="test-account"
+        event, model="models/gemini-test", account_id="test-account",
+        **({"auth_generation": None} if outcome == "success" else {}),
     )
     assert sse_env.accounts[0] is account_b
     assert not sse_env.leased

@@ -21,6 +21,7 @@ from aistudio_api.infrastructure.gateway.model_defaults import (
     invalidate_config_cache,
 )
 from aistudio_api.infrastructure.utils.config_store import (
+    ConfigConflictError,
     api_key_items,
     mutate_config,
     save_model_config,
@@ -249,6 +250,7 @@ def _apply_logging_settings(config: LoggingConfigRequest) -> None:
 
 class ConfigYamlUpdateRequest(BaseModel):
     yaml_content: str
+    baseline_yaml_content: str | None = None
 
 
 @protected_router.get("/config")
@@ -284,17 +286,13 @@ async def get_system_config() -> dict[str, object]:
     }
 
 
-@protected_router.put("/config/yaml")
-async def update_config_yaml(req: ConfigYamlUpdateRequest) -> dict[str, object]:
-    """更新 config.yaml 文件内容并热重载默认配置。"""
-
+def _parse_config_yaml(content: str, *, normalize_logging: bool = True) -> dict[str, object]:
     try:
-        parsed = yaml.safe_load(req.yaml_content)
+        parsed = yaml.safe_load(content)
         if parsed is not None and not isinstance(parsed, dict):
             raise HTTPException(400, detail="YAML 顶层必须为字典结构")
     except yaml.YAMLError as e:
         raise HTTPException(400, detail="YAML 语法格式错误") from e
-    logging_config = None
     if isinstance(parsed, dict) and parsed.get("logging") is not None:
         raw_logging = parsed["logging"]
         if not isinstance(raw_logging, dict):
@@ -307,16 +305,39 @@ async def update_config_yaml(req: ConfigYamlUpdateRequest) -> dict[str, object]:
             logging_config = LoggingConfigRequest.model_validate(raw_logging)
         except ValidationError as e:
             raise HTTPException(400, detail="日志配置格式或级别无效") from e
-        parsed["logging"] = {**raw_logging, **logging_config.model_dump(exclude_unset=True)}
+        if normalize_logging:
+            parsed["logging"] = {**raw_logging, **logging_config.model_dump(exclude_unset=True)}
+    return parsed or {}
+
+
+@protected_router.put("/config/yaml")
+async def update_config_yaml(req: ConfigYamlUpdateRequest) -> dict[str, object]:
+    """更新配置；有基线时仅合并显式编辑字段，并拒绝覆盖并发修改。"""
+    # Compare the exact loaded snapshot before normalizing an explicit edit;
+    # otherwise hand-written lowercase levels/nulls can create false conflicts.
+    parsed = _parse_config_yaml(req.yaml_content, normalize_logging=False)
+    baseline = (
+        _parse_config_yaml(req.baseline_yaml_content, normalize_logging=False)
+        if req.baseline_yaml_content is not None
+        else None
+    )
+    logging_changed = baseline is None or (
+        ("logging" in parsed, parsed.get("logging"))
+        != ("logging" in baseline, baseline.get("logging"))
+    )
+    if logging_changed:
+        parsed = _parse_config_yaml(req.yaml_content)
     config_yaml_path = _resolve_config_path(None)
     try:
-        save_model_config(config_yaml_path, parsed or {})
+        saved = save_model_config(config_yaml_path, parsed, baseline=baseline)
         invalidate_config_cache()
 
-        if logging_config is not None:
-            _apply_logging_settings(logging_config)
+        if logging_changed and isinstance(saved.get("logging"), dict):
+            _apply_logging_settings(LoggingConfigRequest.model_validate(saved["logging"]))
         logger.info("配置文件 config.yaml 已更新并重新加载")
         return {"ok": True, "message": "配置已保存并重载"}
+    except ConfigConflictError as e:
+        raise HTTPException(409, detail="配置已被其他操作修改，请刷新后合并修改再保存") from e
     except Exception as e:
         raise HTTPException(500, detail="写入配置文件失败") from e
 

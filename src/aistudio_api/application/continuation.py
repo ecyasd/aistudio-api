@@ -149,6 +149,8 @@ def _plain_part(part: ContentPart) -> bool:
         and part.image is None
         and part.function_call is None
         and part.function_response is None
+        and part.executable_code is None
+        and part.code_execution_result is None
     )
 
 

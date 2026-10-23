@@ -22,6 +22,8 @@ class ContentPart:
     image: GeneratedImage | None = None
     function_call: dict[str, object] | None = None
     function_response: dict[str, object] | None = None
+    executable_code: dict[str, object] | None = None
+    code_execution_result: dict[str, object] | None = None
     thought_signature: str = ""
 
 

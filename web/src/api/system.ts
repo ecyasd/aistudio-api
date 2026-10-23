@@ -54,10 +54,10 @@ export const systemApi = {
     return request<SystemConfig>('/config', { signal })
   },
 
-  updateConfigYaml(yamlContent: string): Promise<{ ok: boolean; message: string }> {
+  updateConfigYaml(yamlContent: string, baselineYamlContent?: string): Promise<{ ok: boolean; message: string }> {
     return request('/config/yaml', {
       method: 'PUT',
-      body: JSON.stringify({ yaml_content: yamlContent }),
+      body: JSON.stringify({ yaml_content: yamlContent, baseline_yaml_content: baselineYamlContent }),
     })
   },
 
