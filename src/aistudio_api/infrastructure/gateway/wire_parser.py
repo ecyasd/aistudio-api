@@ -17,7 +17,10 @@ from aistudio_api.domain.models import (
     ModelOutput,
 )
 from aistudio_api.infrastructure.utils.common import decode_base64_images
-from aistudio_api.infrastructure.utils.response_diagnostics import observe_candidate
+from aistudio_api.infrastructure.utils.response_diagnostics import (
+    observe_candidate,
+    observe_reasoning_tokens,
+)
 
 # ==============================================================================
 # Google Protobuf-over-JSON Wire Array Specifications (docs/WIRE_SPECIFICATION.md)
@@ -440,6 +443,7 @@ def parse_usage_metadata(raw_usage: object) -> dict[str, object]:
         if len(raw_usage) > WIRE_USAGE_REASONING_TOKENS
         else None
     )
+    observe_reasoning_tokens(reasoning_tokens)
     completion_tokens = visible_completion_tokens
     if isinstance(visible_completion_tokens, int) and isinstance(reasoning_tokens, int):
         completion_tokens = visible_completion_tokens + reasoning_tokens

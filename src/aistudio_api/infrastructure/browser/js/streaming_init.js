@@ -42,6 +42,10 @@
     // downstream consumer resumes, so a paused client also pauses reader.read.
     function send(event) {
         if (closed) return Promise.reject(new Error('cancelled'));
+        // Reader progress is deliberately paused until Python consumes this
+        // event. Only the consumer deadline applies while waiting for its ACK;
+        // upstream silence cannot be measured while no read is in progress.
+        clearTimeout(timeoutId);
         return new Promise((resolve, reject) => {
             const seq = ++sequence;
             const timer = setTimeout(() => abort('slow consumer timeout'), args.consumerTimeout * 1000);
@@ -56,6 +60,7 @@
             const current = pending;
             pending = null;
             clearTimeout(current.timer);
+            resetTimeout();
             current.resolve();
         },
     };

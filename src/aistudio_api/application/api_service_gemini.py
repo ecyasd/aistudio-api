@@ -70,6 +70,7 @@ from aistudio_api.infrastructure.utils.response_diagnostics import (
 logger = get_logger("api.gemini")
 SSE_HEARTBEAT_INTERVAL_SECONDS = 15.0
 SSE_SEND_TIMEOUT_SECONDS = 30.0
+COOKIE_CHECKPOINT_TIMEOUT_SECONDS = 3.0
 ACCOUNT_IDENTITY_MESSAGES = {
     "upstream_account_mismatch": (
         "AI Studio account identity does not match the selected account. "
@@ -639,12 +640,19 @@ async def _generate_non_streaming(
 
 
 async def _persist_successful_cookies(client: AIStudioClient, context: object) -> None:
-    """Persist a verified lease without making a completed response fail."""
+    """Checkpoint a verified lease within a small optional completion budget."""
     persist = getattr(client.session, "persist_context_cookies", None)
     if persist is None:
         return
     try:
-        await persist(context)
+        # The upstream response is complete. A stalled CDP cookie read must not
+        # hold its final event, inference slot and account lease for another
+        # full CDP timeout. Stay in the owning task so cancellation closes this
+        # operation before the lease is released; no detached checkpoint may
+        # outlive or cross into a later request. Atomic/CAS storage preserves
+        # the previous verified export if a read is cancelled before writing.
+        async with asyncio.timeout(COOKIE_CHECKPOINT_TIMEOUT_SECONDS):
+            await persist(context)
     except Exception as exc:
         logger.warning("保存已验证会话 Cookie 失败: type=%s", type(exc).__name__)
 

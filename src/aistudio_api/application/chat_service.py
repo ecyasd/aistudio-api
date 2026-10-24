@@ -20,6 +20,9 @@ from aistudio_api.infrastructure.gateway.wire_types import (
     AistudioThinkingConfig,
     ThinkingLevel,
 )
+from aistudio_api.infrastructure.utils.response_diagnostics import (
+    note_thinking_configuration,
+)
 
 
 @dataclass
@@ -890,6 +893,10 @@ def normalize_gemini_request(
                     drop_unsupported=model_defaults.drop_unsupported_params,
                 )
             )
+    note_thinking_configuration(
+        explicit=generation_config is not None and generation_config.thinkingConfig is not None,
+        thinking_config=(generation_config_overrides or {}).get("thinking_config"),
+    )
     return NormalizedGeminiRequest(
         model=model,
         contents=contents,

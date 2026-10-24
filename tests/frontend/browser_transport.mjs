@@ -13,9 +13,10 @@ function browser(fetch) {
     const timers = new Map();
     const events = [];
     let next = 0;
+    let now = 0;
     const window = {fetch, __aistudio_stream_push__: payload => events.push(JSON.parse(payload))};
     const context = vm.createContext({window, AbortController, TextDecoder,
-        setTimeout(fn, delay) { const id = ++next; timers.set(id, {fn, delay}); return id; },
+        setTimeout(fn, delay) { const id = ++next; timers.set(id, {fn, delay, due: now + delay}); return id; },
         clearTimeout(id) { timers.delete(id); }});
     return {window, timers, events,
         run(name, args) { return vm.runInContext(`(${fs.readFileSync(new URL(name, scripts), 'utf8')})`, context)(args); },
@@ -23,6 +24,14 @@ function browser(fetch) {
             const entry = [...timers.entries()].find(([, timer]) => timer.delay === delay);
             assert.ok(entry, `timer ${delay} exists`);
             timers.delete(entry[0]); entry[1].fn();
+        },
+        advance(milliseconds) {
+            now += milliseconds;
+            for (const [id, timer] of [...timers.entries()].sort((a, b) => a[1].due - b[1].due)) {
+                if (timers.has(id) && timer.due <= now) {
+                    timers.delete(id); timer.fn();
+                }
+            }
         }};
 }
 for (const mode of ['stalled body timeout', 'body read rejection', 'explicit cancellation']) {
@@ -104,6 +113,66 @@ for (const mode of ['response total bound', 'single read bound']) {
     assert.equal(b.timers.size, 0);
     assert.equal(Object.keys(b.window.__AISTUDIO__.streams).length, 0);
     checks.push('bounded stream ACK ordering and split UTF-8');
+}
+for (const budget of ['synthetic', 'production']) {
+    // A single browser read can contain many chunks. Each is acknowledged in
+    // time even when draining that read takes longer than the upstream timeout.
+    const expected = budget === 'production' ? 'x'.repeat(8 * 64 * 1024)
+        : 'abcdefghijklmnopqrstuvwxyz012345';
+    const bytes = new TextEncoder().encode(expected);
+    const args = budget === 'production' ? {...defaults,
+        maxResponseBytes: 32 * 1024 * 1024, maxReadBytes: 1024 * 1024,
+        maxChunkBytes: 64 * 1024} : defaults;
+    let reads = 0;
+    const reader = {read: async () => ++reads === 1 ? {done: false, value: bytes} : {done: true},
+        cancel: async () => {}, releaseLock() {}};
+    const b = browser(async () => ({status: 200, body: {getReader: () => reader}}));
+    b.run('streaming_init.js', args);
+    await tick();
+    for (let i = 0; i < 9; i++) {
+        b.advance(20000);
+        assert.equal(b.events.some(event => event.type === 'error'), false,
+            'timely consumer acknowledgements must not trigger upstream idle timeout');
+        const event = b.events.at(-1);
+        b.run('stream_ack.js', {rid: 'one', seq: event.seq});
+        await tick();
+    }
+    assert.equal(b.events.filter(event => event.type === 'chunk').map(event => event.text).join(''),
+        expected);
+    assert.equal(b.events.filter(event => event.type === 'chunk').length, 8);
+    assert.equal(b.events.at(-1).type, 'done');
+    assert.equal(b.timers.size, 0);
+    checks.push(`active consumer can drain one read beyond upstream idle budget (${budget} byte limits)`);
+}
+for (const stage of ['headers', 'body after acknowledgement']) {
+    let signal;
+    let cancelRead;
+    let cancelled = false;
+    const bodyRead = new Promise(resolve => { cancelRead = () => resolve({done: true}); });
+    const reader = {read: () => bodyRead, cancel: async () => { cancelled = true; cancelRead(); }, releaseLock() {}};
+    const b = browser(async (_, options) => {
+        signal = options.signal;
+        return stage === 'headers' ? new Promise(() => {})
+            : {status: 200, body: {getReader: () => reader}};
+    });
+    b.run('streaming_init.js', defaults);
+    await tick();
+    if (stage !== 'headers') {
+        b.advance(20000);
+        b.run('stream_ack.js', {rid: 'one', seq: 1});
+        await tick();
+    }
+    b.advance(119999);
+    assert.equal(signal.aborted, false, 'upstream wait keeps its full idle budget');
+    b.advance(1);
+    await tick();
+    assert.equal(signal.aborted, true);
+    assert.equal(b.events.at(-1).message, 'timeout');
+    assert.equal(b.events.some(event => event.type === 'done'), false);
+    assert.equal(cancelled, stage !== 'headers');
+    assert.equal(b.timers.size, 0);
+    assert.equal(Object.keys(b.window.__AISTUDIO__.streams).length, 0);
+    checks.push(`stalled stream ${stage} obeys upstream idle deadline`);
 }
 {
     let signal;

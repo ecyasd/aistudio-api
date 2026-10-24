@@ -35,7 +35,7 @@ _ERROR_KINDS = frozenset({
 })
 _COUNTERS = (
     "duration_ms", "upstream_calls", "retries", "body_chars", "thought_chars",
-    "thought_after_body", "empty_thought_parts", "marker_count",
+    "thought_parts", "thought_after_body", "empty_thought_parts", "marker_count",
 )
 logger = get_logger("response_diagnostics")
 _store: ResponseDiagnosticStore | None = None
@@ -44,6 +44,16 @@ _registry_lock = threading.RLock()
 
 def _count(value: object) -> int:
     return max(0, min(value, MAX_COUNT)) if type(value) is int else 0
+
+
+def _thinking_mode(value: object) -> int | None:
+    # The current verified mapping defines mode 1 only. Other request values
+    # remain untouched by this diagnostic path and are reported as unknown.
+    return value if type(value) is int and value == 1 else None
+
+
+def _thinking_level(value: object) -> int | None:
+    return value if type(value) is int and value in (1, 2, 3, 4) else None
 
 
 def _normalize(raw: object) -> dict[str, Any] | None:
@@ -67,6 +77,12 @@ def _normalize(raw: object) -> dict[str, Any] | None:
         "model": model if isinstance(model, str) and _MODEL.fullmatch(model) else None,
         "stream": raw.get("stream") is True,
         "auto_continue": raw.get("auto_continue") is True,
+        "thinking_explicit": raw.get("thinking_explicit")
+        if type(raw.get("thinking_explicit")) is bool else None,
+        "thinking_mode": _thinking_mode(raw.get("thinking_mode")),
+        "thinking_level": _thinking_level(raw.get("thinking_level")),
+        "thought_tokens": _count(raw.get("thought_tokens"))
+        if type(raw.get("thought_tokens")) is int and raw["thought_tokens"] >= 0 else None,
         "outcome": raw.get("outcome")
         if isinstance(raw.get("outcome"), str) and raw["outcome"] in _OUTCOMES else "failed",
         "transport_status": raw.get("transport_status")
@@ -139,10 +155,15 @@ class _Accumulator:
     configured: bool = False
     model: str | None = None
     auto_continue: bool = False
+    thinking_explicit: bool | None = None
+    thinking_mode: int | None = None
+    thinking_level: int | None = None
     upstream_calls: int = 0
     retries: int = 0
     body_chars: int = 0
     thought_chars: int = 0
+    thought_parts: int = 0
+    thought_tokens: int | None = None
     thought_after_body: int = 0
     empty_thought_parts: int = 0
     marker_count: int = 0
@@ -156,6 +177,7 @@ class _Accumulator:
     body_seen: bool = False
     finished: bool = False
     last_phase: str | None = None
+    previous_thought_tokens: int = 0
 
     def phase(self, value: str) -> None:
         if self.last_phase == value:
@@ -206,6 +228,31 @@ def configure_generation(*, model: str, auto_continue: bool) -> None:
             current.auto_continue = auto_continue is True
 
 
+def note_thinking_configuration(*, explicit: bool, thinking_config: object) -> None:
+    """Inspect normalized overrides without retaining the request or its array."""
+    with contextlib.suppress(Exception):
+        current = _current()
+        if current is not None:
+            current.thinking_explicit = explicit if type(explicit) is bool else None
+            current.thinking_mode = _thinking_mode(
+                thinking_config[0] if isinstance(thinking_config, list) and thinking_config else None
+            )
+            current.thinking_level = _thinking_level(
+                thinking_config[3]
+                if isinstance(thinking_config, list) and len(thinking_config) > 3 else None
+            )
+
+
+def observe_reasoning_tokens(reasoning_tokens: int | None) -> None:
+    """Keep the latest cumulative usage in a call, summed across upstream calls."""
+    with contextlib.suppress(Exception):
+        current = _current()
+        if current is not None and type(reasoning_tokens) is int and reasoning_tokens >= 0:
+            current.thought_tokens = _count(
+                current.previous_thought_tokens + _count(reasoning_tokens)
+            )
+
+
 def note_attempt(attempt: int) -> None:
     with contextlib.suppress(Exception):
         current = _current()
@@ -218,6 +265,7 @@ def begin_upstream_call() -> None:
         current = _current()
         if current is not None:
             current.upstream_calls = _count(current.upstream_calls + 1)
+            current.previous_thought_tokens = current.thought_tokens or 0
             current.marker_state = 0
             current.body_seen = current.finished = False
             current.last_phase = None
@@ -244,6 +292,7 @@ def observe_candidate(candidate: Candidate) -> None:
             if current.finished and (text or has_nontext_payload):
                 current.flags.add("content_after_finish")
             if part.thought:
+                current.thought_parts = _count(current.thought_parts + 1)
                 if text:
                     current.thought_chars = _count(current.thought_chars + len(text))
                     if current.body_seen:
@@ -296,6 +345,9 @@ def finish_response_diagnostics(outcome: str, transport_status: int | None = Non
             "request_id": context.request_id, "time": datetime.now(UTC).isoformat(),
             "model": current.model, "stream": current.stream,
             "auto_continue": current.auto_continue, "outcome": outcome,
+            "thinking_explicit": current.thinking_explicit,
+            "thinking_mode": current.thinking_mode, "thinking_level": current.thinking_level,
+            "thought_tokens": current.thought_tokens,
             "transport_status": transport_status, "error_kind": error_kind,
             "duration_ms": int(max(0, time.monotonic() - current.started) * 1000),
             **{key: getattr(current, key) for key in _COUNTERS if key != "duration_ms"},
@@ -308,7 +360,7 @@ def finish_response_diagnostics(outcome: str, transport_status: int | None = Non
             with contextlib.suppress(Exception):
                 get_response_diagnostic_store().record(summary)
             with contextlib.suppress(Exception):
-                log = logger.warning if current.flags.intersection({
+                log = logger.warning if summary["outcome"] in {"failed", "cancelled"} or current.flags.intersection({
                     "marker_in_body", "thought_after_body", "content_after_finish",
                 }) else logger.info
                 log("response_diagnostic %s", json.dumps(summary, separators=(",", ":")))
