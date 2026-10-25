@@ -11,6 +11,8 @@ from contextvars import ContextVar
 from hashlib import sha256
 from pathlib import Path
 
+from anyio import CancelScope
+
 from aistudio_api.config import settings
 from aistudio_api.infrastructure.browser.browser_engine import (
     ChromiumProcess,
@@ -397,29 +399,33 @@ class BrowserSession:
                 return new_context
 
             except BaseException as exc:
-                if new_page is not None and self._cdp_client is not None:
-                    with suppress(Exception):
-                        await self._cdp_client.close_target(new_page.target_id)
-                self._auth_file = old_auth_file
-                self._auth_user = old_auth_user
-                self._profile_dir = old_profile_dir
-                if (
-                    old_context is not None
-                    and old_context.is_usable()
-                    and self._proc is not None
-                    and self._proc.is_alive()
-                ):
-                    self._gate.set_ready(old_context)
-                else:
-                    # A half-started process or broken browser CDP connection
-                    # must not become the next request's permanent starting point.
-                    await self._close_internal()
-                    self._last_stop_reason = "failed"
-                    self._gate.set_failed(
-                        exc
-                        if isinstance(exc, Exception)
-                        else RuntimeError("Session transition cancelled")
-                    )
+                # ASGI task groups deliver cancellation again at every await.
+                # Finish disposing our candidate and restoring the gate in this
+                # task before propagating the original failure/cancellation.
+                with CancelScope(shield=True):
+                    if new_page is not None and self._cdp_client is not None:
+                        with suppress(Exception):
+                            await self._cdp_client.close_target(new_page.target_id)
+                    self._auth_file = old_auth_file
+                    self._auth_user = old_auth_user
+                    self._profile_dir = old_profile_dir
+                    if (
+                        old_context is not None
+                        and old_context.is_usable()
+                        and self._proc is not None
+                        and self._proc.is_alive()
+                    ):
+                        self._gate.set_ready(old_context)
+                    else:
+                        # A half-started process or broken browser CDP connection
+                        # must not become the next request's permanent starting point.
+                        await self._close_internal()
+                        self._last_stop_reason = "failed"
+                        self._gate.set_failed(
+                            exc
+                            if isinstance(exc, Exception)
+                            else RuntimeError("Session transition cancelled")
+                        )
                 log.error("会话切换失败: %s", exc)
                 raise
 
@@ -720,8 +726,9 @@ class BrowserSession:
         except BaseException:
             # Launch may leave an alive process that never serves CDP. Dispose
             # our process and client even on cancellation so a retry starts fresh.
-            await self._close_internal()
-            self._last_stop_reason = "failed"
+            with CancelScope(shield=True):
+                await self._close_internal()
+                self._last_stop_reason = "failed"
             raise
         return None
 

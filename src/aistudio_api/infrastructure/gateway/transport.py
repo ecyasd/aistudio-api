@@ -11,6 +11,8 @@ from contextlib import suppress
 from typing import TYPE_CHECKING, cast
 from urllib.parse import urlsplit
 
+from anyio import CancelScope
+
 from aistudio_api.infrastructure.account.cookie_parser import calculate_sapisid_hash
 from aistudio_api.infrastructure.browser.scripts import (
     HOOKED_CLEANUP_JS,
@@ -275,7 +277,10 @@ class XHRStreamTransport:
                 raise RuntimeError("replay failed: response size limit exceeded")
             return status, raw_body
         finally:
-            await asyncio.shield(self._schedule_cleanup(page, HOOKED_CLEANUP_JS, rid))
+            # ASGI middleware can cancel at every await. Finish the existing
+            # bounded abort before releasing the owning inference request.
+            with CancelScope(shield=True):
+                await asyncio.shield(self._schedule_cleanup(page, HOOKED_CLEANUP_JS, rid))
 
     async def send_streaming_request(
         self,
@@ -401,4 +406,5 @@ class XHRStreamTransport:
             self._queues.pop(rid, None)
             self._pages.pop(rid, None)
             self._failed.discard(rid)
-            await asyncio.shield(self._schedule_cleanup(page, STREAM_CLEANUP_JS, rid))
+            with CancelScope(shield=True):
+                await asyncio.shield(self._schedule_cleanup(page, STREAM_CLEANUP_JS, rid))

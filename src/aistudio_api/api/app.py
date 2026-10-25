@@ -35,6 +35,7 @@ from .error_middleware import (
     record_http_failure,
     request_operation,
 )
+from .nonstream_disconnect import NonStreamingDisconnectMiddleware
 from .routes_accounts import router as accounts_router
 from .routes_errors import router as errors_router
 from .routes_gemini import router as gemini_router
@@ -347,6 +348,7 @@ async def root_index():
     return JSONResponse({"message": "AI Studio API Web UI"})
 
 
+app.add_middleware(NonStreamingDisconnectMiddleware)
 app.add_middleware(ErrorRecordsMiddleware)
 
 
