@@ -230,7 +230,7 @@ class AIStudioClient:
         sanitize_plain_text: bool = True,
     ) -> ModelOutput:
         async with self._session.request_scope():
-            logger.info("拦截请求: %r", f"{capture_prompt[:20]}...")
+            logger.info("准备文本生成请求")
             captured = await self.capture_request(
                 prompt=capture_prompt,
                 model=model,
@@ -289,8 +289,7 @@ class AIStudioClient:
     ) -> ModelOutput:
         async with self._session.request_scope():
             logger.info(
-                "生图请求: %r, images=%s",
-                f"{prompt[:20]}...",
+                "准备生图请求: images=%s",
                 len(images) if images else 0,
             )
             request_contents = contents or [

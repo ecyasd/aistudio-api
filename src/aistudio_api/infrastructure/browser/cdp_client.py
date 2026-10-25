@@ -14,6 +14,7 @@ from collections.abc import Callable
 
 import httpx
 import websockets
+from anyio import CancelScope
 from websockets.asyncio.client import ClientConnection
 
 from aistudio_api.infrastructure.browser.scripts import build_selector_match_js
@@ -982,7 +983,10 @@ class CDPClient:
             try:
                 await browser_connection.connect()
             except BaseException:
-                await browser_connection.close()
+                # A level-cancelled account transition must finish disposing
+                # this unregistered connection before preserving its failure.
+                with CancelScope(shield=True), contextlib.suppress(Exception):
+                    await browser_connection.close()
                 raise
             self._browser_cdp = browser_connection
         browser_cdp = self._browser_cdp
@@ -994,6 +998,7 @@ class CDPClient:
             raise RuntimeError("Browser did not create an isolated context")
         self._browser_contexts.add(context_id)
         conn: CDPConnection | None = None
+        page: CDPPage | None = None
         try:
             target = await browser_cdp.send(
                 "Target.createTarget",
@@ -1024,11 +1029,21 @@ class CDPClient:
                     await self.close_target(spare_id)
             return page
         except BaseException:
-            if conn is not None:
-                with contextlib.suppress(Exception):
-                    await conn.close()
-            with contextlib.suppress(Exception):
-                await self.dispose_browser_context(context_id)
+            # create_new_page has not returned ownership to its session yet.
+            # Keep cleanup in this task under AnyIO repeated cancellation.
+            with CancelScope(shield=True):
+                if page is not None and self._owned_pages.get(page.target_id) is page:
+                    # Failure while pruning spare tabs occurs after registration.
+                    # Use the normal close path so ownership is removed only
+                    # after both socket cleanup and context disposal succeed.
+                    with contextlib.suppress(Exception):
+                        await self.close_target(page.target_id)
+                else:
+                    if conn is not None:
+                        with contextlib.suppress(Exception):
+                            await conn.close()
+                    with contextlib.suppress(Exception):
+                        await self.dispose_browser_context(context_id)
             raise
 
     async def dispose_browser_context(self, context_id: str) -> None:
