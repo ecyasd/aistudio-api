@@ -178,6 +178,19 @@ WARNING，失败和取消的摘要也使用 WARNING，普通成功和恢复使�
 是否可读取取决于现有日志级别和保留情况。
 不需要打开请求或响应原文转储，不新增模型请求或持久化数据文件。
 
+`timings_ms` 记录从 HTTP 请求进入起、各阶段首次被服务端观测到的毫秒数：
+`admitted` 为取得并发名额，`account_preparation_started` / `account_ready` 为账号准备，
+`session_ready` 为取得浏览器上下文，`capture_started` / `template_ready` / `snapshot_ready`
+为模板与签名，`upstream_started` / `transport_dispatched` 为进入上游调用与浏览器发起请求，
+`upstream_headers` / `upstream_first_byte` 为流式上游头部与首字节，
+`first_thought` / `first_body` 为解析到首个非空思考文本与正文文本，
+`response_started` / `first_data_sent` 为 HTTP 响应头与首个 SSE data 帧成功交给 ASGI。
+缺失阶段不填零，重试与续写不覆盖首次时间；空心跳不算 SSE data。
+这些时间不证明客户端收到或显示了文本；非流式解析的正文时间包含等待完整响应的时间。
+首段正文等待达到 10 秒（包括结束时仍无正文）的摘要标记 `slow_first_body` 并使用
+WARNING，即使请求最后成功也能在 WARNING 日志级别追查。该阈值仅用于诊断，
+不会中断生成、限制思考时间或改变客户端参数。
+
 摘要还包含原生思考 Part 数、已报告思考 token 数，以及请求是否显式提供思考配置。
 `thinking_mode` / `thinking_level` 只记录规范化覆盖配置中的已知枚举；`null` 表示未观测到
 该覆盖值，不推断最终 wire 默认值。`thought_tokens` 使用每次上游调用最后报告的累计值
