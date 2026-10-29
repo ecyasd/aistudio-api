@@ -65,6 +65,7 @@ from aistudio_api.infrastructure.utils.logger import get_logger
 from aistudio_api.infrastructure.utils.response_diagnostics import (
     configure_generation,
     note_attempt,
+    note_timing,
 )
 
 logger = get_logger("api.gemini")
@@ -552,7 +553,9 @@ async def _generate_non_streaming(
         request_auth_generation: object = AUTH_GENERATION_UNTRACKED
         try:
             normalized = normalize_gemini_request(req, model_path)
+            note_timing("account_preparation_started")
             await ensure_active_account(attempt, model=model_path)
+            note_timing("account_ready")
             logger.info(
                 "Gemini 生成请求: model=%s, 对话轮数=%s, 流式=否, 尝试第 %d 次",
                 normalized.model,
@@ -925,7 +928,9 @@ def _build_gemini_streaming_response(
                 latest_response_id = None
                 try:
                     normalized = prepared_request or normalize_gemini_request(req, model_path)
+                    note_timing("account_preparation_started")
                     await ensure_active_account(stream_attempt, model=model_path)
+                    note_timing("account_ready")
                     async with client.session.request_scope() as ctx:
                         account_id = account_id_for_auth_file(ctx.auth_file)
                         request_context_id = ctx.context_id

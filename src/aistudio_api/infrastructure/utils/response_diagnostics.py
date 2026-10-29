@@ -21,12 +21,14 @@ MAX_RECORDS = 100
 RETENTION_MINUTES = 10
 MAX_SEQUENCE = 32
 MAX_COUNT = 2_147_483_647
+SLOW_FIRST_BODY_MS = 10_000
 _MODEL = re.compile(r"(?:models/)?(?:gemini|gemma)[a-z0-9_.-]{0,90}\Z")
 _REQUEST = re.compile(r"req_[a-f0-9]{8,32}\Z")
 _PHASES = frozenset({"body", "thought", "empty_thought", "finish"})
 _FLAGS = frozenset({
     "marker_in_body", "thought_after_body", "empty_thought", "content_after_finish",
     "multiple_upstream_calls", "retried", "auto_continued", "sequence_limited",
+    "slow_first_body",
 })
 _OUTCOMES = frozenset({"success", "recovered", "failed", "cancelled"})
 _ERROR_KINDS = frozenset({
@@ -36,6 +38,12 @@ _ERROR_KINDS = frozenset({
 _COUNTERS = (
     "duration_ms", "upstream_calls", "retries", "body_chars", "thought_chars",
     "thought_parts", "thought_after_body", "empty_thought_parts", "marker_count",
+)
+_TIMINGS = (
+    "admitted", "account_preparation_started", "account_ready", "session_ready",
+    "capture_started", "template_ready", "snapshot_ready", "upstream_started",
+    "transport_dispatched", "upstream_headers", "upstream_first_byte",
+    "first_thought", "first_body", "response_started", "first_data_sent",
 )
 logger = get_logger("response_diagnostics")
 _store: ResponseDiagnosticStore | None = None
@@ -91,6 +99,11 @@ def _normalize(raw: object) -> dict[str, Any] | None:
         if isinstance(raw.get("error_kind"), str) and raw["error_kind"] in _ERROR_KINDS else None,
     }
     result.update({name: _count(raw.get(name)) for name in _COUNTERS})
+    timings = raw.get("timings_ms")
+    result["timings_ms"] = {
+        name: timings[name] for name in _TIMINGS
+        if type(timings.get(name)) is int and 0 <= timings[name] <= MAX_COUNT
+    } if isinstance(timings, dict) else {}
     reasons = raw.get("finish_reasons")
     result["finish_reasons"] = [
         value for value in reasons[:MAX_SEQUENCE] if type(value) is int and 0 <= value <= 255
@@ -170,6 +183,7 @@ class _Accumulator:
     finish_reasons: list[int] = field(default_factory=list)
     phase_sequence: list[str] = field(default_factory=list)
     flags: set[str] = field(default_factory=set)
+    timings_ms: dict[str, int] = field(default_factory=dict)
     started: float = field(default_factory=time.monotonic)
     completed: bool = False
     # Only finite state and counters survive observing a Part; no text tail.
@@ -260,10 +274,23 @@ def note_attempt(attempt: int) -> None:
             current.retries = max(current.retries, _count(attempt))
 
 
+def note_timing(name: str) -> None:
+    """First observed milestone, measured from ingress; never keep its payload.
+
+    Retries and continuation must not overwrite the original first-byte/body
+    timing. Missing milestones are omitted, distinct from a genuine zero.
+    """
+    with contextlib.suppress(Exception):
+        current = _current()
+        if current is not None and name in _TIMINGS and name not in current.timings_ms:
+            current.timings_ms[name] = _count(int(max(0, time.monotonic() - current.started) * 1000))
+
+
 def begin_upstream_call() -> None:
     with contextlib.suppress(Exception):
         current = _current()
         if current is not None:
+            note_timing("upstream_started")
             current.upstream_calls = _count(current.upstream_calls + 1)
             current.previous_thought_tokens = current.thought_tokens or 0
             current.marker_state = 0
@@ -294,6 +321,7 @@ def observe_candidate(candidate: Candidate) -> None:
             if part.thought:
                 current.thought_parts = _count(current.thought_parts + 1)
                 if text:
+                    note_timing("first_thought")
                     current.thought_chars = _count(current.thought_chars + len(text))
                     if current.body_seen:
                         current.thought_after_body = _count(current.thought_after_body + 1)
@@ -306,6 +334,7 @@ def observe_candidate(candidate: Candidate) -> None:
                 else:
                     current.phase("thought")
             elif text:
+                note_timing("first_body")
                 current.body_chars = _count(current.body_chars + len(text))
                 current.body_seen = True
                 current.observe_body(text)
@@ -337,6 +366,9 @@ def finish_response_diagnostics(outcome: str, transport_status: int | None = Non
             current.flags.add("multiple_upstream_calls")
         if current.retries:
             current.flags.add("retried")
+        duration_ms = _count(int(max(0, time.monotonic() - current.started) * 1000))
+        if current.timings_ms.get("first_body", duration_ms) >= SLOW_FIRST_BODY_MS:
+            current.flags.add("slow_first_body")
         error_kind = "cancelled" if outcome == "cancelled" else None
         for event in context.recorded_event_keys.values():
             if event.get("category") in _ERROR_KINDS:
@@ -349,7 +381,7 @@ def finish_response_diagnostics(outcome: str, transport_status: int | None = Non
             "thinking_mode": current.thinking_mode, "thinking_level": current.thinking_level,
             "thought_tokens": current.thought_tokens,
             "transport_status": transport_status, "error_kind": error_kind,
-            "duration_ms": int(max(0, time.monotonic() - current.started) * 1000),
+            "duration_ms": duration_ms, "timings_ms": current.timings_ms,
             **{key: getattr(current, key) for key in _COUNTERS if key != "duration_ms"},
             "finish_reasons": current.finish_reasons, "phase_sequence": current.phase_sequence,
             "flags": sorted(current.flags),
@@ -361,6 +393,6 @@ def finish_response_diagnostics(outcome: str, transport_status: int | None = Non
                 get_response_diagnostic_store().record(summary)
             with contextlib.suppress(Exception):
                 log = logger.warning if summary["outcome"] in {"failed", "cancelled"} or current.flags.intersection({
-                    "marker_in_body", "thought_after_body", "content_after_finish",
+                    "marker_in_body", "thought_after_body", "content_after_finish", "slow_first_body",
                 }) else logger.info
                 log("response_diagnostic %s", json.dumps(summary, separators=(",", ":")))

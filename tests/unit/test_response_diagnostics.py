@@ -311,6 +311,7 @@ async def test_api_retry_and_continuation_counters_share_one_inbound_context(dia
         diagnostics.finish_response_diagnostics("recovered", 200)
     item = diagnostic_store.list_records()["items"][0]
     assert item["upstream_calls"] == 3 and item["retries"] == 1
+    assert {"admitted", "account_ready", "session_ready", "upstream_started"} <= set(item["timings_ms"])
     assert item["auto_continue"] is True and item["finish_reasons"] == [2, 1]
     assert {"auto_continued", "retried", "multiple_upstream_calls"} <= set(item["flags"])
 
@@ -326,6 +327,126 @@ def test_diagnostic_and_logging_failures_do_not_escape_or_suppress_each_other(di
     assert diagnostics.logger.info.call_count == 2
     diagnostics.begin_upstream_call()
     diagnostics.observe_candidate(Candidate(parts=[ContentPart(text="outside request")]))
+
+
+def test_first_body_latency_keeps_first_milestones_and_warns_on_slow_success(diagnostic_store, monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(diagnostics.time, "monotonic", lambda: now[0])
+    with trace(stream=True) as context:
+        context.response_diagnostics.started = now[0]
+        now[0] = 101.0
+        diagnostics.note_timing("admitted")
+        diagnostics.begin_upstream_call()
+        now[0] = 102.0
+        diagnostics.note_timing("upstream_first_byte")
+        diagnostics.observe_candidate(Candidate(parts=[ContentPart(text="private thought", thought=True)]))
+        now[0] = 142.0
+        diagnostics.observe_candidate(Candidate(parts=[ContentPart(text="private body")]))
+        now[0] = 145.0
+        diagnostics.note_timing("admitted")
+        diagnostics.note_timing("SYNTHETIC_SECRET")
+        diagnostics.observe_candidate(Candidate(parts=[ContentPart(text="later body")]))
+        diagnostics.finish_response_diagnostics("success", 200)
+    item = diagnostic_store.list_records()["items"][0]
+    assert item["timings_ms"] == {"admitted": 1000, "upstream_started": 1000,
+                                 "upstream_first_byte": 2000, "first_thought": 2000,
+                                 "first_body": 42000}
+    assert "slow_first_body" in item["flags"]
+    assert "private" not in json.dumps(item) and "SYNTHETIC_SECRET" not in json.dumps(item)
+    diagnostics.logger.warning.assert_called_once()
+    diagnostics.logger.info.assert_not_called()
+
+
+def test_cancel_before_body_keeps_missing_timing_distinct_from_zero(diagnostic_store, monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(diagnostics.time, "monotonic", lambda: now[0])
+    with trace(stream=True) as context:
+        context.response_diagnostics.started = now[0]
+        diagnostics.note_timing("admitted")
+        now[0] = 141.0
+        diagnostics.finish_response_diagnostics("cancelled", 200)
+        diagnostics.note_timing("first_body")
+    item = diagnostic_store.list_records()["items"][0]
+    assert item["timings_ms"] == {"admitted": 0}
+    assert "slow_first_body" in item["flags"]
+
+
+def test_store_timing_allowlist_rejects_payloads_and_invalid_numbers():
+    store = diagnostics.ResponseDiagnosticStore()
+    store.record({**summary(1, datetime.now(UTC)), "timings_ms": {
+        "first_body": 42000, "admitted": True, "account_ready": -1,
+        "snapshot_ready": 2_147_483_648, "first_thought": "SYNTHETIC_SECRET",
+        "SYNTHETIC_SECRET": 42,
+    }})
+    page = store.list_records()
+    assert page["items"][0]["timings_ms"] == {"first_body": 42000}
+    page["items"][0]["timings_ms"]["first_body"] = 1
+    assert store.list_records()["items"][0]["timings_ms"] == {"first_body": 42000}
+    assert "SYNTHETIC_SECRET" not in json.dumps(store.list_records())
+
+
+async def test_gateway_times_first_bytes_before_complete_thought_and_body(diagnostic_store, monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(diagnostics.time, "monotonic", lambda: now[0])
+    raw = wire(chunk(part("private thought", thought=True)),
+               chunk(part("private body")), chunk(finish=1))
+    split = raw.index("private body")
+
+    async def transport(**kwargs):
+        now[0] = 101.0
+        yield "status", 200
+        now[0] = 102.0
+        yield "chunk", raw[:2].encode()
+        now[0] = 103.0
+        yield "chunk", raw[2:split].encode()
+        now[0] = 142.0
+        yield "chunk", raw[split:].encode()
+
+    gateway = StreamingGateway(SimpleNamespace(send_streaming_request=transport))
+    with trace(stream=True) as context:
+        context.response_diagnostics.started = 100.0
+        diagnostics.begin_upstream_call()
+        events = [event async for event in gateway.stream_chat(
+            captured=CapturedRequest(url="https://synthetic.invalid", headers={}, body="[]"),
+            model="gemini-4-argon",
+        )]
+        diagnostics.finish_response_diagnostics("success", 200)
+    assert [p.text for kind, parts in events if kind == "parts" for p in parts] == ["private thought", "private body"]
+    item = diagnostic_store.list_records()["items"][0]
+    assert item["timings_ms"] == {"upstream_started": 0, "upstream_headers": 1000,
+                                 "upstream_first_byte": 2000, "first_thought": 3000,
+                                 "first_body": 42000}
+
+
+async def test_middleware_timing_ignores_heartbeats_and_records_successful_data_send(diagnostic_store, monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(diagnostics.time, "monotonic", lambda: now[0])
+    sent = []
+
+    async def app(scope, receive, send):
+        diagnostics.configure_generation(model="gemini-4-argon", auto_continue=False)
+        errors.get_request_context().response_diagnostics.started = 100.0
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        now[0] = 115.0
+        await send({"type": "http.response.body", "body": b"\n\n", "more_body": True})
+        now[0] = 142.0
+        await send({"type": "http.response.body", "body": b"data: {}\n\n", "more_body": True})
+        now[0] = 145.0
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    async def send(message):
+        sent.append(message)
+        if message.get("body", b"").startswith(b"data:"):
+            now[0] += 0.5  # ASGI backpressure counts until send actually completes.
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    await ErrorRecordsMiddleware(app)({"type": "http", "method": "POST", "state": {},
+        "path": "/v1beta/models/gemini-4-argon:streamGenerateContent"}, receive, send)
+    item = diagnostic_store.list_records()["items"][0]
+    assert item["timings_ms"] == {"response_started": 0, "first_data_sent": 42500}
+    assert sent[1]["body"] == b"\n\n" and sent[2]["body"] == b"data: {}\n\n"
 
 
 @pytest.mark.parametrize("failure", [None, "failed", "cancelled", "disconnect"])

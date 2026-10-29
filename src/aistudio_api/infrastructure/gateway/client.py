@@ -33,7 +33,10 @@ from aistudio_api.infrastructure.gateway.wire_parser import (
 )
 from aistudio_api.infrastructure.gateway.wire_types import AistudioContent
 from aistudio_api.infrastructure.utils.logger import get_logger
-from aistudio_api.infrastructure.utils.response_diagnostics import begin_upstream_call
+from aistudio_api.infrastructure.utils.response_diagnostics import (
+    begin_upstream_call,
+    note_timing,
+)
 
 logger = get_logger("client")
 
@@ -185,6 +188,7 @@ class AIStudioClient:
         force_refresh_capture: bool = False,
     ):
         async with self._session.request_scope():
+            note_timing("session_ready")
             captured = await self.capture_request(
                 prompt=capture_prompt,
                 model=model,
@@ -230,7 +234,8 @@ class AIStudioClient:
         sanitize_plain_text: bool = True,
     ) -> ModelOutput:
         async with self._session.request_scope():
-            logger.info("拦截请求: %r", f"{capture_prompt[:20]}...")
+            note_timing("session_ready")
+            logger.info("准备文本生成请求")
             captured = await self.capture_request(
                 prompt=capture_prompt,
                 model=model,

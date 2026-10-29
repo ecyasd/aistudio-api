@@ -7,6 +7,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import HTTPException
 
+from aistudio_api.infrastructure.utils.response_diagnostics import note_timing
+
 
 class InferenceLimiter:
     def __init__(self, concurrency: int = 2, max_waiting: int = 4, wait_seconds: float = 10):
@@ -41,6 +43,7 @@ class InferenceLimiter:
                 self.waiting -= 1
         self.active += 1
         try:
+            note_timing("admitted")
             yield
         finally:
             self.active -= 1

@@ -25,6 +25,7 @@ from aistudio_api.infrastructure.gateway.wire_parser import (
     parse_response_chunk,
 )
 from aistudio_api.infrastructure.utils.logger import get_logger
+from aistudio_api.infrastructure.utils.response_diagnostics import note_timing
 
 logger = get_logger("streaming")
 MAX_ERROR_BODY_CHARS = 8192
@@ -114,8 +115,10 @@ class StreamingGateway:
         ) as events:
             async for event_type, payload in events:
                 if event_type == "status" and payload and not status_code:
+                    note_timing("upstream_headers")
                     status_code = int(str(payload))
                 elif event_type == "chunk" and payload:
+                    note_timing("upstream_first_byte")
                     if isinstance(payload, bytes):
                         try:
                             text_payload = decoder.decode(payload)

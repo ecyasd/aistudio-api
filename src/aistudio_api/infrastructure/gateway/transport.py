@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from aistudio_api.infrastructure.browser.cdp_client import CDPPage
 
 from aistudio_api.infrastructure.utils.logger import get_logger
+from aistudio_api.infrastructure.utils.response_diagnostics import note_timing
 
 logger = get_logger("transport")
 
@@ -333,6 +334,7 @@ class XHRStreamTransport:
 
         try:
             async with asyncio.timeout_at(deadline):
+                note_timing("transport_dispatched")
                 await page.evaluate(
                     STREAMING_INIT_JS,
                     init_args,

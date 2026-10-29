@@ -20,6 +20,7 @@ from aistudio_api.infrastructure.utils.error_records import (
 from aistudio_api.infrastructure.utils.response_diagnostics import (
     finish_response_diagnostics,
     initialize_response_diagnostics,
+    note_timing,
 )
 
 
@@ -112,6 +113,12 @@ class ErrorRecordsMiddleware:
             except OSError:
                 disconnected = True
                 raise
+            if message["type"] == "http.response.start":
+                note_timing("response_started")
+            elif message["type"] == "http.response.body" and message.get("body", b"").startswith(b"data:"):
+                # Empty heartbeat separators do not mean the model emitted a
+                # token. Measure successful ASGI sends, including backpressure.
+                note_timing("first_data_sent")
             if message["type"] == "http.response.body" and not message.get("more_body", False):
                 completed = True
 

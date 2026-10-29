@@ -10,6 +10,7 @@ from aistudio_api.infrastructure.gateway.session import BrowserSession
 from aistudio_api.infrastructure.gateway.wire_codec import modify_body
 from aistudio_api.infrastructure.gateway.wire_types import AistudioContent
 from aistudio_api.infrastructure.utils.logger import get_logger
+from aistudio_api.infrastructure.utils.response_diagnostics import note_timing
 
 logger = get_logger("capture")
 
@@ -56,9 +57,11 @@ class RequestCaptureService:
         sanitize_plain_text: bool = True,
         force_refresh: bool = False,
     ) -> CapturedRequest | None:
+        note_timing("capture_started")
         if force_refresh:
             self._templates.pop(model, None)
         template = await self._ensure_template(model)
+        note_timing("template_ready")
         rewritten_contents = contents
         snapshot_contents = rewritten_contents or [
             AistudioContent.from_user_prompt(prompt=prompt, images=images)
@@ -66,6 +69,7 @@ class RequestCaptureService:
 
         # 签名是一次性的票据（根据请求内容穿进 snapshot 计算），每次请求实时生成，不可复用缓存
         snapshot = await self._session.generate_snapshot(snapshot_contents)
+        note_timing("snapshot_ready")
 
         body = modify_body(
             template.body,
