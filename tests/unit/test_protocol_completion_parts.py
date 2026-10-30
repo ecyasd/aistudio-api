@@ -12,7 +12,10 @@ import pytest
 from aistudio_api.api import gemini as api
 from aistudio_api.api.responses import to_gemini_parts, to_gemini_usage_metadata
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
-from aistudio_api.application import generation as generation_execution
+from aistudio_api.application import (
+    generation as generation_execution,
+    generation_recovery as recovery,
+)
 from aistudio_api.domain.errors import RequestError
 from aistudio_api.infrastructure.gateway.capture import CapturedRequest
 from aistudio_api.infrastructure.gateway.stream_parser import (
@@ -72,16 +75,16 @@ def client_env(monkeypatch):
 
     account = SimpleNamespace(id="synthetic-account")
     monkeypatch.setattr(generation_execution, "ensure_active_account", AsyncMock())
-    monkeypatch.setattr(api, "record_rotator_event", MagicMock())
-    monkeypatch.setattr(generation_execution, "record_rotator_event", api.record_rotator_event)
-    monkeypatch.setattr(api.runtime_state, "record", MagicMock())
+    monkeypatch.setattr(recovery, "record_rotator_event", MagicMock())
+    monkeypatch.setattr(generation_execution, "record_rotator_event", recovery.record_rotator_event)
+    monkeypatch.setattr(recovery.runtime_state, "record", MagicMock())
     monkeypatch.setattr(
-        api.runtime_state,
+        recovery.runtime_state,
         "rotator",
         SimpleNamespace(get_account_stats=lambda _: None),
     )
     monkeypatch.setattr(
-        api.runtime_state,
+        recovery.runtime_state,
         "account_service",
         SimpleNamespace(
             list_accounts=lambda: [account],
@@ -328,7 +331,7 @@ async def test_parts_keep_original_order_and_own_signatures(client_env, stream):
             for p in response.candidates[0].content.parts
         ]
     assert actual == expected
-    assert api.runtime_state.record.call_args.args[1] == "success"
+    assert recovery.runtime_state.record.call_args.args[1] == "success"
 
 
 async def test_partial_output_then_truncation_is_in_band_error_without_success(
@@ -351,7 +354,7 @@ async def test_partial_output_then_truncation_is_in_band_error_without_success(
         for c in p.get("candidates", [])
     )
     assert all(
-        call.args[1] != "success" for call in api.runtime_state.record.call_args_list
+        call.args[1] != "success" for call in recovery.runtime_state.record.call_args_list
     )
 
 

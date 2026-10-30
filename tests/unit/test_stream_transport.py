@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from aistudio_api.application import generation_recovery as recovery
+from aistudio_api.application.generation_errors import GenerationFailure
 from aistudio_api.domain.errors import BrowserTransportError
 from aistudio_api.infrastructure.browser.cdp_client import CDPConnection, CDPPage
 from aistudio_api.infrastructure.browser.scripts import (
@@ -39,9 +41,7 @@ def make_synthetic_page():
 async def test_native_stream_recovery_failures_terminate_without_replay(
     monkeypatch, stage, after_body
 ):
-    from fastapi import HTTPException
 
-    from aistudio_api.api import gemini
     from aistudio_api.infrastructure.gateway import transport as module
 
     monkeypatch.setattr(module, "STREAM_PROBE_INTERVAL_S", 0.005)
@@ -84,13 +84,13 @@ async def test_native_stream_recovery_failures_terminate_without_replay(
         await anext(stream)
     client = MagicMock()
     switch = AsyncMock(return_value=True)
-    monkeypatch.setattr(gemini, "try_switch_account", switch)
-    with pytest.raises(HTTPException) as terminal:
-        await gemini._handle_attempt_exception(
+    monkeypatch.setattr(recovery, "try_switch_account", switch)
+    with pytest.raises(GenerationFailure) as terminal:
+        await recovery._handle_attempt_exception(
             caught.value, attempt=0, model_path="gemini-test", normalized_model="gemini-test",
             client=client, has_yielded_data=after_body,
         )
-    assert terminal.value.status_code == 503
+    assert terminal.value.description.status == 503
     switch.assert_not_awaited()
     assert len(dispatched) == 1
     assert transport.in_flight_count == 0 and transport._buffered_bytes == 0
@@ -99,9 +99,7 @@ async def test_native_stream_recovery_failures_terminate_without_replay(
 
 @pytest.mark.parametrize("failure_stage", ["status_ack", "done_ack", "page_closed"])
 async def test_native_stream_delivery_failure_terminates_without_replay(monkeypatch, failure_stage):
-    from fastapi import HTTPException
 
-    from aistudio_api.api import gemini
 
     page, listeners = make_synthetic_page()
     dispatched = []
@@ -138,23 +136,21 @@ async def test_native_stream_delivery_failure_terminates_without_replay(monkeypa
     assert any(call.args[0] == STREAM_CLEANUP_JS for call in page.evaluate.await_args_list)
 
     switch = AsyncMock(return_value=True)
-    monkeypatch.setattr(gemini, "try_switch_account", switch)
+    monkeypatch.setattr(recovery, "try_switch_account", switch)
     # A response can complete without emitting a client-visible Part. Neither
     # its ACK failure nor a closed page permits replaying that generation.
-    with pytest.raises(HTTPException) as terminal:
-        await gemini._handle_attempt_exception(
+    with pytest.raises(GenerationFailure) as terminal:
+        await recovery._handle_attempt_exception(
             caught.value, attempt=0, model_path="gemini-test", normalized_model="gemini-test",
             client=MagicMock(), has_yielded_data=False,
         )
-    assert terminal.value.status_code == 503
+    assert terminal.value.description.status == 503
     switch.assert_not_awaited()
     assert isinstance(caught.value, BrowserTransportError)
 
 
 async def test_native_nonstream_browser_timeout_keeps_504_and_never_switches(monkeypatch):
-    from fastapi import HTTPException
 
-    from aistudio_api.api import gemini
 
     page, _ = make_synthetic_page()
     page.evaluate = AsyncMock(return_value={"status": 0, "body": "timeout"})
@@ -164,13 +160,13 @@ async def test_native_nonstream_browser_timeout_keeps_504_and_never_switches(mon
             page, url="https://synthetic.invalid", headers={}, body="[]", timeout_ms=500
         )
     switch = AsyncMock(return_value=True)
-    monkeypatch.setattr(gemini, "try_switch_account", switch)
-    with pytest.raises(HTTPException) as terminal:
-        await gemini._handle_attempt_exception(
+    monkeypatch.setattr(recovery, "try_switch_account", switch)
+    with pytest.raises(GenerationFailure) as terminal:
+        await recovery._handle_attempt_exception(
             caught.value, attempt=0, model_path="gemini-test", normalized_model="gemini-test",
             client=MagicMock(),
         )
-    assert terminal.value.status_code == 504
+    assert terminal.value.description.status == 504
     switch.assert_not_awaited()
     assert sum(call.args[0] == HOOKED_REQUEST_JS for call in page.evaluate.await_args_list) == 1
     assert any(call.args[0] == HOOKED_CLEANUP_JS for call in page.evaluate.await_args_list)
@@ -485,7 +481,7 @@ async def test_nonstream_read_failure_is_not_a_successful_empty_body():
     page.evaluate = AsyncMock(
         return_value={"status": 0, "body": "response read failed"}
     )
-    with pytest.raises(RuntimeError, match="response read failed"):
+    with pytest.raises(BrowserTransportError, match="Browser response delivery failed"):
         await XHRStreamTransport().send_hooked_request(
             page,
             url="https://synthetic.invalid",

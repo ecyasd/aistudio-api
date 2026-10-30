@@ -14,10 +14,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from aistudio_api.api.gemini import (
-    classify_gemini_error_payload,
-    gemini_error_type,
-)
+from aistudio_api.api.gemini_errors import project_gemini_error
+from aistudio_api.application.generation_errors import GenerationFailure
 from aistudio_api.application.runtime import runtime_state
 from aistudio_api.infrastructure.gateway.client import AIStudioClient
 from aistudio_api.infrastructure.gateway.model_defaults import (
@@ -136,10 +134,12 @@ app.include_router(gemini_router, dependencies=[Depends(require_api_key)])
 app.include_router(models_router, dependencies=[Depends(require_api_key)])
 
 
+@app.exception_handler(GenerationFailure)
 @app.exception_handler(HTTPException)
-async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONResponse:
-    code, msg, status_str = classify_gemini_error_payload(exc)
-    error_type = gemini_error_type(exc)
+async def http_exception_handler(_request: Request, exc: HTTPException | GenerationFailure) -> JSONResponse:
+    projected = project_gemini_error(exc)
+    code, msg, status_str = projected.status_code, projected.message, projected.status
+    error_type = projected.error_type
     record_http_failure(exc, code)
     return JSONResponse(
         status_code=code,
@@ -151,7 +151,7 @@ async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONR
                 **({"type": error_type} if error_type else {}),
             }
         },
-        headers=getattr(exc, "headers", None),
+        headers=projected.headers,
     )
 
 

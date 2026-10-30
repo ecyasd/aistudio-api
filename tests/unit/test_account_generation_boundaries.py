@@ -9,11 +9,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 
 from aistudio_api.api import routes_accounts
 from aistudio_api.api.dependencies import get_account_service, get_runtime_state
-from aistudio_api.api.gemini import handle_attempt_exception
 from aistudio_api.application import account_orchestrator
 from aistudio_api.application.account_orchestrator import (
     ensure_active_account,
@@ -22,6 +21,10 @@ from aistudio_api.application.account_orchestrator import (
 )
 from aistudio_api.application.account_rotator import AccountRotator
 from aistudio_api.application.account_service import AccountService
+from aistudio_api.application.generation_errors import GenerationFailure
+from aistudio_api.application.generation_recovery import (
+    _recover_failure as handle_attempt_exception,
+)
 from aistudio_api.application.runtime import RuntimeState, runtime_state
 from aistudio_api.domain.errors import AuthError, SessionExpiredError
 from aistudio_api.infrastructure.account.account_store import (
@@ -153,9 +156,9 @@ async def test_old_session_expiration_does_not_quarantine_new_import(accounts, m
         "request_auth_generation": old_generation, "has_yielded_data": has_yielded_data,
     }
     if has_yielded_data:
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(GenerationFailure) as exc:
             await handle_attempt_exception(SessionExpiredError("synthetic expired"), **kwargs)
-        assert exc.value.status_code == 503
+        assert exc.value.description.status == 503
     else:
         assert await handle_attempt_exception(SessionExpiredError("synthetic expired"), **kwargs)
     assert accounts.rotator.is_account_available(accounts.account.id, model="gemini-test")

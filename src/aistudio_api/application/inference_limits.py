@@ -5,8 +5,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import HTTPException
-
+from aistudio_api.application.generation_errors import GenerationFailure
 from aistudio_api.infrastructure.utils.response_diagnostics import note_timing
 
 
@@ -19,10 +18,11 @@ class InferenceLimiter:
         self.active = 0
 
     @staticmethod
-    def _busy() -> HTTPException:
-        return HTTPException(
-            503, detail={"message": "Inference capacity is busy. Please retry shortly.", "type": "service_busy"},
-            headers={"Retry-After": "2"},
+    def _busy() -> GenerationFailure:
+        return GenerationFailure(
+            503, reason="service_busy",
+            message="Inference capacity is busy. Please retry shortly.",
+            retry_after_seconds=2,
         )
 
     @asynccontextmanager

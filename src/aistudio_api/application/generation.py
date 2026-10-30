@@ -22,6 +22,8 @@ from aistudio_api.application.account_orchestrator import (
     record_rotator_event,
 )
 from aistudio_api.application.chat_service import NormalizedGeminiRequest
+from aistudio_api.application.generation_errors import GenerationFailure
+from aistudio_api.application.generation_recovery import RetryAttempt, recover_attempt
 from aistudio_api.application.inference_limits import inference_limiter
 from aistudio_api.application.runtime import runtime_state
 from aistudio_api.config import settings
@@ -116,12 +118,10 @@ class GenerationRun:
         request: NormalizedGeminiRequest,
         *,
         auto_continue: bool,
-        recover: Callable[[AttemptFailure], Awaitable[bool]],
     ) -> None:
         self.client = client
         self.request = request
         self.auto_continue = auto_continue
-        self.recover = recover
         self.identity = AttemptIdentity()
         self.admitted = False
         self._started = False
@@ -192,10 +192,15 @@ class GenerationRun:
                         exc, number, self.request.model, attempt.identity,
                         attempt.published or committed_round,
                     )
-                    retry = await self._wait(self.recover(failure))
-                    if retry and not failure.replay_forbidden:
-                        continue
-                    raise exc
+                    decision = await self._wait(recover_attempt(self.client, failure))
+                    if isinstance(decision, RetryAttempt):
+                        if not failure.replay_forbidden and number < MAX_RETRIES - 1:
+                            continue
+                        raise GenerationFailure(
+                            500, reason="server_error", message="Internal server error",
+                            original_error=exc,
+                        ) from exc
+                    raise decision.failure from decision.failure.original_error
             raise quota_unavailable_error(self.request.model) from last_error
 
     async def generate(self) -> ModelOutput:

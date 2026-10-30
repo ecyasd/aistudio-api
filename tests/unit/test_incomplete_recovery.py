@@ -13,7 +13,10 @@ from fastapi import HTTPException
 
 from aistudio_api.api import gemini as api
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
-from aistudio_api.application import generation as generation_execution
+from aistudio_api.application import (
+    generation as generation_execution,
+    generation_recovery as recovery,
+)
 from aistudio_api.domain.errors import (
     BrowserTransportError,
     IncompleteResponseError,
@@ -67,14 +70,15 @@ def recovery_env(monkeypatch):
         stream_generate_content=MagicMock(),
     )
     monkeypatch.setattr(generation_execution, "ensure_active_account", AsyncMock())
-    monkeypatch.setattr(api, "try_switch_account", AsyncMock(return_value=False))
-    monkeypatch.setattr(api, "record_rotator_event", MagicMock())
-    monkeypatch.setattr(generation_execution, "record_rotator_event", api.record_rotator_event)
+    monkeypatch.setattr(recovery, "try_switch_account", AsyncMock(return_value=False))
+    monkeypatch.setattr(recovery, "record_rotator_event", MagicMock())
+    monkeypatch.setattr(generation_execution, "record_rotator_event", recovery.record_rotator_event)
     monkeypatch.setattr(api, "record_failure", MagicMock())
+    monkeypatch.setattr(recovery, "record_failure", api.record_failure)
     monkeypatch.setattr(api, "has_final_failure", lambda: False)
-    monkeypatch.setattr(api.runtime_state, "record", MagicMock())
+    monkeypatch.setattr(recovery.runtime_state, "record", MagicMock())
     monkeypatch.setattr(
-        api.runtime_state, "account_service",
+        recovery.runtime_state, "account_service",
         SimpleNamespace(
             list_accounts=lambda: [account],
             get_active_account=lambda: account,
@@ -82,7 +86,7 @@ def recovery_env(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        api.runtime_state, "rotator",
+        recovery.runtime_state, "rotator",
         SimpleNamespace(get_account_stats=lambda _: None),
     )
     request = GeminiGenerateContentRequest.model_validate(
@@ -151,7 +155,7 @@ async def _request(env, *, stream):
 async def test_transport_exhaustion_does_not_rotate_or_resend_generation(recovery_env, stream, failure, code):
     env = recovery_env
     _install_responses(env, [failure, _response(_part(text="should not be requested"), finish=1)])
-    api.try_switch_account.return_value = True
+    recovery.try_switch_account.return_value = True
     if stream:
         result = await _request(env, stream=True)
         assert result[-1]["error"]["code"] == code
@@ -161,8 +165,8 @@ async def test_transport_exhaustion_does_not_rotate_or_resend_generation(recover
         assert caught.value.status_code == code
     assert env.calls == [42], "one bounded original transport, no blind model resubmission"
     assert not env.leases
-    api.try_switch_account.assert_not_awaited()
-    assert not api.record_rotator_event.called
+    recovery.try_switch_account.assert_not_awaited()
+    assert not recovery.record_rotator_event.called
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -190,11 +194,11 @@ async def test_unpublished_incomplete_response_retries_once_on_same_account(
     assert env.closed == [42, 42]
     assert not env.leases
     env.client.clear_templates.assert_called_once_with()
-    api.try_switch_account.assert_not_awaited()
-    api.record_rotator_event.assert_called_once_with(
+    recovery.try_switch_account.assert_not_awaited()
+    recovery.record_rotator_event.assert_called_once_with(
         "success", model="models/gemini-test", account_id="recovery-account"
     )
-    assert api.runtime_state.record.call_args.args[1] == "success"
+    assert recovery.runtime_state.record.call_args.args[1] == "success"
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -215,9 +219,9 @@ async def test_repeated_incomplete_response_stops_after_one_retry(recovery_env, 
     assert env.calls == [42, 42]
     assert env.closed == [42, 42]
     assert not env.leases
-    api.try_switch_account.assert_not_awaited()
-    api.record_rotator_event.assert_not_called()
-    api.runtime_state.record.assert_not_called()
+    recovery.try_switch_account.assert_not_awaited()
+    recovery.record_rotator_event.assert_not_called()
+    recovery.runtime_state.record.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -254,9 +258,9 @@ async def test_incomplete_response_after_visible_part_is_never_replayed(
     assert upstream_closed == [0]
     assert not env.leases
     env.client.clear_templates.assert_not_called()
-    api.try_switch_account.assert_not_awaited()
-    api.record_rotator_event.assert_not_called()
-    api.runtime_state.record.assert_not_called()
+    recovery.try_switch_account.assert_not_awaited()
+    recovery.record_rotator_event.assert_not_called()
+    recovery.runtime_state.record.assert_not_called()
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -274,8 +278,8 @@ async def test_malformed_response_does_not_retry(recovery_env, stream):
     assert env.closed == [42]
     assert not env.leases
     env.client.clear_templates.assert_not_called()
-    api.try_switch_account.assert_not_awaited()
-    api.runtime_state.record.assert_not_called()
+    recovery.try_switch_account.assert_not_awaited()
+    recovery.runtime_state.record.assert_not_called()
 
 
 async def test_buffer_limit_is_not_an_incomplete_response(recovery_env, monkeypatch):
@@ -289,7 +293,7 @@ async def test_buffer_limit_is_not_an_incomplete_response(recovery_env, monkeypa
     assert env.calls == [42]
     assert not env.leases
     env.client.clear_templates.assert_not_called()
-    api.try_switch_account.assert_not_awaited()
+    recovery.try_switch_account.assert_not_awaited()
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -302,8 +306,8 @@ async def test_cancelled_response_releases_lease_without_retry(recovery_env, str
     assert env.closed == [42]
     assert not env.leases
     env.client.clear_templates.assert_not_called()
-    api.try_switch_account.assert_not_awaited()
-    api.runtime_state.record.assert_not_called()
+    recovery.try_switch_account.assert_not_awaited()
+    recovery.runtime_state.record.assert_not_called()
 
 
 @pytest.mark.parametrize("finish", [2, 3, 4])
@@ -316,7 +320,7 @@ async def test_completed_nonstop_response_does_not_trigger_recovery(recovery_env
     }[finish]
     assert env.calls == [42]
     env.client.clear_templates.assert_not_called()
-    api.try_switch_account.assert_not_awaited()
+    recovery.try_switch_account.assert_not_awaited()
 
 
 def test_parser_only_classifies_unfinished_eof_as_incomplete():
@@ -408,4 +412,4 @@ async def test_valid_unfinished_scalar_tail_recovers_before_output(
     assert env.calls == [42, 42]
     assert env.closed == [42, 42]
     assert not env.leases
-    api.try_switch_account.assert_not_awaited()
+    recovery.try_switch_account.assert_not_awaited()

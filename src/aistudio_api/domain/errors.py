@@ -14,7 +14,7 @@ class AuthError(AistudioError):
 
 
 class BrowserTransportError(AistudioError):
-    """The browser could not safely deliver the original streaming request."""
+    """The browser could not safely deliver the original generation request."""
 
 
 class SessionExpiredError(AuthError):

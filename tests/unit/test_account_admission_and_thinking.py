@@ -23,6 +23,7 @@ from aistudio_api.application.account_rotator import (
     get_pacific_date_key,
 )
 from aistudio_api.application.chat_service import normalize_gemini_request
+from aistudio_api.application.generation_errors import GenerationFailure
 from aistudio_api.application.runtime import runtime_state
 from aistudio_api.config import settings
 
@@ -112,9 +113,9 @@ async def test_unavailable_accounts_rejected_before_browser_or_inference(
 @pytest.mark.parametrize("attempt", [0, 2])
 async def test_retry_admission_also_rejects_newly_quarantined_account(account_env, attempt):
     account_env.stats.record_session_expired(MODEL)
-    with pytest.raises(HTTPException) as caught:
+    with pytest.raises(GenerationFailure) as caught:
         await orchestrator.ensure_active_account(attempt, MODEL)
-    assert caught.value.status_code == 503
+    assert caught.value.description.status == 503
     account_env.session.transition_to_account.assert_not_awaited()
 
 
@@ -157,9 +158,9 @@ async def test_model_quarantine_during_browser_preparation_fails_closed(account_
         env.stats.record_rate_limited(MODEL)
 
     env.session.transition_to_account.side_effect = quarantine
-    with pytest.raises(HTTPException) as caught:
+    with pytest.raises(GenerationFailure) as caught:
         await orchestrator.ensure_active_account(0, MODEL)
-    assert caught.value.status_code == 429
+    assert caught.value.description.status == 429
     assert not env.stats.is_available(MODEL)
 
 

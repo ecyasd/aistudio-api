@@ -3,17 +3,44 @@ from types import SimpleNamespace
 
 import pytest
 
-from aistudio_api.api.gemini import classify_gemini_error_payload
+from aistudio_api.api.gemini_errors import classify_gemini_error_payload
 from aistudio_api.api.responses import (
     to_gemini_parts,
     to_gemini_usage_metadata,
 )
+from aistudio_api.application.generation_errors import GenerationFailure
 from aistudio_api.domain.errors import (
     AuthError,
     RequestError,
     SessionExpiredError,
     UsageLimitExceeded,
 )
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("reason,status,retry_after,error_type", [
+    ("rate_limit_exceeded", 429, 17, None),
+    ("upstream_auth_expired", 503, None, "upstream_auth_expired"),
+])
+def test_application_failure_projection_preserves_preparation_and_public_fields(
+    wrapped, reason, status, retry_after, error_type,
+):
+    from aistudio_api.api.gemini_errors import project_gemini_error
+    from aistudio_api.application.account_orchestrator import AccountPreparationError
+    from aistudio_api.application.generation_errors import GenerationFailure
+
+    failure = GenerationFailure(
+        status, reason=reason, message="safe public message",
+        retry_after_seconds=retry_after,
+        original_error=RuntimeError("synthetic-private-detail"),
+    )
+    error = AccountPreparationError("synthetic-account", failure) if wrapped else failure
+    projected = project_gemini_error(error)
+    assert projected.status_code == status
+    assert projected.message == "safe public message"
+    assert projected.error_type == error_type
+    assert projected.headers == ({"Retry-After": "17"} if retry_after else None)
+    assert "synthetic-private-detail" not in repr(projected)
 
 
 @asynccontextmanager
@@ -120,7 +147,7 @@ def test_classify_gemini_error_payload():
 
 
 def test_clean_upstream_error_message():
-    from aistudio_api.api.gemini import clean_upstream_error_message
+    from aistudio_api.application.generation_errors import clean_upstream_error_message
 
     assert clean_upstream_error_message("") == ""
     assert clean_upstream_error_message("Normal plain error") == "Normal plain error"
@@ -140,9 +167,9 @@ def test_clean_upstream_error_message():
 async def test_handle_attempt_exception_retries_ambiguous_rpc_404_in_place():
     from unittest.mock import MagicMock
 
-    from fastapi import HTTPException
-
-    from aistudio_api.api.gemini import handle_attempt_exception
+    from aistudio_api.application.generation_recovery import (
+        _recover_failure as handle_attempt_exception,
+    )
     from aistudio_api.infrastructure.gateway.client import AIStudioClient
 
     mock_client = MagicMock(spec=AIStudioClient)
@@ -166,7 +193,7 @@ async def test_handle_attempt_exception_retries_ambiguous_rpc_404_in_place():
 
     # 2. Other legitimate 404 errors (e.g. model not found) MUST NOT be retried
     other_404 = RequestError(404, "Model 'models/nonexistent' not found.")
-    with pytest.raises(HTTPException) as exc_info:
+    with pytest.raises(GenerationFailure) as exc_info:
         await handle_attempt_exception(
             other_404,
             attempt=0,
@@ -175,10 +202,10 @@ async def test_handle_attempt_exception_retries_ambiguous_rpc_404_in_place():
             client=mock_client,
             has_yielded_data=False,
         )
-    assert exc_info.value.status_code == 404
+    assert exc_info.value.description.status == 404
 
     # 3. If data has already been yielded to the client, retry MUST NOT happen
-    with pytest.raises(HTTPException):
+    with pytest.raises(GenerationFailure):
         await handle_attempt_exception(
             ambiguous_err,
             attempt=0,

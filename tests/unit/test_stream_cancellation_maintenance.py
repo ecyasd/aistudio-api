@@ -6,7 +6,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 from aistudio_api.api import gemini as service
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
-from aistudio_api.application import generation as generation_execution
+from aistudio_api.application import (
+    generation as generation_execution,
+    generation_recovery as recovery,
+)
 from aistudio_api.application.inference_limits import InferenceLimiter
 from aistudio_api.infrastructure.browser.cdp_client import CDPPage
 from aistudio_api.infrastructure.browser.scripts import (
@@ -50,9 +53,9 @@ async def test_real_stream_chain_cancel_skips_fifth_dom_cleanup_and_admits_rerol
     limiter = InferenceLimiter()
     monkeypatch.setattr(generation_execution, "inference_limiter", limiter)
     monkeypatch.setattr(generation_execution, "ensure_active_account", AsyncMock())
-    monkeypatch.setattr(service, "record_rotator_event", MagicMock())
-    monkeypatch.setattr(generation_execution, "record_rotator_event", service.record_rotator_event)
-    monkeypatch.setattr(service.runtime_state, "record", MagicMock())
+    monkeypatch.setattr(recovery, "record_rotator_event", MagicMock())
+    monkeypatch.setattr(generation_execution, "record_rotator_event", recovery.record_rotator_event)
+    monkeypatch.setattr(recovery.runtime_state, "record", MagicMock())
     req = GeminiGenerateContentRequest.model_validate({"contents": [{"parts": [{"text": "synthetic"}]}]})
 
     async def receive():

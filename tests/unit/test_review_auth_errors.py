@@ -8,8 +8,12 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import HTTPException
 
-from aistudio_api.api import gemini as service
-from aistudio_api.application import generation as generation_execution
+from aistudio_api.api import gemini as service, gemini_errors
+from aistudio_api.application import (
+    generation as generation_execution,
+    generation_recovery as recovery,
+)
+from aistudio_api.application.generation_errors import GenerationFailure
 from aistudio_api.domain.errors import AuthError, SessionExpiredError
 from aistudio_api.infrastructure.utils.common import atomic_write_json
 
@@ -19,15 +23,15 @@ from aistudio_api.infrastructure.utils.common import atomic_write_json
     (AuthError("synthetic-upstream-secret"), "upstream_auth_failed"),
 ])
 async def test_upstream_auth_is_503_for_http_and_sse(monkeypatch, caplog, error, category):
-    monkeypatch.setattr(service, "record_rotator_event", MagicMock())
-    monkeypatch.setattr(generation_execution, "record_rotator_event", service.record_rotator_event)
-    with pytest.raises(HTTPException) as caught:
-        await service._handle_attempt_exception(
+    monkeypatch.setattr(recovery, "record_rotator_event", MagicMock())
+    monkeypatch.setattr(generation_execution, "record_rotator_event", recovery.record_rotator_event)
+    with pytest.raises(GenerationFailure) as caught:
+        await recovery._handle_attempt_exception(
             error, attempt=0, model_path="models/test", normalized_model="test",
             client=SimpleNamespace(clear_templates=MagicMock()), allow_retry=False,
         )
-    assert caught.value.status_code == 503
-    assert caught.value.detail["type"] == category
+    assert caught.value.description.status == 503
+    assert caught.value.description.reason.value == category
     payload = json.loads(service.format_sse_error(caught.value)[6:])["error"]
     assert payload["code"] == 503 and payload["status"] == "UNAVAILABLE"
     assert payload["type"] == category
@@ -38,8 +42,8 @@ async def test_upstream_auth_is_503_for_http_and_sse(monkeypatch, caplog, error,
 
 def test_caller_auth_error_stays_401():
     error = HTTPException(401, detail={"message": "Invalid API key"})
-    assert service.classify_gemini_error_payload(error)[0] == 401
-    assert service.gemini_error_type(error) is None
+    assert gemini_errors.classify_gemini_error_payload(error)[0] == 401
+    assert gemini_errors.gemini_error_type(error) is None
 
 
 def test_atomic_json_is_private_even_with_permissive_umask(tmp_path):

@@ -18,6 +18,7 @@ from aistudio_api.application import (
     chat_service,
     continuation,
     generation as generation_execution,
+    generation_recovery as recovery,
 )
 from aistudio_api.infrastructure.gateway.model_defaults import ModelDefaults
 from aistudio_api.infrastructure.gateway.wire_parser import parse_text_output
@@ -134,9 +135,9 @@ def sequence_env(monkeypatch):
     monkeypatch.setattr(generation_execution, "ensure_active_account", AsyncMock())
     monkeypatch.setattr(api, "validate_account_availability", MagicMock())
     monkeypatch.setattr(generation_execution, "account_id_for_auth_file", lambda _: "synthetic-account")
-    monkeypatch.setattr(api, "record_rotator_event", MagicMock())
-    monkeypatch.setattr(generation_execution, "record_rotator_event", api.record_rotator_event)
-    monkeypatch.setattr(api.runtime_state, "record", MagicMock())
+    monkeypatch.setattr(recovery, "record_rotator_event", MagicMock())
+    monkeypatch.setattr(generation_execution, "record_rotator_event", recovery.record_rotator_event)
+    monkeypatch.setattr(recovery.runtime_state, "record", MagicMock())
     monkeypatch.setattr(chat_service, "resolve_model_defaults", lambda _: ModelDefaults())
     monkeypatch.setattr(continuation, "resolve_model_defaults", lambda _: ModelDefaults())
 

@@ -249,7 +249,10 @@ class XHRStreamTransport:
                     await page.cdp.send("Runtime.addBinding", {"name": STREAM_RECOVERY_BINDING})
                 repaired = True
                 if not queue.empty():
-                    return queue.get_nowait(), True
+                    # The original push arrived during registration. No event
+                    # was resent and the browser still uses its old binding;
+                    # preserve the one resend for a later lost push.
+                    return queue.get_nowait(), False
                 if type(seq) is not int or seq < 0:
                     raise BrowserTransportError("CDP stream event delivery stalled")
                 if raw_phase == "awaiting_ack" and seq <= self._received_seq.get(rid, 0):
@@ -339,6 +342,13 @@ class XHRStreamTransport:
             if len(raw_body) > MAX_RESPONSE_BYTES:
                 raise RuntimeError("replay failed: response size limit exceeded")
             return status, raw_body
+        except TimeoutError:
+            raise
+        except Exception as exc:
+            # Evaluation may have dispatched fetch before the CDP connection
+            # failed. As with streaming delivery, losing its result does not
+            # permit account recovery to repeat the original generation.
+            raise BrowserTransportError("Browser response delivery failed") from exc
         finally:
             with CancelScope(shield=True):
                 await asyncio.shield(self._schedule_cleanup(page, HOOKED_CLEANUP_JS, rid))

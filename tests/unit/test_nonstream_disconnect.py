@@ -12,11 +12,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from aistudio_api.api import gemini as service
 from aistudio_api.api.dependencies import get_client, require_api_key
 from aistudio_api.api.error_middleware import ErrorRecordsMiddleware
 from aistudio_api.api.nonstream_disconnect import NonStreamingDisconnectMiddleware
-from aistudio_api.application import generation as generation_execution
+from aistudio_api.application import (
+    generation as generation_execution,
+    generation_recovery as recovery,
+)
 from aistudio_api.application.inference_limits import InferenceLimiter
 from aistudio_api.domain.errors import RequestError
 from aistudio_api.domain.models import Candidate, ModelOutput
@@ -81,9 +83,9 @@ def generation(monkeypatch):
     monkeypatch.setattr(generation_execution, "inference_limiter", limiter)
     monkeypatch.setattr(generation_execution, "ensure_active_account", AsyncMock())
     monkeypatch.setattr(generation_execution, "account_id_for_auth_file", lambda _path: "synthetic-account")
-    monkeypatch.setattr(service, "record_rotator_event", MagicMock())
-    monkeypatch.setattr(generation_execution, "record_rotator_event", service.record_rotator_event)
-    monkeypatch.setattr(service.runtime_state, "record", MagicMock())
+    monkeypatch.setattr(recovery, "record_rotator_event", MagicMock())
+    monkeypatch.setattr(generation_execution, "record_rotator_event", recovery.record_rotator_event)
+    monkeypatch.setattr(recovery.runtime_state, "record", MagicMock())
     diagnostics = response_diagnostics.ResponseDiagnosticStore()
     errors = error_records.ErrorRecordStore()
     monkeypatch.setattr(response_diagnostics, "_store", diagnostics)

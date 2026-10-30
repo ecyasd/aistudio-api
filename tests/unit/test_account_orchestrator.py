@@ -8,7 +8,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import HTTPException
 
 from aistudio_api.application import account_rotator as rotator_module
 from aistudio_api.application.account_orchestrator import (
@@ -20,6 +19,7 @@ from aistudio_api.application.account_orchestrator import (
 )
 from aistudio_api.application.account_rotator import AccountRotator, AccountStats
 from aistudio_api.application.account_service import AccountService
+from aistudio_api.application.generation_errors import GenerationFailure
 from aistudio_api.application.runtime import runtime_state
 from aistudio_api.config import settings
 from aistudio_api.domain.errors import AuthError, SessionExpiredError
@@ -116,9 +116,9 @@ async def test_ensure_active_account_early_switch(monkeypatch, attempt):
         runtime_state.account_service = mock_service
 
         # Every attempt must fail closed if selection cannot bind a usable account.
-        with pytest.raises(HTTPException) as caught:
+        with pytest.raises(GenerationFailure) as caught:
             await ensure_active_account(attempt=attempt, model="gemini-2.5-flash")
-        assert caught.value.status_code == 503
+        assert caught.value.description.status == 503
         switch.assert_awaited_once_with(
             model="gemini-2.5-flash", failed_account_id="acc_1"
         )
@@ -412,8 +412,10 @@ async def test_concurrent_switch_records_failed_lease_once(
 async def test_old_403_context_recovers_once_through_handler_or_pre_recorded_path(
     monkeypatch, pre_recorded
 ):
-    from aistudio_api.api.gemini import handle_attempt_exception
     from aistudio_api.application import account_orchestrator
+    from aistudio_api.application.generation_recovery import (
+        _recover_failure as handle_attempt_exception,
+    )
 
     account = AccountMeta(
         id="same_account", name="Same", email=None, created_at="2026-10-18"

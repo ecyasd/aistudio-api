@@ -13,8 +13,10 @@ import pytest
 from google import genai
 from google.genai import errors, types
 
+from aistudio_api.api import gemini_errors
 from aistudio_api.api.app import app
 from aistudio_api.api.dependencies import get_client
+from aistudio_api.application import generation_recovery as recovery
 from aistudio_api.domain.errors import RequestError, UsageLimitExceeded
 from aistudio_api.domain.models import Candidate, ContentPart, ModelOutput
 
@@ -60,7 +62,7 @@ def mock_client(monkeypatch, tmp_path) -> MagicMock:
     monkeypatch.setattr(runtime_state, "account_service", account_service)
     monkeypatch.setattr(runtime_state, "rotator", rotator)
     monkeypatch.setattr(runtime_state, "record", MagicMock())
-    monkeypatch.setattr(api_service_gemini, "try_switch_account", AsyncMock(return_value=False))
+    monkeypatch.setattr(recovery, "try_switch_account", AsyncMock(return_value=False))
     monkeypatch.setattr(api_service_gemini, "SSE_HEARTBEAT_INTERVAL_SECONDS", 0.005)
     return client
 
@@ -245,11 +247,10 @@ async def test_auto_continue_requires_explicit_json_boolean(
 def test_continuation_deadline_has_gemini_deadline_status(stream: bool) -> None:
     from fastapi import HTTPException
 
-    from aistudio_api.api import gemini as api
 
     error = RequestError(504, "Automatic continuation exceeded the request time budget")
     classified = error if stream else HTTPException(504, detail={"message": str(error)})
-    assert api.classify_gemini_error_payload(classified)[::2] == (504, "DEADLINE_EXCEEDED")
+    assert gemini_errors.classify_gemini_error_payload(classified)[::2] == (504, "DEADLINE_EXCEEDED")
 
 
 @pytest.mark.asyncio
