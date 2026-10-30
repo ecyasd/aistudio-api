@@ -42,7 +42,7 @@ CONSUMER_TIMEOUT_S = 30.0
 CLEANUP_TIMEOUT_S = 2.0
 
 
-def _signing_cookies(page: CDPPage, cookies: list[dict[str, object]]) -> dict[str, str]:
+def _signing_cookies(page: CDPPage | None, cookies: list[dict[str, object]]) -> dict[str, str]:
     """Select the Cookie values applicable to this page's AI Studio origin."""
     origin_host = "aistudio.google.com"
     page_path = urlsplit(str(getattr(page, "url", "") or "")).path or "/"

@@ -592,7 +592,7 @@ def normalize_gemini_request(
     capture_prompt = "你好"
     capture_images: list[str | tuple[str, str]] = []
 
-    for content in req.contents:
+    for content_index, content in enumerate(req.contents):
         role = content.role or "user"
         parts: list[AistudioPart] = []
         text_parts: list[str] = []
@@ -703,6 +703,10 @@ def normalize_gemini_request(
                         thought_signature=part.thoughtSignature,
                     )
                 )
+        if not parts:
+            if content_index == len(req.contents) - 1:
+                raise ValueError("Last content must contain at least one supported Part")
+            continue
         contents.append(AistudioContent(role=role, parts=parts))
 
         if role == "user":

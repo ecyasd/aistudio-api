@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from aistudio_api.api.error_middleware import ErrorRecordsMiddleware
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
 from aistudio_api.application.chat_service import normalize_gemini_request
 from aistudio_api.domain.errors import RequestError
@@ -124,6 +125,52 @@ def test_normalized_request_records_only_explicit_flag_and_verified_enums(
 
 def _usage(tokens):
     return [1, 2, 3, None, None, None, None, None, None, tokens]
+
+
+def test_prompt_size_uses_final_report_of_first_reporting_call_without_summing_retries(diagnostic_store):
+    with trace():
+        diagnostics.begin_upstream_call()
+        parse_usage_metadata([0, 0, 0])
+        parse_usage_metadata([80_000, 5, 80_005])
+        parse_usage_metadata([80_001, 8, 80_009])
+        diagnostics.begin_upstream_call()
+        parse_usage_metadata([90_000, 2, 90_002])
+        diagnostics.finish_response_diagnostics("recovered", 200)
+    assert diagnostic_store.list_records()["items"][0]["prompt_tokens"] == 80_001
+
+
+@pytest.mark.parametrize("tokens,expected", [(None, None), (True, None), (-1, None), (0, 0), (80_000, 80_000)])
+def test_prompt_usage_keeps_unknown_distinct_from_zero(diagnostic_store, tokens, expected):
+    with trace():
+        diagnostics.begin_upstream_call()
+        parse_usage_metadata([tokens, 2, None])
+        diagnostics.finish_response_diagnostics("success", 200)
+    assert diagnostic_store.list_records()["items"][0]["prompt_tokens"] == expected
+
+
+async def test_request_size_counts_consumed_bytes_before_generation_without_retaining_body(diagnostic_store):
+    body = [b'{"synthetic":', b'"SYNTHETIC_PRIVATE_INPUT"}']
+    messages = iter([{"type": "http.request", "body": body[0], "more_body": True},
+                     {"type": "http.request", "body": body[1], "more_body": False}])
+
+    async def receive():
+        return next(messages)
+
+    async def send(message):
+        pass
+
+    async def endpoint(scope, receive, send):
+        assert (await receive())["more_body"]
+        assert not (await receive())["more_body"]
+        diagnostics.configure_generation(model="gemini-synthetic", auto_continue=False)
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    await ErrorRecordsMiddleware(endpoint)({"type": "http", "method": "POST", "headers": [],
+        "path": "/v1beta/models/gemini-synthetic:generateContent"}, receive, send)
+    item = diagnostic_store.list_records()["items"][0]
+    assert item["request_body_bytes"] == sum(map(len, body))
+    assert "SYNTHETIC_PRIVATE_INPUT" not in json.dumps(item)
 
 
 def test_latest_usage_in_each_upstream_call_is_summed_without_duplicate_chunks(diagnostic_store):

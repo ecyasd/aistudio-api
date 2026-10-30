@@ -38,6 +38,7 @@ _ERROR_KINDS = frozenset({
 _COUNTERS = (
     "duration_ms", "upstream_calls", "retries", "body_chars", "thought_chars",
     "thought_parts", "thought_after_body", "empty_thought_parts", "marker_count",
+    "request_body_bytes",
 )
 _TIMINGS = (
     "admitted", "account_preparation_started", "account_ready", "session_ready",
@@ -91,6 +92,8 @@ def _normalize(raw: object) -> dict[str, Any] | None:
         "thinking_level": _thinking_level(raw.get("thinking_level")),
         "thought_tokens": _count(raw.get("thought_tokens"))
         if type(raw.get("thought_tokens")) is int and raw["thought_tokens"] >= 0 else None,
+        "prompt_tokens": _count(raw.get("prompt_tokens"))
+        if type(raw.get("prompt_tokens")) is int and raw["prompt_tokens"] >= 0 else None,
         "outcome": raw.get("outcome")
         if isinstance(raw.get("outcome"), str) and raw["outcome"] in _OUTCOMES else "failed",
         "transport_status": raw.get("transport_status")
@@ -177,6 +180,9 @@ class _Accumulator:
     thought_chars: int = 0
     thought_parts: int = 0
     thought_tokens: int | None = None
+    prompt_tokens: int | None = None
+    prompt_tokens_call: int | None = None
+    request_body_bytes: int = 0
     thought_after_body: int = 0
     empty_thought_parts: int = 0
     marker_count: int = 0
@@ -255,6 +261,30 @@ def note_thinking_configuration(*, explicit: bool, thinking_config: object) -> N
                 thinking_config[3]
                 if isinstance(thinking_config, list) and len(thinking_config) > 3 else None
             )
+
+
+def observe_request_body_bytes(size: int) -> None:
+    """Count bytes already consumed by ASGI without keeping or rereading them."""
+    with contextlib.suppress(Exception):
+        current = _current()
+        if current is not None and type(size) is int and size >= 0:
+            current.request_body_bytes = _count(current.request_body_bytes + size)
+
+
+def observe_prompt_tokens(prompt_tokens: int | None) -> None:
+    """Keep the final prompt report of the first call that supplies usage.
+
+    This represents input size, not billable aggregate usage across retries
+    and continuation. Missing usage stays unknown rather than becoming zero.
+    """
+    with contextlib.suppress(Exception):
+        current = _current()
+        if (
+            current is not None and type(prompt_tokens) is int and prompt_tokens >= 0
+            and (current.prompt_tokens_call is None or current.prompt_tokens_call == current.upstream_calls)
+        ):
+            current.prompt_tokens_call = current.upstream_calls
+            current.prompt_tokens = _count(prompt_tokens)
 
 
 def observe_reasoning_tokens(reasoning_tokens: int | None) -> None:
@@ -380,6 +410,7 @@ def finish_response_diagnostics(outcome: str, transport_status: int | None = Non
             "thinking_explicit": current.thinking_explicit,
             "thinking_mode": current.thinking_mode, "thinking_level": current.thinking_level,
             "thought_tokens": current.thought_tokens,
+            "prompt_tokens": current.prompt_tokens,
             "transport_status": transport_status, "error_kind": error_kind,
             "duration_ms": duration_ms, "timings_ms": current.timings_ms,
             **{key: getattr(current, key) for key in _COUNTERS if key != "duration_ms"},

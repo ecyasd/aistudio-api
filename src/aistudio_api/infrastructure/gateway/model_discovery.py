@@ -21,6 +21,10 @@ from aistudio_api.infrastructure.account.cookie_parser import (
     DEFAULT_USER_AGENT,
     calculate_sapisid_hash,
 )
+from aistudio_api.infrastructure.gateway.transport import (
+    _ensure_authorization_header,
+    _signing_cookies,
+)
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 logger = get_logger("model_discovery")
@@ -140,7 +144,9 @@ class ModelDiscoveryService:
                 try:
                     page = session.page
                     if page is not None and not page.is_closed():
-                        models = await self._fetch_via_page(page)
+                        models = await self._fetch_via_page(
+                            page, auth_user=session.get_current_auth_user()
+                        )
                         if models:
                             self._cached_models = models
                             self._last_fetched_at = time.time()
@@ -173,11 +179,9 @@ class ModelDiscoveryService:
                     try:
                         data = json.loads(Path(auth_file).read_text(encoding="utf-8"))
                         raw_cookies = data.get("cookies") or []
-                        effective_cookies = {
-                            str(c.get("name") or ""): str(c.get("value") or "")
-                            for c in raw_cookies
-                            if c.get("name")
-                        }
+                        effective_cookies = _signing_cookies(
+                            None, [cookie for cookie in raw_cookies if isinstance(cookie, dict)]
+                        ) if isinstance(raw_cookies, list) else {}
                         if session is not None and hasattr(session, "get_current_auth_user"):
                             effective_auth_user = session.get_current_auth_user()
                     except Exception:
@@ -219,10 +223,10 @@ class ModelDiscoveryService:
                 return model_info
         return None
 
-    async def _fetch_via_page(self, page: CDPPage) -> list[dict[str, object]]:
+    async def _fetch_via_page(self, page: CDPPage, *, auth_user: str = "0") -> list[dict[str, object]]:
         """在 CDP Page 环境中直接执行 XHR 拉取 ListModels（自动带齐浏览器完整凭据）。"""
         script = """
-        () => {
+        (args) => {
             return new Promise((resolve) => {
                 const xhr = new XMLHttpRequest();
                 xhr.open('POST', 'https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/ListModels');
@@ -230,6 +234,9 @@ class ModelDiscoveryService:
                 xhr.setRequestHeader('X-User-Agent', 'grpc-web-javascript/0.1');
                 xhr.setRequestHeader('X-Goog-Api-Key', 'AIzaSyDdP816MREB3SkjZO04QXbjsigfcI0GWOs');
                 xhr.setRequestHeader('X-Goog-Ext-519733851-bin', 'CAESAUwwATgEQABQBGICSlBwAHgBkAEAmAEB');
+                for (const [name, value] of Object.entries(args.headers)) {
+                    xhr.setRequestHeader(name, value);
+                }
                 xhr.withCredentials = true;
                 xhr.timeout = 10000;
                 xhr.onload = () => {
@@ -249,7 +256,8 @@ class ModelDiscoveryService:
             });
         }
         """
-        res = await page.evaluate(script, timeout_s=12.0)
+        headers = await _ensure_authorization_header(page, {}, auth_user)
+        res = await page.evaluate(script, {"headers": headers}, timeout_s=12.0)
         if not isinstance(res, dict) or not res.get("ok"):
             return []
         raw_data = res.get("data")

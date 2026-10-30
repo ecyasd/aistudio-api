@@ -21,6 +21,7 @@ from aistudio_api.infrastructure.utils.response_diagnostics import (
     finish_response_diagnostics,
     initialize_response_diagnostics,
     note_timing,
+    observe_request_body_bytes,
 )
 
 
@@ -94,6 +95,8 @@ class ErrorRecordsMiddleware:
         async def observe_receive() -> Message:
             nonlocal disconnected
             message = await receive()
+            if message["type"] == "http.request":
+                observe_request_body_bytes(len(message.get("body", b"")))
             if message["type"] == "http.disconnect":
                 disconnected = True
             return message

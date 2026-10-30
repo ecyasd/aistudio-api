@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Generator
+from io import StringIO
 
 from aistudio_api.domain.errors import IncompleteResponseError, RequestError
 from aistudio_api.infrastructure.gateway.wire_parser import (
@@ -30,15 +31,26 @@ class IncrementalJSONStreamParser:
         self._in_string = False
         self._escape = False
         self._stack: list[str] = []
+        self._chunk_prefix = StringIO()
+        self._prefix_chars = 0
 
     @staticmethod
     def _invalid() -> RequestError:
         return RequestError(502, "Upstream response is malformed or truncated")
 
     def feed(self, data: str) -> Generator[list[object], None, None]:
-        self.buffer += data
+        if self._state == "chunk":
+            # The preceding fragment is fully scanned. Append it to an
+            # amortized buffer rather than copying the growing JSON prefix
+            # for every network fragment; retain string/escape/stack state.
+            self._chunk_prefix.write(self.buffer)
+            self._prefix_chars += len(self.buffer)
+            self.buffer = data
+            self._pos = 0
+        else:
+            self.buffer += data
 
-        if len(self.buffer) > MAX_PENDING_JSON_CHARS:
+        if self._prefix_chars + len(self.buffer) > MAX_PENDING_JSON_CHARS:
             raise RequestError(502, "Upstream response chunk exceeds the buffer limit")
 
         if self._state == "preamble":
@@ -72,7 +84,13 @@ class IncrementalJSONStreamParser:
                     if not self._stack or self._stack.pop() != expected:
                         raise self._invalid()
                     if not self._stack:
-                        chunk_text = self.buffer[: self._pos + 1]
+                        if self._prefix_chars:
+                            self._chunk_prefix.write(self.buffer[: self._pos + 1])
+                            chunk_text = self._chunk_prefix.getvalue()
+                            self._chunk_prefix = StringIO()
+                            self._prefix_chars = 0
+                        else:
+                            chunk_text = self.buffer[: self._pos + 1]
                         try:
                             chunk = json.loads(chunk_text)
                         except (json.JSONDecodeError, RecursionError) as exc:
@@ -121,10 +139,11 @@ class IncrementalJSONStreamParser:
     def finish(self) -> Generator[list[object], None, None]:
         if self._state != "complete":
             if self._state == "chunk":
+                pending = "".join((self._chunk_prefix.getvalue(), self.buffer))
                 try:
-                    json.loads(self.buffer)
+                    json.loads(pending)
                 except json.JSONDecodeError as exc:
-                    if not is_incomplete_json_error(self.buffer, exc):
+                    if not is_incomplete_json_error(pending, exc):
                         raise self._invalid() from exc
                 except RecursionError as exc:
                     raise self._invalid() from exc

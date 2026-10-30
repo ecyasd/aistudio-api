@@ -139,7 +139,7 @@ flowchart TD
   - `wire_codec.py`：JSPB 请求结构组包、参数动态改写与内置工具注入。
   - `wire_parser.py`：JSPB 响应解析器，处理 Struct 结构体、ListValue 数组与状态码映射；合法元数据块中的默认状态不抹除已取得的完成原因。
   - `wire_types.py`：领域数据结构契约（`AistudioContent`、`AistudioPart`、`AistudioGenerationConfig`）。
-  - `stream_parser.py`：流式 JSON 增量状态机解析器，去除 XSSI 前缀并按括号深度切片分块。
+  - `stream_parser.py`：流式 JSON 增量状态机解析器，去除 XSSI 前缀并按括号深度切片分块。跨网络片段保留扫描状态，未闭合前缀使用增量缓冲，避免重复复制累计字符串；缓冲上限包含已归档前缀。
   - `transport.py`：基于 CDP Binding 的事件推送管道，支持队列反压控制与时间戳签名注入。
   - `capture.py`：请求模板缓存与纯内存模型适配。
   - `replay.py`：页面上下文 XHR 请求重放与异常降级。

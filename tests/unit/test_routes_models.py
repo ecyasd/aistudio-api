@@ -100,8 +100,8 @@ async def test_model_discovery_falls_back_to_auth_file_cookies(tmp_path, monkeyp
         json.dumps(
             {
                 "cookies": [
-                    {"name": "SAPISID", "value": "test_sapisid"},
-                    {"name": "SID", "value": "test_sid"},
+                    {"name": "SAPISID", "value": "test_sapisid", "domain": ".google.com", "path": "/"},
+                    {"name": "SID", "value": "test_sid", "domain": ".google.com", "path": "/"},
                 ]
             }
         ),
@@ -155,7 +155,7 @@ async def test_model_discovery_uses_real_session_page_property(monkeypatch):
     monkeypatch.setattr(service, "_fetch_via_http", http_fetch)
 
     assert await service.get_models(session=session) == models
-    page_fetch.assert_awaited_once_with(page)
+    page_fetch.assert_awaited_once_with(page, auth_user="0")
     http_fetch.assert_not_awaited()
 
 

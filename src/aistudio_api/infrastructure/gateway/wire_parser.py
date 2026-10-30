@@ -19,6 +19,7 @@ from aistudio_api.domain.models import (
 from aistudio_api.infrastructure.utils.common import decode_base64_images
 from aistudio_api.infrastructure.utils.response_diagnostics import (
     observe_candidate,
+    observe_prompt_tokens,
     observe_reasoning_tokens,
 )
 
@@ -444,6 +445,7 @@ def parse_usage_metadata(raw_usage: object) -> dict[str, object]:
         else None
     )
     observe_reasoning_tokens(reasoning_tokens)
+    observe_prompt_tokens(prompt_tokens)
     completion_tokens = visible_completion_tokens
     if isinstance(visible_completion_tokens, int) and isinstance(reasoning_tokens, int):
         completion_tokens = visible_completion_tokens + reasoning_tokens
