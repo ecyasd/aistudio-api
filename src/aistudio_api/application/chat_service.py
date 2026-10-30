@@ -595,7 +595,6 @@ def normalize_gemini_request(
     for content_index, content in enumerate(req.contents):
         role = content.role or "user"
         parts: list[AistudioPart] = []
-        text_parts: list[str] = []
         content_images: list[str | tuple[str, str]] = []
 
         for part in content.parts:
@@ -608,7 +607,6 @@ def normalize_gemini_request(
                         thought_signature=part.thoughtSignature,
                     )
                 )
-                text_parts.append(part.text)
                 continue
             if part.inlineData is not None:
                 img_data = (part.inlineData.mimeType, part.inlineData.data)
@@ -669,7 +667,6 @@ def normalize_gemini_request(
                                     thought_signature=subpart.thoughtSignature,
                                 )
                             )
-                            text_parts.append(subpart.text)
                 continue
             if part.executableCode is not None:
                 ec = part.executableCode
@@ -709,11 +706,10 @@ def normalize_gemini_request(
             continue
         contents.append(AistudioContent(role=role, parts=parts))
 
-        if role == "user":
-            if text_parts:
-                capture_prompt = "\n".join(text_parts)
-            if content_images:
-                capture_images = content_images
+        # Typed contents carry the actual input. Browser template capture
+        # uses its fixed bootstrap prompt, so don't duplicate long text.
+        if role == "user" and content_images:
+            capture_images = content_images
 
     system_instruction = None
     if req.systemInstruction is not None:

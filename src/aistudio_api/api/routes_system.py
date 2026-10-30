@@ -16,6 +16,7 @@ from aistudio_api.api.response_models import (
     StatsResponse,
     StatsTotalsResponse,
 )
+from aistudio_api.application import account_orchestrator
 from aistudio_api.infrastructure.gateway.model_defaults import (
     _resolve_config_path,
     invalidate_config_cache,
@@ -177,37 +178,39 @@ async def force_next_account(
     runtime_state: RuntimeState = Depends(get_runtime_state),
 ) -> dict[str, object]:
     """强制切换到下一个可用账号。"""
-    rotator = runtime_state.rotator
-    if rotator is None:
-        raise HTTPException(503, detail="调度器未初始化")
+    async with account_orchestrator.account_change_lock():
+        rotator = runtime_state.rotator
+        if rotator is None:
+            raise HTTPException(503, detail="调度器未初始化")
 
-    next_account = await rotator.get_next_account()
-    if next_account is None:
-        raise HTTPException(404, detail="没有可用的账号")
+        next_account = await rotator.get_next_account()
+        if next_account is None:
+            raise HTTPException(404, detail="没有可用的账号")
 
-    account_service = runtime_state.account_service
-    client = runtime_state.client
+        account_service = runtime_state.account_service
+        client = runtime_state.client
 
-    if account_service is None or client is None or client._session is None:
-        raise HTTPException(503, detail="服务未就绪")
+        if account_service is None or client is None or client._session is None:
+            raise HTTPException(503, detail="服务未就绪")
 
-    result = await account_service.activate_account(
-        next_account.id,
-        client._session,
-    )
+        result = await account_service.activate_account(
+            next_account.id,
+            client._session,
+        )
 
-    if result is None:
-        raise HTTPException(500, detail="切换失败")
+        if result is None:
+            raise HTTPException(500, detail="切换失败")
 
-    logger.info("已强制切换至下一可用账号: %s (%s)", result.id, result.name)
-    return {
-        "ok": True,
-        "account": {
-            "id": result.id,
-            "name": result.name,
-            "email": result.email,
-        },
-    }
+        account_orchestrator.note_account_changed()
+        logger.info("已强制切换至下一可用账号: %s (%s)", result.id, result.name)
+        return {
+            "ok": True,
+            "account": {
+                "id": result.id,
+                "name": result.name,
+                "email": result.email,
+            },
+        }
 
 
 # ========== 系统与模型配置 API ==========

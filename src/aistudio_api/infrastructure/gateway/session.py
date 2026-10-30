@@ -494,23 +494,28 @@ class BrowserSession:
 
     async def generate_snapshot(self, contents: list[AistudioContent]) -> str:
         ctx = await self.ensure_ready()
-        hash_parts: list[str] = []
+        hasher = sha256()
+        first = True
         for content in contents:
             for part in content.parts:
                 if part.text is not None:
-                    hash_parts.append(str(part.text))
+                    value = str(part.text)
                 elif part.inline_data is not None:
-                    hash_parts.append(str(part.inline_data[1]))
+                    value = str(part.inline_data[1])
                 elif part.file_id is not None:
-                    hash_parts.append(str(part.file_id))
+                    value = str(part.file_id)
                 elif part.executable_code is not None:
-                    hash_parts.append(str(part.executable_code[1]))
+                    value = str(part.executable_code[1])
                 elif part.code_execution_result is not None:
-                    hash_parts.append(str(part.code_execution_result[1]))
+                    value = str(part.code_execution_result[1])
                 else:
-                    hash_parts.append("")
+                    value = ""
+                if not first:
+                    hasher.update(b" ")
+                hasher.update(value.encode("utf-8"))
+                first = False
 
-        content_hash = sha256(" ".join(hash_parts).encode("utf-8")).hexdigest()
+        content_hash = hasher.hexdigest()
 
         async with self._snapshot_lock:
             for attempt in range(3):

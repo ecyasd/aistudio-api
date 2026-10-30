@@ -13,6 +13,7 @@ def _load_js(filename: str) -> str:
 
 
 INSTALL_HOOKS_JS = _load_js("install_hooks.js")
+BOOTSTRAP_RUN_READY_JS = _load_js("bootstrap_run_ready.js")
 DIALOG_CLEANUP_JS = _load_js("dialog_cleanup.js")
 STREAMING_INIT_JS = _load_js("streaming_init.js")
 STREAM_CLEANUP_JS = _load_js("stream_cleanup.js")

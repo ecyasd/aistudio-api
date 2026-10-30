@@ -31,6 +31,8 @@ function componentSetup(relative, props, emit = () => {}) {
       if (name === 'vue') return { ...vue, onMounted() {} }
       if (name === 'vue-router') return { onBeforeRouteLeave() {} }
       if (name === '@/api/system.ts') return { systemApi }
+      if (name === '@/composables/usePolling.ts') return { usePolling() {} }
+      if (name === '@/utils/format.ts') return loadTypescript('utils/format.ts')
       if (name === '@/stores/toast.ts') return { useToastStore: () => toast }
       if (name === '@/stores/accounts.ts') return {
         useAccountsStore: () => ({ activateAccount: async id => { activations.push(id) } }),

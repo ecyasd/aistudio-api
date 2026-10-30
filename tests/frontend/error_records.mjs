@@ -214,6 +214,16 @@ const nonStringOutcomeApi = execute(fs.readFileSync(path.join(webRoot, 'src/api/
 await assert.rejects(nonStringOutcomeApi.list({ include_diagnostics: true }), /响应探测记录格式无效/)
 checks.push('requested response diagnostics must be present and valid before a read succeeds')
 
+for (const fields of [{ prompt_tokens: '80000' }, { request_body_bytes: -1 }, { timings_ms: { first_body: 'invalid' } }]) {
+  const invalidMetricsApi = execute(fs.readFileSync(path.join(webRoot, 'src/api/errors.ts'), 'utf8'), 'api/errors.ts', {
+    './client.ts': { request: async () => response([], { diagnostics: {
+      items: [diagnostic(fields)], retention: { max_records: 100, minutes: 10 },
+    } }) },
+  }).errorsApi
+  await assert.rejects(invalidMetricsApi.list({ include_diagnostics: true }), /响应探测记录格式无效/)
+}
+checks.push('new numeric diagnostic fields reject malformed counts and timings while older records remain compatible')
+
 const viewPath = path.join(webRoot, 'src/views/ErrorRecordsView.vue')
 const { descriptor } = parse(fs.readFileSync(viewPath, 'utf8'))
 const view = execute(compileScript(descriptor, { id: 'error-records-regression', inlineTemplate: true }).content, viewPath).default
@@ -390,6 +400,30 @@ assert.equal(pollingCalls, 2)
 disposePolling()
 assert.equal(timers.size, 0)
 checks.push('the shared polling scheduler stops while hidden, refreshes on visibility and disposes timers')
+
+store = freshStore()
+requestImpl = async () => response([], { diagnostics: { items: [diagnostic({
+  prompt_tokens: 80_000, request_body_bytes: 320_000,
+  timings_ms: { account_preparation_started: 200, account_ready: 7040,
+    transport_dispatched: 7100, upstream_first_byte: 30600, first_body: 30601, first_thought: 0,
+    browser_launch_started: 200, browser_ready: 900, SYNTHETIC_PRIVATE_TIMING: 123 },
+  flags: ['continuation_skipped_budget', 'continuation_skipped_unsupported'],
+}), diagnostic({ request_id: 'synthetic-unknown-size', prompt_tokens: null })],
+retention: { max_records: 100, minutes: 10 } } })
+await store.refresh()
+html = await render()
+for (const text of ['80,000', '312.5 KiB', '6.840 秒', '23.500 秒', '30.601 秒', '0.000 秒', '0.900 秒',
+  '历史预算不足', '暂不支持回放', '输入 未知', '未记录']) assert(html.includes(text), text)
+assert.doesNotMatch(html, /SYNTHETIC_PRIVATE_TIMING/)
+checks.push('latency rows distinguish local preparation, upstream wait, absolute first content, zero and unknown without rendering unrecognized metadata')
+
+const { millisecondsUntilPacificMidnight } = load('utils/format.ts')
+for (const [stamp, hours] of [
+  ['2026-01-01T08:00:00Z', 24], ['2026-07-01T07:00:00Z', 24],
+  ['2026-03-08T08:00:00Z', 23], ['2026-11-01T07:00:00Z', 25],
+  ['2026-07-01T06:30:00Z', 0.5],
+]) assert.equal(millisecondsUntilPacificMidnight(new Date(stamp)), hours * 3_600_000, stamp)
+checks.push('Pacific quota countdown uses actual winter/summer offsets and 23/25-hour daylight-saving transition days')
 
 const result = { passed: true, checks, groups: checks.length, syntheticOnly: true, upstreamModelCalls: false }
 console.log(JSON.stringify(result))

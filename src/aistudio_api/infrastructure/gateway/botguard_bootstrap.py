@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -10,6 +11,7 @@ from contextlib import suppress
 from aistudio_api.domain.errors import SessionExpiredError
 from aistudio_api.infrastructure.browser.cdp_client import CDPPage
 from aistudio_api.infrastructure.browser.scripts import (
+    BOOTSTRAP_RUN_READY_JS,
     DIALOG_CLEANUP_JS,
     DOM_GC_CLEANUP_JS,
     INSTALL_HOOKS_JS,
@@ -252,7 +254,6 @@ async def _capture_botguard_and_template_once(
             }
         })()"""
             )
-            await page.wait_for_timeout(800)
 
         try:
             await page.wait_for_selector("textarea", timeout_s=15.0)
@@ -272,6 +273,7 @@ async def _capture_botguard_and_template_once(
                 f"textarea not found while capturing BotGuardService; url={dbg_url}, title={dbg_title}"
             ) from err
 
+        note_timing("botguard_editor_ready")
         original_text = str(
             (
                 await page.evaluate(
@@ -281,9 +283,16 @@ async def _capture_botguard_and_template_once(
             or ""
         )
         await enable_temporary_chat(page)
+        note_timing("temporary_chat_ready")
         await page.fill("textarea", BOTGUARD_BOOTSTRAP_PROMPT)
         note_timing("botguard_prompt_filled")
-        await page.wait_for_timeout(600)
+        run_ready = False
+        with suppress(Exception):
+            run_ready = await page.evaluate(
+                f"({BOOTSTRAP_RUN_READY_JS})({json.dumps(BOTGUARD_BOOTSTRAP_PROMPT)})"
+            )
+        if run_ready is not True:
+            await page.wait_for_timeout(600)
         await page.evaluate(DIALOG_CLEANUP_JS)
 
         if not await click_run_button(page):

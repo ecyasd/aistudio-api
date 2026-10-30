@@ -47,7 +47,8 @@ def test_empty_history_is_removed_without_losing_signed_parts_or_empty_text():
     assert normalized.contents[1].parts[0].thought_signature == "synthetic-signature"
     assert normalized.contents[1].parts[0].thought is True
     assert normalized.contents[2].parts[0].text == ""
-    assert normalized.capture_prompt == "\nnew prompt"
+    assert normalized.capture_prompt == "你好"
+    assert normalized.contents[2].parts[1].text == "new prompt"
 
 
 @pytest.mark.parametrize("earlier", [[], [{"role": "user", "parts": [{"text": "old prompt"}]}]])

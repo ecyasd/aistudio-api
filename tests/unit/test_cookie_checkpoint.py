@@ -290,7 +290,7 @@ async def test_signature_ignores_other_hosts_paths_and_expired_duplicate_names()
 
 
 @pytest.mark.asyncio
-async def test_account_probe_stops_at_local_cap_when_all_indices_return_403(monkeypatch):
+async def test_account_probe_does_not_import_generic_403_slots(monkeypatch):
     from aistudio_api.infrastructure.account.cookie_parser import (
         probe_google_accounts_infinite,
     )
@@ -306,8 +306,58 @@ async def test_account_probe_stops_at_local_cap_when_all_indices_return_403(monk
 
     monkeypatch.setattr("httpx.AsyncClient", lambda **kwargs: FakeClient())
     result = await probe_google_accounts_infinite("SID=synthetic-only", max_accounts=3)
-    assert [item["auth_user"] for item in result] == ["0", "1", "2"]
-    assert client.post.await_count == 3
+    assert result == []
+    assert client.post.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 403])
+async def test_account_probe_requires_positive_rpc_and_filters_cookie_scope(monkeypatch, status):
+    from aistudio_api.infrastructure.account.cookie_parser import (
+        probe_google_accounts_infinite,
+    )
+
+    client = SimpleNamespace(post=AsyncMock(side_effect=[
+        SimpleNamespace(status_code=200, json=lambda: [[["models/synthetic"]]]),
+        SimpleNamespace(status_code=status),
+    ]))
+
+    class FakeClient:
+        async def __aenter__(self):
+            return client
+
+        async def __aexit__(self, *args):
+            return None
+
+    monkeypatch.setattr("httpx.AsyncClient", lambda **kwargs: FakeClient())
+    result = await probe_google_accounts_infinite([
+        *_cookies(),
+        {"name": "SAPISID", "value": "wrong-domain", "domain": "accounts.google.com", "path": "/"},
+        {"name": "SAPISID", "value": "wrong-path", "domain": ".google.com", "path": "/other"},
+        {"name": "SAPISID", "value": "expired", "domain": ".google.com", "expires": 1},
+    ])
+    assert [item["auth_user"] for item in result] == ["0"]
+    assert client.post.await_count == 2
+    headers = client.post.call_args_list[0].kwargs["headers"]
+    assert headers["Authorization"] == calculate_sapisid_hash({"SAPISID": "synthetic-sign-original"})
+    assert all(value not in headers["Cookie"] for value in ["wrong-domain", "wrong-path", "expired", "accounts-only"])
+
+
+@pytest.mark.asyncio
+async def test_unchanged_checkpoint_preserves_bytes_and_still_checks_live_identity(tmp_path, monkeypatch):
+    from aistudio_api.infrastructure.gateway import session_auth
+
+    auth = _auth(tmp_path)
+    page = _page(_cookies())
+    assert await load_cookies_to_page(page, str(auth))
+    before = auth.read_bytes()
+    write = MagicMock(wraps=session_auth.atomic_write_json)
+    monkeypatch.setattr(session_auth, "atomic_write_json", write)
+    assert await save_browser_cookies(page, str(auth))
+    assert auth.read_bytes() == before
+    write.assert_not_called()
+    page.evaluate.assert_awaited()
+    page.get_cookies.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import suppress
-from typing import TYPE_CHECKING, cast
-from urllib.parse import urlsplit
+from typing import TYPE_CHECKING
 
-from aistudio_api.infrastructure.account.cookie_parser import calculate_sapisid_hash
+from aistudio_api.infrastructure.account.cookie_parser import (
+    calculate_sapisid_hash,
+    select_signing_cookies,
+)
 from aistudio_api.infrastructure.browser.scripts import (
     HOOKED_CLEANUP_JS,
     HOOKED_REQUEST_JS,
@@ -43,40 +44,7 @@ CLEANUP_TIMEOUT_S = 2.0
 
 
 def _signing_cookies(page: CDPPage | None, cookies: list[dict[str, object]]) -> dict[str, str]:
-    """Select the Cookie values applicable to this page's AI Studio origin."""
-    origin_host = "aistudio.google.com"
-    page_path = urlsplit(str(getattr(page, "url", "") or "")).path or "/"
-    candidates: dict[str, tuple[tuple[int, int], str]] = {}
-    for cookie in cookies:
-        if not isinstance(cookie, dict) or not cookie.get("name"):
-            continue
-        domain = str(cookie.get("domain") or "")
-        if not domain and cookie.get("url"):
-            domain = urlsplit(str(cookie["url"])).hostname or ""
-        bare_domain = domain.lower().lstrip(".")
-        if not bare_domain or not (
-            origin_host == bare_domain
-            or (domain.startswith(".") and origin_host.endswith("." + bare_domain))
-        ):
-            continue
-        path = str(cookie.get("path") or "/")
-        if not (
-            page_path == path
-            or page_path.startswith(path if path.endswith("/") else path + "/")
-        ):
-            continue
-        expiry = cookie.get("expires")
-        if expiry is not None and not cookie.get("session"):
-            try:
-                if 0 < float(cast("str | float", expiry)) <= time.time():
-                    continue
-            except (TypeError, ValueError):
-                continue
-        name = str(cookie["name"])
-        rank = (len(path), len(bare_domain))
-        if name not in candidates or rank > candidates[name][0]:
-            candidates[name] = (rank, str(cookie.get("value") or ""))
-    return {name: value for name, (_, value) in candidates.items()}
+    return select_signing_cookies(cookies, page_url=str(getattr(page, "url", "") or "/"))
 
 
 async def _ensure_authorization_header(

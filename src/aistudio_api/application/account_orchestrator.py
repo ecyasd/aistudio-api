@@ -46,6 +46,17 @@ def _get_switch_lock() -> asyncio.Lock:
     return _switch_lock
 
 
+def account_change_lock() -> asyncio.Lock:
+    """Management changes share inference's registry/context switch boundary."""
+    return _get_switch_lock()
+
+
+def note_account_changed() -> None:
+    """A completed owner change supersedes failures waiting on the old context."""
+    global _last_switch_time
+    _last_switch_time = time.time()
+
+
 async def try_switch_account(
     model: str | None = None,
     failed_account_id: str | None = None,

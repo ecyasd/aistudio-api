@@ -331,6 +331,8 @@ class CDPPage:
         self._last_url: str = ""
         self._unsubscribers: list[Callable[[], None]] = []
         self.has_stream_binding: bool = False
+        self._registered_bindings: set[str] = set()
+        self._binding_lock = asyncio.Lock()
         self._cached_cookies: dict[str, str] | None = None
         self._auth_file_path: str | None = None
         self._auth_file_version: str | None = None
@@ -426,7 +428,10 @@ class CDPPage:
 
     async def add_binding(self, name: str) -> None:
         """Expose a global function in page JS that dispatches Runtime.bindingCalled events."""
-        await self.cdp.send("Runtime.addBinding", {"name": name})
+        async with self._binding_lock:
+            if name not in self._registered_bindings:
+                await self.cdp.send("Runtime.addBinding", {"name": name})
+                self._registered_bindings.add(name)
 
     def on_binding(
         self, name: str, callback: Callable[[str], object]
@@ -457,7 +462,7 @@ class CDPPage:
             clean_expr = expr.rstrip()
             while clean_expr.endswith(";"):
                 clean_expr = clean_expr[:-1].rstrip()
-            expr = f"({clean_expr})({json.dumps(args)})"
+            expr = f"({clean_expr})({json.dumps(args, ensure_ascii=False)})"
         else:
             is_arrow = bool(
                 re.match(r"^(?:async\s+)?(?:\([^()]*\)|[a-zA-Z_$][\w$]*)\s*=>", expr)

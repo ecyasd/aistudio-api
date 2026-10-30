@@ -154,6 +154,28 @@ def test_large_input_fast_completion_is_observable_without_changing_generation(d
     assert diagnostics.logger.info.call_count == int(not warning)
 
 
+@pytest.mark.parametrize("unsupported", [False, True])
+def test_continuation_skip_reasons_are_bounded_visible_metadata(diagnostic_store, monkeypatch, unsupported):
+    from aistudio_api.application import continuation
+
+    monkeypatch.setattr(continuation, "MAX_HISTORY_BYTES", 256)
+    request = {"contents": [{"role": "user", "parts": [{"text": "synthetic" * 100}]}], "tools": []}
+    if unsupported:
+        request["contents"][0]["parts"] = [{"inlineData": {"mimeType": "image/png", "data": "c3ludGhldGlj"}}]
+    normalized = normalize_gemini_request(GeminiGenerateContentRequest.model_validate(request), "gemini-synthetic")
+    with trace():
+        diagnostics.configure_generation(model="gemini-synthetic", auto_continue=True)
+        assert continuation._history_budget(normalized) == 0
+        diagnostics.note_flag("SYNTHETIC_PRIVATE_REASON")
+        diagnostics.finish_response_diagnostics("success", 200)
+    item = diagnostic_store.list_records()["items"][0]
+    expected = "continuation_skipped_unsupported" if unsupported else "continuation_skipped_budget"
+    assert item["auto_continue"] is True
+    assert item["flags"] == [expected]
+    assert "SYNTHETIC_PRIVATE_REASON" not in json.dumps(item)
+    diagnostics.logger.warning.assert_called_once()
+
+
 @pytest.mark.parametrize("tokens,expected", [(None, None), (True, None), (-1, None), (0, 0), (80_000, 80_000)])
 def test_prompt_usage_keeps_unknown_distinct_from_zero(diagnostic_store, tokens, expected):
     with trace():
