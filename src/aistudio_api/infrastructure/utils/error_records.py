@@ -133,7 +133,7 @@ def _unwrap(exc: BaseException) -> BaseException:
     # their messages. Follow only explicit causes, with a bound for malformed chains.
     seen = {id(exc)}
     for _ in range(8):
-        if isinstance(exc, (AuthError, RequestError, UsageLimitExceeded)):
+        if isinstance(exc, (AuthError, RequestError, UsageLimitExceeded, TimeoutError)):
             break
         original = getattr(exc, "original_error", None)
         if not isinstance(original, BaseException):

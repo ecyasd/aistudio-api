@@ -8,7 +8,7 @@
     "build": "vue-tsc -b && vite build",
     "type-check": "vue-tsc -b",
     "lint": "eslint src --max-warnings 0",
-    "test:frontend": "node ../tests/frontend/browser_transport.mjs && node ../tests/frontend/polling.mjs && node ../tests/frontend/error_records.mjs && node ../tests/frontend/key_persistence.mjs && node ../tests/frontend/account_identity.mjs && node ../tests/frontend/management_lifecycle.mjs && node ../tests/frontend/settings_state.mjs",
+    "test:frontend": "node ../tests/frontend/browser_transport.mjs && node ../tests/frontend/polling.mjs && node ../tests/frontend/error_records.mjs && node ../tests/frontend/key_persistence.mjs && node ../tests/frontend/account_identity.mjs && node ../tests/frontend/management_lifecycle.mjs && node ../tests/frontend/settings_state.mjs && node ../tests/frontend/ui_review.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

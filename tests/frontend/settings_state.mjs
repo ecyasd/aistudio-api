@@ -301,4 +301,37 @@ checks.push('model drafts retain the latest logging refresh through YAML syntax 
 }
 checks.push('model saves include their baseline before a logging refresh arrives and conflicts retain drafts')
 
+for (const yaml of [
+  'model_defaults:\n  profiles: {wrong: structure}\n',
+  'model_defaults:\n  profiles: [42]\n',
+  'model_defaults:\n  profiles: [{name: test, match: {exact: gemini-test}}]\n',
+]) {
+  const h = setup('components/config/VisualConfigEditor.vue', {}, { initialYaml: yaml })
+  assert.equal(h.state.activeTab.value, 'yaml')
+  assert.equal(YAML.parse(h.state.rawYaml.value).model_defaults !== undefined, true)
+  assert.equal(h.state.filteredProfilesWithIndex.value.length, 0, 'bad loaded rules cannot reach the visual view')
+  assert(h.state.yamlParseError.value)
+  h.state.switchTab('visual')
+  assert.equal(h.state.activeTab.value, 'yaml')
+  h.state.rawYaml.value = 'model_defaults:\n  profiles: []\n'
+  h.state.switchTab('visual')
+  assert.equal(h.state.activeTab.value, 'visual')
+  h.stop()
+}
+checks.push('malformed model structures remain editable in YAML and cannot crash the visual view')
+
+{
+  const h = setup('components/config/VisualConfigEditor.vue', {}, { initialYaml: 'model_defaults: {}' })
+  h.state.switchTab('yaml')
+  const initial = h.state.rawYaml.value
+  for (const shiftKey of [false, true]) {
+    let prevented = false
+    h.state.handleYamlKeydown({ key: 'Tab', shiftKey, preventDefault() { prevented = true } })
+    assert.equal(prevented, false, 'Tab and Shift+Tab must leave the editor using native keyboard navigation')
+    assert.equal(h.state.rawYaml.value, initial)
+  }
+  h.stop()
+}
+checks.push('the YAML editor preserves native forward and backward Tab navigation')
+
 console.log(JSON.stringify({ passed: true, checks, groups: checks.length, syntheticOnly: true }))

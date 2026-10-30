@@ -93,3 +93,38 @@ async def test_valid_finish_only_usage_and_response_id_trailers_remain_supported
     assert received[-2][1] == nonstream.usage
     assert received[-1] == ("done", None)
     assert closed == [True]
+
+
+@pytest.mark.parametrize(("index", "payload"), [
+    (2, 42), (2, ["image/png"]), (2, ["image/png", "a"]),
+    (2, [None, "YWJj"]), (2, ["image/png", 123]),
+    (3, 42), (4, True), (10, 42), (11, 42), (11, True),
+])
+async def test_malformed_nontext_part_cannot_finish_successfully(index, payload):
+    part = [None] * 15
+    part[index] = payload
+    raw = json.dumps([[[[[[part], "model"], 1]], None, [1, 1, 2]]])
+    with pytest.raises(RequestError) as error:
+        parse_text_output(raw)
+    assert error.value.status == 502
+    received, closed = [], []
+    with pytest.raises(RequestError) as error:
+        await _stream(raw, received, closed)
+    assert error.value.status == 502
+    assert not any(name in ("done", "finish_reason", "usage") for name, _ in received)
+    assert closed == [True]
+
+
+def test_multiframe_aggregation_preserves_order_empty_parts_and_last_metadata():
+    chunks = [_chunk(f"段落{i}", lead=i % 2 == 1, finish=None) for i in range(500)]
+    # Explicit empty text carrying a signature must survive aggregation.
+    signed = [None] * 15
+    signed[1], signed[14] = "", "synthetic-signature"
+    chunks.append([[[[[signed], "model"], 1]], None, [10, 20, 30], None, None, None, None, "last-id"])
+    output = parse_text_output(json.dumps([chunks], ensure_ascii=False))
+    assert output.text == "".join(f"段落{i}" for i in range(0, 500, 2))
+    assert output.thinking == "".join(f"段落{i}" for i in range(1, 500, 2))
+    assert output.candidates[0].parts[-1].text == ""
+    assert output.candidates[0].parts[-1].thought_signature == "synthetic-signature"
+    assert len(output.candidates[0].parts) == 501
+    assert output.response_id == "last-id"

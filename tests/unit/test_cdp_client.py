@@ -49,6 +49,42 @@ async def test_cdp_connection_send_and_receive():
     assert res == {"result": {"value": 42}}
 
 
+async def test_final_cdp_socket_payload_preserves_unicode_without_reescaping():
+    conn = CDPConnection("ws://synthetic.invalid")
+    conn.ws = AsyncMock()
+    expression = "中文长上下文😀" * 1000
+    sent = []
+
+    async def send(raw):
+        sent.append(raw)
+        message = json.loads(raw)
+        assert message["params"]["expression"] == expression
+        conn._futures[message["id"]].set_result({})
+
+    conn.ws.send.side_effect = send
+    await conn.send("Runtime.evaluate", {"expression": expression})
+    assert "中文长上下文😀" in sent[0]
+    assert "\\u4e2d" not in sent[0]
+    assert not conn._futures
+
+
+@pytest.mark.parametrize("codepoint", [0xD800, 0xDFFF])
+async def test_cdp_json_surrogates_remain_valid_websocket_text(codepoint):
+    conn = CDPConnection("ws://synthetic.invalid")
+    conn.ws = AsyncMock()
+    expression = "中文 fixture " + chr(codepoint)
+
+    async def send(raw):
+        raw.encode("utf-8")
+        message = json.loads(raw)
+        assert message["params"]["expression"] == expression
+        conn._futures[message["id"]].set_result({})
+
+    conn.ws.send.side_effect = send
+    await conn.send("Runtime.evaluate", {"expression": expression})
+    assert not conn._futures and not conn._closed
+
+
 @pytest.mark.asyncio
 async def test_cdp_connection_error_handling():
     """Test CDPConnection properly raises CDPError on JSON-RPC error."""

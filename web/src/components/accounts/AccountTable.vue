@@ -59,6 +59,7 @@ const filteredAccounts = computed<AccountWithStats[]>(() => {
 })
 
 const { cookieGroups } = useCookieGroups(filteredAccounts, toRef(props, 'activeId'))
+const { cookieGroups: completeCookieGroups } = useCookieGroups(toRef(props, 'accounts'), toRef(props, 'activeId'))
 
 // 折叠状态持久化
 const STORAGE_COLLAPSED_KEY = 'aistudio_collapsed_cookie_ids'
@@ -156,7 +157,13 @@ async function handleDeleteAccount(acc: AccountWithStats) {
 }
 
 async function handleDeleteCookieGroup(group: CookieGroup) {
-  if (confirm(`确定要删除该 Cookie 凭据及其关联的全部 ${group.accounts.length} 个子账号吗？`)) {
+  const complete = completeCookieGroups.value.find(item => item.id === group.id)
+  if (!complete) return
+  const hiddenCount = complete.accounts.length - group.accounts.length
+  const scopeNote = hiddenCount > 0
+    ? `\n当前筛选只显示 ${group.accounts.length} 个，另外 ${hiddenCount} 个也会被删除。`
+    : ''
+  if (confirm(`确定要删除该 Cookie 凭据及其关联的全部 ${complete.accounts.length} 个子账号吗？${scopeNote}`)) {
     await accountsStore.deleteCookieGroup(group.id)
   }
 }

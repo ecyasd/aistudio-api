@@ -37,12 +37,15 @@ class AccountResponse(BaseModel):
     cookie_id: str | None = None
 
 
-def to_account_response(account: AccountMeta) -> AccountResponse:
-    cid = getattr(account, "cookie_id", None) or (
+def _cookie_group_id(account: AccountMeta) -> str:
+    return getattr(account, "cookie_id", None) or (
         f"cookie_{account.created_at[:16]}"
         if getattr(account, "created_at", None)
         else f"cookie_{account.id}"
     )
+
+
+def to_account_response(account: AccountMeta) -> AccountResponse:
     return AccountResponse(
         id=account.id,
         name=account.name,
@@ -50,7 +53,7 @@ def to_account_response(account: AccountMeta) -> AccountResponse:
         created_at=account.created_at or "",
         last_used=account.last_used,
         auth_user=getattr(account, "auth_user", "0") or "0",
-        cookie_id=cid,
+        cookie_id=_cookie_group_id(account),
     )
 
 
@@ -216,7 +219,7 @@ async def delete_account(
 
 @router.delete("/group/{cookie_id}")
 async def delete_cookie_group(
-    cookie_id: str = FastApiPath(..., pattern=r"^[a-zA-Z0-9_\-\.@]+$"),
+    cookie_id: str = FastApiPath(..., pattern=r"^[a-zA-Z0-9_\-\.@: ]+$"),
     account_service: AccountService = Depends(get_account_service),
     runtime_state: RuntimeState = Depends(get_runtime_state),
 ) -> dict[str, int]:
@@ -230,7 +233,7 @@ async def delete_cookie_group(
         deleted_count = 0
         rotator = runtime_state.rotator
         for a in accounts:
-            acc_cid = getattr(a, "cookie_id", None) or f"cookie_{a.created_at[:16]}"
+            acc_cid = _cookie_group_id(a)
             if acc_cid == cookie_id:
                 if a.id == active_id:
                     active_deleted = True
@@ -419,9 +422,9 @@ async def import_bundle(
     elif req.content:
         try:
             raw_data = json.loads(req.content)
-        except Exception as e:
+        except json.JSONDecodeError as e:
             raise HTTPException(
-                status_code=400, detail=f"JSON 内容解析失败: {e}"
+                status_code=400, detail="JSON 内容解析失败"
             ) from e
         if isinstance(raw_data, list):
             raw_list = raw_data
@@ -429,9 +432,12 @@ async def import_bundle(
             raw_list = raw_data.get("accounts") or raw_data.get("profiles") or []
         else:
             raw_list = []
-        for item in raw_list:
-            if isinstance(item, dict) and item.get("cookies"):
-                items_to_import.append(item)
+        if not isinstance(raw_list, list):
+            raise HTTPException(400, detail="账号条目必须为列表")
+        for idx, item in enumerate(raw_list):
+            if not isinstance(item, dict) or not item.get("cookies"):
+                raise HTTPException(400, detail=f"第 {idx + 1} 个账号条目缺少有效 cookies")
+            items_to_import.append(item)
     else:
         raise HTTPException(
             status_code=400,
@@ -443,7 +449,9 @@ async def import_bundle(
             status_code=400, detail="未解析到任何包含有效 cookies 的账号条目"
         )
 
-    imported_accounts: list[AccountResponse] = []
+    # Validate the entire bundle before any persistent account writes. A later
+    # expired/malformed entry must not leave an invisible partial import.
+    prepared = []
     for idx, item in enumerate(items_to_import):
         raw_cookie_data = item.get("cookies")
         raw_cookie_str = (
@@ -452,14 +460,17 @@ async def import_bundle(
             else json.dumps(raw_cookie_data) if raw_cookie_data else ""
         )
         if not raw_cookie_str:
-            continue
+            raise HTTPException(400, detail=f"第 {idx + 1} 个账号条目缺少有效 cookies")
         try:
             storage_state = parse_cookie_string(raw_cookie_str)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise HTTPException(400, detail=f"第 {idx + 1} 个账号的 cookies 无效或已过期") from exc
         if not storage_state.get("cookies"):
-            continue
+            raise HTTPException(400, detail=f"第 {idx + 1} 个账号的 cookies 无效或已过期")
+        prepared.append((item, storage_state))
 
+    imported_accounts: list[AccountResponse] = []
+    for idx, (item, storage_state) in enumerate(prepared):
         acc_name = str(item.get("name") or f"Account {idx + 1}")
         acc_email = str(item["email"]) if item.get("email") else None
         acc_auth_user = str(item.get("auth_user") or "0")

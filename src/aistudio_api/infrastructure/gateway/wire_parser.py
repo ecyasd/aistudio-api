@@ -6,6 +6,8 @@ docs/WIRE_SPECIFICATION.md
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import re
 
@@ -534,6 +536,29 @@ def _validate_content(raw_candidate: list[object]) -> None:
             )
         ):
             raise RequestError(502, "Upstream response contains a malformed Part")
+        inline = part[WIRE_PART_INLINE_DATA_INDEX] if len(part) > WIRE_PART_INLINE_DATA_INDEX else None
+        if inline is not None:
+            if (
+                not isinstance(inline, list) or len(inline) < 2
+                or not isinstance(inline[0], str) or not inline[0]
+                or not isinstance(inline[1], str)
+            ):
+                raise RequestError(502, "Upstream response contains a malformed inline data Part")
+            try:
+                base64.b64decode(inline[1], validate=True)
+            except (ValueError, binascii.Error) as exc:
+                raise RequestError(502, "Upstream response contains a malformed inline data Part") from exc
+        for index in (
+            WIRE_PART_FUNCTION_CALL_INDEX, WIRE_PART_FUNCTION_RESPONSE_INDEX,
+            WIRE_PART_FUNCTION_CALL_ALT_INDEX, WIRE_PART_FUNCTION_RESPONSE_ALT_INDEX,
+        ):
+            payload = part[index] if len(part) > index else None
+            if index == WIRE_PART_THOUGHT_FLAG_INDEX and (
+                type(payload) is bool or (type(payload) is int and payload in (0, 1))
+            ):
+                continue
+            if payload is not None and not isinstance(payload, (list, dict)):
+                raise RequestError(502, "Upstream response contains a malformed function Part")
 
 
 def _code_payload(raw: object, *, result: bool = False) -> dict[str, object] | None:
@@ -749,14 +774,17 @@ def parse_text_output(raw: str) -> ModelOutput:
         raise RequestError(502, "Upstream response contains no generation chunks")
 
     merged = Candidate()
+    text_fragments: list[str] = []
+    thought_fragments: list[str] = []
+    code_fragments: list[str] = []
     for chunk in chunks:
         parsed = parse_response_chunk(chunk)
         merged.continuation_unsafe |= parsed.continuation_unsafe
         merged.parts.extend(parsed.parts)
         if parsed.text:
-            merged.text += parsed.text
+            text_fragments.append(parsed.text)
         if parsed.thinking:
-            merged.thinking += parsed.thinking
+            thought_fragments.append(parsed.thinking)
         if parsed.images:
             merged.images.extend(parsed.images)
         if parsed.reasoning_images:
@@ -768,9 +796,7 @@ def parse_text_output(raw: str) -> ModelOutput:
         if parsed.thought_signature:
             merged.thought_signature = parsed.thought_signature
         if parsed.code_output:
-            merged.code_output = "\n".join(
-                filter(None, [merged.code_output, parsed.code_output])
-            )
+            code_fragments.append(parsed.code_output)
         # Unspecified/default markers in later metadata chunks must not erase
         # a completed generation. Match the streaming gateway's positive marker
         # rule while still requiring completion before accepting EOF.
@@ -790,6 +816,9 @@ def parse_text_output(raw: str) -> ModelOutput:
         )
         if isinstance(raw_rid, str) and raw_rid:
             output.response_id = raw_rid
+    merged.text = "".join(text_fragments)
+    merged.thinking = "".join(thought_fragments)
+    merged.code_output = "\n".join(code_fragments)
     if merged.finish_reason is None or merged.finish_reason <= 0:
         raise IncompleteResponseError
     output.candidates = [merged]

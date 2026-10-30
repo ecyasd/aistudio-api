@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { watch, onMounted, onUnmounted } from 'vue'
+import { watch, ref, nextTick, onMounted, onUnmounted } from 'vue'
 import { X } from 'lucide-vue-next'
+import { isTopModal, setModalOpen } from './modalState.ts'
 
 interface Props {
   modelValue: boolean
@@ -18,34 +19,65 @@ const emit = defineEmits<{
   close: []
 }>()
 
+const owner = Symbol('modal')
+const panel = ref<HTMLElement | null>(null)
+let previousFocus: HTMLElement | null = null
+
+function syncOpen(open: boolean) {
+  if (typeof document === 'undefined') return
+  const wasTop = isTopModal(owner)
+  if (open && !wasTop && document.activeElement instanceof HTMLElement) {
+    previousFocus = document.activeElement
+  }
+  setModalOpen(owner, open)
+  if (open) {
+    void nextTick(() => {
+      if (props.modelValue && isTopModal(owner)) panel.value?.focus()
+    })
+  } else if (wasTop && previousFocus?.isConnected) {
+    previousFocus.focus()
+  }
+}
+
 function closeModal() {
   emit('update:modelValue', false)
   emit('close')
 }
 
 function handleKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape' && props.modelValue) {
+  if (!props.modelValue || !isTopModal(owner)) return
+  if (e.key === 'Escape') {
+    e.preventDefault()
     closeModal()
+  } else if (e.key === 'Tab' && panel.value) {
+    const items = [...panel.value.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )].filter(item => item.getClientRects().length > 0)
+    const first = items[0], last = items.at(-1)
+    const active = document.activeElement
+    if (!first || !last || !panel.value.contains(active) || active === panel.value ||
+      (e.shiftKey ? active === first : active === last)) {
+      e.preventDefault()
+      ;(e.shiftKey ? last : first)?.focus()
+      if (!first) panel.value.focus()
+    }
   }
 }
 
 onMounted(() => {
+  syncOpen(props.modelValue)
   window.addEventListener('keydown', handleKeydown)
 })
 
 onUnmounted(() => {
+  syncOpen(false)
   window.removeEventListener('keydown', handleKeydown)
 })
 
 watch(
   () => props.modelValue,
-  (val) => {
-    if (val) {
-      document.body.style.overflow = 'hidden'
-    } else {
-      document.body.style.overflow = ''
-    }
-  }
+  syncOpen,
+  { immediate: true }
 )
 
 const widthClasses: Record<string, string> = {
@@ -82,6 +114,11 @@ const widthClasses: Record<string, string> = {
         >
           <div
             v-if="modelValue"
+            ref="panel"
+            role="dialog"
+            aria-modal="true"
+            :aria-label="title || '对话框'"
+            tabindex="-1"
             :class="[
               'w-full bg-white rounded-2xl shadow-xl border border-gray-100 flex flex-col overflow-hidden my-8',
               widthClasses[maxWidth] || 'max-w-md',
@@ -94,6 +131,7 @@ const widthClasses: Record<string, string> = {
               </h3>
               <button
                 type="button"
+                aria-label="关闭对话框"
                 class="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 transition-colors"
                 @click="closeModal"
               >

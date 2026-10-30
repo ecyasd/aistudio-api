@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -172,7 +173,9 @@ def _coerce_generation_defaults(raw: dict[str, object] | None) -> dict[str, obje
     raw = raw or {}
     coerced: dict[str, object] = {}
     for key, value in raw.items():
-        if key == "thinking_config" and isinstance(value, dict):
+        if value is None:
+            coerced[key] = None
+        elif key == "thinking_config" and isinstance(value, dict):
             level = _coerce_thinking_level(value.get("level", ThinkingLevel.HIGH))
             mode = int(value.get("mode", 1))
             coerced[key] = AistudioThinkingConfig(level=level, mode=mode).to_wire()
@@ -315,6 +318,67 @@ def _default_config() -> dict[str, object]:
             "models": {},
         },
     }
+
+
+def validate_model_config(config: dict[str, object]) -> None:
+    """Validate known model fields before saving; retain extension fields.
+
+    Reuse the runtime compiler for enums and supported legacy wire forms so a
+    profile that does not match the current model cannot poison every request.
+    """
+    defaults = config.get("model_defaults")
+    if defaults is None:
+        return
+    if not isinstance(defaults, dict):
+        raise ValueError("model_defaults must be a mapping")
+
+    def validate_rule(rule: object) -> None:
+        if not isinstance(rule, dict):
+            raise ValueError("model rule must be a mapping")
+        for key in ("default_tools", "clear_generation_config_indexes"):
+            if rule.get(key) is not None and not isinstance(rule[key], (list, tuple)):
+                raise ValueError("model rule list field must be a list")
+        match = rule.get("match")
+        if match is not None:
+            if not isinstance(match, dict):
+                raise ValueError("match must be a mapping")
+            for key in ("exact", "prefixes", "contains"):
+                if match.get(key) is not None and not isinstance(match[key], (list, tuple)):
+                    raise ValueError("match rule must be a list")
+        generation = rule.get("generation_config_defaults")
+        if generation is not None:
+            if not isinstance(generation, dict):
+                raise ValueError("generation defaults must be a mapping")
+            for key in ("temperature", "top_p", "top_k", "max_tokens", "max_output_tokens"):
+                value = generation.get(key)
+                if value is not None and (
+                    type(value) not in (int, float) or not math.isfinite(value)
+                    or (key in ("top_k", "max_tokens", "max_output_tokens") and type(value) is not int)
+                ):
+                    raise ValueError("generation numeric field is invalid")
+            thinking = generation.get("thinking_config")
+            if thinking is not None and not isinstance(thinking, (dict, list)):
+                raise ValueError("thinking config must be a mapping or wire list")
+            if isinstance(thinking, list):
+                if len(thinking) < 4 or type(thinking[0]) is not int:
+                    raise ValueError("thinking config wire list is invalid")
+                _coerce_thinking_level(thinking[3])
+        _defaults_from_mapping(rule)
+
+    profiles = defaults.get("profiles")
+    if profiles is not None:
+        if not isinstance(profiles, list):
+            raise ValueError("profiles must be a list")
+        for profile in profiles:
+            validate_rule(profile)
+    models = defaults.get("models")
+    if models is not None:
+        if not isinstance(models, dict):
+            raise ValueError("models must be a mapping")
+        for rule in models.values():
+            # Null overrides have always meant an empty rule.
+            if rule is not None:
+                validate_rule(rule)
 
 
 ConfigStamp = tuple[int, int, int, int] | None

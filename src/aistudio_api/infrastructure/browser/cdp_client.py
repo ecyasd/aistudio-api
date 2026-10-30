@@ -14,6 +14,7 @@ from collections.abc import Callable
 
 import httpx
 import websockets
+from anyio import CancelScope
 from websockets.asyncio.client import ClientConnection
 
 from aistudio_api.infrastructure.browser.scripts import build_selector_match_js
@@ -233,7 +234,12 @@ class CDPConnection:
             # covers dispatch and reply rather than starting after dispatch.
             async with asyncio.timeout_at(deadline):
                 try:
-                    await self.ws.send(json.dumps(payload))
+                    serialized = json.dumps(payload, ensure_ascii=False)
+                    # JSON permits escaped lone surrogates, while WebSocket
+                    # text must be UTF-8. Keep Unicode compact on the usual path.
+                    if re.search(r"[\ud800-\udfff]", serialized):
+                        serialized = json.dumps(payload)
+                    await self.ws.send(serialized)
                 except Exception as exc:
                     self._futures.pop(req_id, None)
                     self.fail_pending_futures(
@@ -987,17 +993,40 @@ class CDPClient:
             try:
                 await browser_connection.connect()
             except BaseException:
-                await browser_connection.close()
+                with CancelScope(shield=True):
+                    await browser_connection.close()
                 raise
             self._browser_cdp = browser_connection
         browser_cdp = self._browser_cdp
-        result = await browser_cdp.send(
-            "Target.createBrowserContext", {"disposeOnDetach": True}
-        )
-        context_id = str(result.get("browserContextId") or "")
-        if not context_id:
-            raise RuntimeError("Browser did not create an isolated context")
-        self._browser_contexts.add(context_id)
+
+        async def allocate_context() -> str:
+            # Keep ownership of a remote side effect until its reply arrives.
+            # Cancelling the caller must not discard the contextId future.
+            result: dict[str, object] = {}
+            with CancelScope(shield=True):
+                result = await browser_cdp.send(
+                    "Target.createBrowserContext", {"disposeOnDetach": True}
+                )
+            created_id = str(result.get("browserContextId") or "")
+            if not created_id:
+                raise RuntimeError("Browser did not create an isolated context")
+            self._browser_contexts.add(created_id)
+            return created_id
+
+        allocation = asyncio.create_task(allocate_context(), name="cdp-context-create")
+        try:
+            context_id = await asyncio.shield(allocation)
+        except BaseException:
+            with CancelScope(shield=True):
+                # Join this bounded CDP operation, including repeated external
+                # cancellation, and dispose only the candidate it created.
+                while not allocation.done():
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await asyncio.shield(allocation)
+                if not allocation.cancelled():
+                    with contextlib.suppress(Exception):
+                        await self.dispose_browser_context(allocation.result())
+            raise
         conn: CDPConnection | None = None
         try:
             target = await browser_cdp.send(
@@ -1029,11 +1058,18 @@ class CDPClient:
                     await self.close_target(spare_id)
             return page
         except BaseException:
-            if conn is not None:
+            # The session has not received this page yet. It cannot dispose our
+            # candidate if cancellation recurs during one of these awaits.
+            with CancelScope(shield=True):
+                if conn is not None:
+                    with contextlib.suppress(Exception):
+                        await conn.close()
                 with contextlib.suppress(Exception):
-                    await conn.close()
-            with contextlib.suppress(Exception):
-                await self.dispose_browser_context(context_id)
+                    await self.dispose_browser_context(context_id)
+                if context_id not in self._browser_contexts:
+                    for owned_id, owned in list(self._owned_pages.items()):
+                        if owned.browser_context_id == context_id:
+                            self._owned_pages.pop(owned_id)
             raise
 
     async def dispose_browser_context(self, context_id: str) -> None:

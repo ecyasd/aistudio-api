@@ -457,7 +457,9 @@ async def test_genai_sdk_standard_api_error_parsing(mock_client: MagicMock) -> N
             err = exc_info.value
             assert err.code == 429
             assert err.status == "RESOURCE_EXHAUSTED"
-            assert "daily quota" in str(err.message).lower()
+            assert "temporarily rate limited" in str(err.message).lower()
+            assert "daily quota" not in str(err.message).lower()
+            assert "00:00" not in str(err.message)
     finally:
         app.dependency_overrides.clear()
 
