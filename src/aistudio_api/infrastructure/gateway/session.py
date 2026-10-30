@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import aclosing, asynccontextmanager, suppress
 from contextvars import ContextVar
 from hashlib import sha256
@@ -46,6 +46,7 @@ from aistudio_api.infrastructure.gateway.session_state import (
     SessionState,
 )
 from aistudio_api.infrastructure.gateway.transport import XHRStreamTransport
+from aistudio_api.infrastructure.gateway.wire_codec import InvalidRequestTemplateError
 from aistudio_api.infrastructure.gateway.wire_types import AistudioContent
 from aistudio_api.infrastructure.utils.logger import get_logger
 from aistudio_api.infrastructure.utils.response_diagnostics import (
@@ -56,6 +57,7 @@ from aistudio_api.infrastructure.utils.response_diagnostics import (
 log = get_logger("session")
 
 _is_login_page_url = is_login_page_url
+SNAPSHOT_TIMEOUT_SECONDS = 10.0
 
 DEFAULT_BOOTSTRAP_TEMPLATE: dict[str, object] = {
     "url": "https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent",
@@ -86,6 +88,7 @@ class BrowserSession:
         self._transition_lock = asyncio.Lock()
         self._retirement_lock = asyncio.Lock()
         self._snapshot_lock = asyncio.Lock()
+        self._failed_snapshot_contexts: set[int] = set()
         self._transport = XHRStreamTransport()
         self._retiring_contexts: list[SessionContext] = []
         self._background_tasks: set[asyncio.Task[object]] = set()
@@ -105,7 +108,12 @@ class BrowserSession:
 
     @property
     def is_ready(self) -> bool:
-        return self._gate.is_ready() and (
+        context = self._gate.active_context
+        return (
+            self._gate.is_ready()
+            and context is not None
+            and context.context_id not in self._failed_snapshot_contexts
+        ) and (
             self._proc is None or self._proc.is_alive()
         )
 
@@ -165,6 +173,31 @@ class BrowserSession:
         if self._gate.active_context is not None:
             return self._gate.active_context.auth_user
         return get_auth_user_from_meta(self._auth_file)
+
+    @asynccontextmanager
+    async def existing_context_scope(self) -> AsyncIterator[SessionContext | None]:
+        """Borrow a ready context without starting, refreshing or probing it."""
+        bound = self._request_context.get()
+        if bound is not None:
+            yield bound
+            return
+        # No await between checking readiness and registering the lease: a
+        # transition must not retire this page before it sees our in-flight work.
+        ctx = self.active_context if self.is_ready else None
+        if ctx is None:
+            yield None
+            return
+        self._in_flight += 1
+        self._last_activity_time = time.time()
+        ctx.incr_in_flight()
+        token = self._request_context.set(ctx)
+        try:
+            yield ctx
+        finally:
+            self._request_context.reset(token)
+            ctx.decr_in_flight()
+            self._in_flight = max(0, self._in_flight - 1)
+            self._last_activity_time = time.time()
 
     @asynccontextmanager
     async def request_scope(self):
@@ -479,6 +512,7 @@ class BrowserSession:
                 if self._cdp_client:
                     await self._cdp_client.close_target(context.page.target_id)
                 self._retiring_contexts.remove(context)
+                self._failed_snapshot_contexts.discard(context.context_id)
 
     async def ensure_botguard_service(self, force_refresh: bool = False) -> CDPPage:
         page = self.page
@@ -520,6 +554,8 @@ class BrowserSession:
 
     async def generate_snapshot(self, contents: list[AistudioContent]) -> str:
         ctx = await self.ensure_ready()
+        if ctx.context_id in self._failed_snapshot_contexts:
+            raise InvalidRequestTemplateError("BotGuard signing context is unavailable")
         hasher = sha256()
         first = True
         for content in contents:
@@ -544,21 +580,48 @@ class BrowserSession:
         content_hash = hasher.hexdigest()
 
         async with self._snapshot_lock:
-            for attempt in range(3):
-                try:
-                    snapshot = await ctx.page.evaluate(
-                        SNAPSHOT_GENERATE_JS, args=content_hash, timeout_s=10.0
-                    )
-                    if snapshot and isinstance(snapshot, str) and len(snapshot) > 0:
-                        return snapshot
-                except Exception as e:
-                    log.debug("快照计算第 %d 次尝试失败: %s", attempt + 1, e)
-                    if attempt < 2:
-                        await ctx.page.wait_for_timeout(100)
+            # Another lease may have failed while this caller waited for signing.
+            if ctx.context_id in self._failed_snapshot_contexts:
+                raise InvalidRequestTemplateError("BotGuard signing context is unavailable")
 
-        raise RuntimeError(
-            f"Snapshot generation failed for content hash {content_hash[:8]}"
-        )
+            async def read_snapshot() -> str:
+                async with asyncio.timeout(SNAPSHOT_TIMEOUT_SECONDS):
+                    snapshot = await ctx.page.evaluate(
+                        SNAPSHOT_GENERATE_JS, args=content_hash,
+                        timeout_s=SNAPSHOT_TIMEOUT_SECONDS,
+                    )
+                    if isinstance(snapshot, str) and snapshot:
+                        return snapshot
+                    raise InvalidRequestTemplateError("BotGuard signing returned no snapshot")
+
+            snapshot_read = asyncio.create_task(read_snapshot(), name="aistudio-snapshot-read")
+            try:
+                return await asyncio.shield(snapshot_read)
+            except asyncio.CancelledError:
+                # Cancelling CDP's waiter cannot settle the page's JS snapQueue.
+                # Join only this read under its original deadline before releasing
+                # the lease, including repeated AnyIO or asyncio cancellation.
+                with CancelScope(shield=True):
+                    while not snapshot_read.done():
+                        try:
+                            await asyncio.shield(snapshot_read)
+                        except asyncio.CancelledError:
+                            continue
+                        except Exception:
+                            break
+                    if snapshot_read.cancelled():
+                        self._failed_snapshot_contexts.add(ctx.context_id)
+                    else:
+                        try:
+                            snapshot_read.result()
+                        except Exception:
+                            self._failed_snapshot_contexts.add(ctx.context_id)
+                raise
+            except Exception as exc:
+                # More evaluations would queue behind an unresolved Promise.
+                # Existing bounded recovery replaces this page after leases drain.
+                self._failed_snapshot_contexts.add(ctx.context_id)
+                raise InvalidRequestTemplateError("BotGuard signing context is unavailable") from exc
 
     async def send_hooked_request(
         self,
@@ -817,6 +880,8 @@ class BrowserSession:
             with suppress(Exception):
                 self._proc.terminate()
             self._proc = None
+
+        self._failed_snapshot_contexts.clear()
 
 
 __all__ = [

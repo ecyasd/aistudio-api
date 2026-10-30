@@ -18,6 +18,9 @@ from aistudio_api.domain.models import (
     GeneratedImage,
     ModelOutput,
 )
+from aistudio_api.infrastructure.gateway.terminal_body_replay import (
+    TerminalBodyReplayGuard,
+)
 from aistudio_api.infrastructure.utils.common import decode_base64_images
 from aistudio_api.infrastructure.utils.response_diagnostics import (
     observe_candidate,
@@ -774,11 +777,12 @@ def parse_text_output(raw: str) -> ModelOutput:
         raise RequestError(502, "Upstream response contains no generation chunks")
 
     merged = Candidate()
+    replay_guard = TerminalBodyReplayGuard()
     text_fragments: list[str] = []
     thought_fragments: list[str] = []
     code_fragments: list[str] = []
     for chunk in chunks:
-        parsed = parse_response_chunk(chunk)
+        parsed = replay_guard.accept(parse_response_chunk(chunk))
         merged.continuation_unsafe |= parsed.continuation_unsafe
         merged.parts.extend(parsed.parts)
         if parsed.text:

@@ -28,8 +28,9 @@ export const useSystemStore = defineStore('system', () => {
     try {
       const result = await systemApi.getStats()
       if (request === statsRequest) stats.value = result
+      return true
     } catch {
-      // ignore
+      return false
     } finally {
       if (request === statsRequest) loading.value = false
     }
@@ -40,8 +41,9 @@ export const useSystemStore = defineStore('system', () => {
     try {
       const result = await systemApi.getRotation()
       if (request === rotationRequest) rotation.value = result
+      return true
     } catch {
-      // ignore
+      return false
     }
   }
   async function checkHealth() {
@@ -49,8 +51,10 @@ export const useSystemStore = defineStore('system', () => {
     try {
       await systemApi.health()
       if (request === healthRequest) health.value = 'online'
+      return true
     } catch {
       if (request === healthRequest) health.value = 'offline'
+      return false
     }
   }
 

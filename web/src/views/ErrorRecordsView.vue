@@ -93,6 +93,7 @@ function diagnosticSignals(record: ResponseDiagnostic) {
   if (record.marker_count) signals.push(`正文含 [:数字] 标记 ${record.marker_count} 处`)
   if (record.empty_thought_parts) signals.push(`空思考 / 签名片段 ${record.empty_thought_parts} 个`)
   if (record.flags.includes('content_after_finish')) signals.push('结束信号后仍有内容')
+  if (record.flags.includes('terminal_body_replay_suppressed')) signals.push('已拦截末尾整篇正文重复')
   if (record.flags.includes('sequence_limited')) signals.push('顺序记录已达上限')
   if (record.flags.includes('continuation_skipped_budget')) signals.push('抗截断未追加：历史预算不足')
   if (record.flags.includes('continuation_skipped_unsupported')) signals.push('抗截断未追加：包含暂不支持回放的内容')

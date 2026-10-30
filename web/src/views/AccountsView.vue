@@ -22,7 +22,7 @@ const editModalOpen = ref(false)
 const editingAccount = ref<AccountWithStats | null>(null)
 
 async function loadData() {
-  await accountsStore.fetchAll()
+  return accountsStore.fetchAll()
 }
 
 // 页面活跃时每 8 秒自动轮询账号状态与配额

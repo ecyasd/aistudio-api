@@ -35,10 +35,11 @@ const availableAccountsCount = computed(() => {
 })
 
 async function loadData() {
-  await Promise.all([
+  const results = await Promise.all([
     accountsStore.fetchAll(),
     systemStore.fetchStats(),
   ])
+  return results.every(result => result !== false)
 }
 
 // 页面可见时每 10 秒自动轮询一次统计与账号状态

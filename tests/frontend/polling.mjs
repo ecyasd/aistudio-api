@@ -15,17 +15,58 @@ const tick = async () => { for (let i = 0; i < 12; i++) await Promise.resolve() 
 const checks = []
 
 function harness() {
-  const timers = new Map(), unmounts = []
+  const timers = new Map(), delays = new Map(), unmounts = []
   let sequence = 0, visibility
   const document = { hidden: false, addEventListener(_, fn) { visibility = fn } }
   const module = { exports: {} }
   vm.runInNewContext(code, {
     module, exports: module.exports, console, document,
     require(name) { assert.equal(name, 'vue'); return { onUnmounted(fn) { unmounts.push(fn) } } },
-    window: { location: { protocol: 'https:' }, setTimeout(fn) { const id = ++sequence; timers.set(id, fn); return id } },
-    clearTimeout(id) { timers.delete(id) },
+    window: { location: { protocol: 'https:' }, setTimeout(fn, delay) { const id = ++sequence; timers.set(id, fn); delays.set(id, delay); return id } },
+    clearTimeout(id) { timers.delete(id); delays.delete(id) },
   })
-  return { use: module.exports.usePolling, timers, unmounts, document, visibility: () => visibility() }
+  return { use: module.exports.usePolling, timers, delays, unmounts, document, visibility: () => visibility() }
+}
+
+{
+  const h = harness()
+  const vue = require('vue')
+  const storeModule = { exports: {} }
+  const source = ts.transpileModule(fs.readFileSync(path.resolve(here, '../../web/src/stores/system.ts'), 'utf8'), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText
+  let fail = true
+  vm.runInNewContext(source, {
+    module: storeModule, exports: storeModule.exports, console,
+    require(name) {
+      if (name === 'vue') return vue
+      if (name === 'pinia') return { defineStore: (_name, setup) => setup }
+      if (name === '@/api/system.ts') return { systemApi: { getStats: async () => {
+        if (fail) throw new Error('Synthetic refresh failure')
+        return { totals: { requests: 4 } }
+      } } }
+      if (name === './toast.ts') return { useToastStore: () => ({}) }
+      throw new Error(`Unexpected import: ${name}`)
+    },
+  })
+  const store = storeModule.exports.useSystemStore()
+  h.use(() => store.fetchStats(), 1000)
+  await tick()
+  assert.equal([...h.delays.values()].at(-1), 1000)
+  function advance() {
+    const [id, callback] = h.timers.entries().next().value
+    h.timers.delete(id); h.delays.delete(id); callback()
+  }
+  advance(); await tick()
+  assert.equal([...h.delays.values()].at(-1), 1500, 'store failure must reach the poller backoff')
+  advance(); await tick()
+  assert.equal([...h.delays.values()].at(-1), 2250)
+  fail = false
+  advance(); await tick()
+  assert.equal([...h.delays.values()].at(-1), 1000, 'successful recovery resets backoff')
+  assert.equal(store.stats.value.totals.requests, 4)
+  h.unmounts[0]()
+  checks.push('real system store failures back off through the poller and recovery resets the interval')
 }
 
 {

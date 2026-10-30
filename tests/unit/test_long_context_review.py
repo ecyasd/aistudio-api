@@ -127,7 +127,7 @@ async def test_incremental_snapshot_hash_preserves_separators_and_all_part_kinds
 
     page = SimpleNamespace(evaluate=AsyncMock(return_value="synthetic-snapshot"))
     session = BrowserSession(port=1)
-    monkeypatch.setattr(session, "ensure_ready", AsyncMock(return_value=SimpleNamespace(page=page)))
+    monkeypatch.setattr(session, "ensure_ready", AsyncMock(return_value=SimpleNamespace(page=page, context_id=1)))
     contents = [AistudioContent("user", [
         AistudioPart(text="合成文本"), AistudioPart(), AistudioPart(inline_data=("image/png", "base64")),
         AistudioPart(executable_code=("PYTHON", "code")), AistudioPart(code_execution_result=(1, "result")),

@@ -41,12 +41,12 @@ export const useAccountsStore = defineStore('accounts', () => {
     const request = ++refreshRequest
     loading.value = true
     try {
-      const [accsRes, activeRes] = await Promise.allSettled([
+      const [accsRes, activeRes, rotationRes] = await Promise.allSettled([
         accountsApi.list(),
         accountsApi.getActive(),
         systemStore.fetchRotation(),
       ])
-      if (request !== refreshRequest) return
+      if (request !== refreshRequest) return false
 
       if (accsRes.status === 'fulfilled') {
         accounts.value = accsRes.value
@@ -62,6 +62,8 @@ export const useAccountsStore = defineStore('accounts', () => {
           !accounts.value.some(account => account.id === activeAccount.value?.id)) {
         activeAccount.value = null
       }
+      return accsRes.status === 'fulfilled' && activeRes.status === 'fulfilled'
+        && rotationRes.status === 'fulfilled' && rotationRes.value !== false
     } finally {
       if (request === refreshRequest) loading.value = false
     }

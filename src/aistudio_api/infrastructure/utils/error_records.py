@@ -165,8 +165,10 @@ def _failure_code(exc: BaseException, category: str) -> str:
 
 def classify_failure(exc: BaseException, http_status: int | None = None) -> tuple[int, str, str]:
     """Return a stable status/category/summary; exception messages are never returned."""
+    status = _http_status(http_status) or _http_status(getattr(exc, "status_code", None))
+    status = status or _http_status(getattr(exc, "status", None))
     error = _unwrap(exc)
-    status = _http_status(http_status) or _http_status(getattr(error, "status_code", None))
+    status = status or _http_status(getattr(error, "status_code", None))
     status = status or _http_status(getattr(error, "status", None))
     name = type(error).__name__
     if isinstance(error, asyncio.CancelledError) or status == 499:

@@ -18,6 +18,11 @@
 从本仓库构建或使用本仓库 CI 工件。上游容器镜像不包含本分支修复。
 开发依赖安装在隔离验证环境中；代码更新不顺便升级生产依赖。
 
+默认 `docker-compose.yml` 与兼容的 `docker-compose.deploy.yml` 都构建当前维护源码，
+只把 API 发布到 `127.0.0.1:8080`，公网访问由 HTTPS 网关承接。兼容文件保留原有
+`aistudio-api-data` 命名卷和 `/app/data/config.yaml` 路径；使用它更新时执行
+`docker compose -f docker-compose.deploy.yml up -d --build`，保留现有项目名和卷。
+
 ## 加固入口
 
 先安装项目运行依赖与受控 Chromium，再为服务配置以下持久路径。
@@ -172,6 +177,13 @@ subject 须匹配仓库的实际 OIDC 格式；启用不可变 subject 的仓库
 思考标志的文字是否属于思考。
 
 响应诊断独立保留最近 10 分钟、最多 100 条，只保存固定字段和计数。
+`terminal_body_replay_suppressed` 表示已拦截完成帧中与此前整篇纯正文一致的重复；
+管理页显示“已拦截末尾整篇正文重复”。`body_chars` 统计上游收到的正文，
+`suppressed_body_chars` 为其中未再次交付的字符数，`terminal_body_replays` 为拦截次数。
+`body_parts` 与 `terminal_body_chars` 分别为收到的正文 Part 数和完成帧正文字符量。
+比较不留存正文或摘要；它不检测改写复述，未命中也不能证明没有模型自身重复。
+签名超时或失败的页面不再接收新的签名排队；旧租约结束后走已有恢复替换页面。
+取消已开始的签名只等待当前读操作在原有 10 秒期限内收束，避免遗留后台签名任务。
 每次请求结束时还会向现有服务日志输出 `response_diagnostic` 白名单摘要，便于
 超过管理页窗口后按时间和请求 ID 追查。正文标记、正文后思考及完成后内容使用
 WARNING，失败和取消的摘要也使用 WARNING，普通成功和恢复使用 INFO；

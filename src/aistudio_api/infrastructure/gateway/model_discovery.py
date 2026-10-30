@@ -142,18 +142,18 @@ class ModelDiscoveryService:
             # 1. 优先通过当前激活的浏览器 Page 会话发 XHR 拉取 ListModels
             if session is not None:
                 try:
-                    page = session.page
-                    if page is not None and not page.is_closed():
-                        models = await self._fetch_via_page(
-                            page, auth_user=session.get_current_auth_user()
-                        )
-                        if models:
-                            self._cached_models = models
-                            self._last_fetched_at = time.time()
-                            logger.info(
-                                "通过 Page XHR 动态更新了 %d 个模型", len(models)
+                    async with session.existing_context_scope() as context:
+                        if context is not None:
+                            models = await self._fetch_via_page(
+                                context.page, auth_user=context.auth_user
                             )
-                            return models
+                            if models:
+                                self._cached_models = models
+                                self._last_fetched_at = time.time()
+                                logger.info(
+                                    "通过 Page XHR 动态更新了 %d 个模型", len(models)
+                                )
+                                return models
                 except Exception as e:
                     logger.debug("通过页面 XHR 拉取模型列表失败: %s", e)
 

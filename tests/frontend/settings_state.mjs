@@ -105,13 +105,62 @@ checks.push('older statistics, rotation and health reads cannot replace a newer 
   pending[1].resolve({ marker: 'retained' }); await current
   assert.equal(store.loading.value, false)
   const failing = store.fetchStats()
-  pending[2].reject(new Error('Synthetic current failure')); await failing
+  pending[2].reject(new Error('Synthetic current failure')); assert.equal(await failing, false)
   assert.equal(store.stats.value.marker, 'retained', 'a failed refresh must preserve the latest successful snapshot')
   const retry = store.fetchStats()
   pending[3].resolve({ marker: 'retry' }); await retry
   assert.equal(store.stats.value.marker, 'retry')
 }
 checks.push('statistics loading follows the newest read and refresh failures preserve data and allow retry')
+
+{
+  const store = load('stores/system.ts', {
+    '@/api/system.ts': { systemApi: { async getRotation() { throw new Error('Synthetic rotation failure') } } },
+  }).useSystemStore()
+  store.rotation.value = { accounts: { retained: {} } }
+  assert.equal(await store.fetchRotation(), false)
+  assert(store.rotation.value.accounts.retained)
+
+  for (const failure of ['list', 'getActive', 'rotation']) {
+    const accounts = load('stores/accounts.ts', {
+      '@/api/accounts.ts': { accountsApi: {
+        async list() { if (failure === 'list') throw new Error('Synthetic list failure'); return [] },
+        async getActive() { if (failure === 'getActive') throw new Error('Synthetic active failure'); return null },
+      } },
+      './system.ts': { useSystemStore: () => ({ async fetchRotation() { return failure !== 'rotation' }, rotation: null }) },
+    }).useAccountsStore()
+    assert.equal(await accounts.fetchAll(), false, `${failure} failure must reach the polling caller`)
+  }
+}
+checks.push('rotation and partial account refresh failures return an explicit polling failure without rejecting mutations')
+
+{
+  for (const failure of ['accounts', 'stats']) {
+    const polls = []
+    const state = load('views/DashboardView.vue', {
+      '@/stores/accounts.ts': { useAccountsStore: () => ({ async fetchAll() { return failure !== 'accounts' } }) },
+      '@/stores/system.ts': { useSystemStore: () => ({ async fetchStats() { return failure !== 'stats' } }) },
+      '@/composables/usePolling.ts': { usePolling: callback => polls.push(callback) },
+    }, {}, true).default.setup({}, { expose() {} })
+    assert.equal(await state.loadData(), false)
+    assert.equal(await polls[0](), false)
+  }
+  const notifications = []
+  let succeed = false
+  const state = load('components/layout/AppLayout.vue', {
+    'vue-router': { useRoute: () => ({ name: 'dashboard', meta: {} }) },
+    '@/stores/accounts.ts': { useAccountsStore: () => ({ async fetchAll() { return succeed } }) },
+    '@/stores/system.ts': { useSystemStore: () => ({ async fetchStats() { return true }, async fetchRotation() { return true }, async checkHealth() { return true } }) },
+    '@/stores/toast.ts': { useToastStore: () => ({ success: message => notifications.push(['success', message]), error: message => notifications.push(['error', message]) }) },
+    '@/stores/errors.ts': { useErrorsStore: () => ({}) },
+  }, {}, true).default.setup({}, { expose() {} })
+  await state.handleRefresh()
+  assert.equal(notifications.at(-1)[0], 'error', 'partial refresh must not announce success')
+  succeed = true
+  await state.handleRefresh()
+  assert.equal(notifications.at(-1)[0], 'success')
+}
+checks.push('dashboard polling propagates partial failures and manual refresh announces success only when all reads succeed')
 
 for (const action of ['clearCooldown', 'forceNextAccount']) {
   const pending = []
@@ -143,7 +192,7 @@ checks.push('cooldown reset and forced rotation retain the refreshed state after
   lists[1].resolve([{ id: 'current-account' }]); actives[1].resolve({ id: 'current-account' })
   await current
   lists[0].resolve([{ id: 'deleted-account' }]); actives[0].resolve({ id: 'deleted-account' })
-  await older
+  assert.equal(await older, false, 'a discarded refresh cannot announce success')
   assert.equal(store.accounts.value[0].id, 'current-account')
   assert.equal(store.activeId.value, 'current-account')
   const failedActive = store.fetchAll()

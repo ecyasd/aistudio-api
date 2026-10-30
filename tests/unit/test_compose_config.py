@@ -59,3 +59,19 @@ def test_compose_mounts_config_parent_instead_of_replace_target():
     parent = next(volume for volume in mounts if volume["target"] == str(PurePosixPath(configured).parent))
     assert parent["source"] == "./runtime-config"
     assert parent["bind"]["create_host_path"] is False
+
+
+@pytest.mark.parametrize("filename", ["docker-compose.yml", "docker-compose.deploy.yml"])
+def test_supported_compose_entries_build_maintained_source_and_bind_loopback(filename):
+    service = yaml.safe_load((REPO / filename).read_text())["services"]["aistudio-api"]
+    assert service["build"] == "."
+    assert "image" not in service
+    assert service["ports"] == ["127.0.0.1:8080:8080"]
+
+
+def test_compatibility_compose_preserves_existing_data_volume_and_config_path():
+    document = yaml.safe_load((REPO / "docker-compose.deploy.yml").read_text())
+    service = document["services"]["aistudio-api"]
+    assert service["volumes"] == ["aistudio-api-data:/app/data"]
+    assert "AISTUDIO_CONFIG_FILE=/app/data/config.yaml" in service["environment"]
+    assert "aistudio-api-data" in document["volumes"]
