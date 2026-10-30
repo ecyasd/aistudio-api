@@ -3,11 +3,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from aistudio_api.api.gemini import classify_gemini_error_payload
 from aistudio_api.api.responses import (
     to_gemini_parts,
     to_gemini_usage_metadata,
 )
-from aistudio_api.application.api_service_gemini import classify_gemini_error_payload
 from aistudio_api.domain.errors import (
     AuthError,
     RequestError,
@@ -120,7 +120,7 @@ def test_classify_gemini_error_payload():
 
 
 def test_clean_upstream_error_message():
-    from aistudio_api.application.api_service_gemini import clean_upstream_error_message
+    from aistudio_api.api.gemini import clean_upstream_error_message
 
     assert clean_upstream_error_message("") == ""
     assert clean_upstream_error_message("Normal plain error") == "Normal plain error"
@@ -142,7 +142,7 @@ async def test_handle_attempt_exception_retries_ambiguous_rpc_404_in_place():
 
     from fastapi import HTTPException
 
-    from aistudio_api.application.api_service_gemini import handle_attempt_exception
+    from aistudio_api.api.gemini import handle_attempt_exception
     from aistudio_api.infrastructure.gateway.client import AIStudioClient
 
     mock_client = MagicMock(spec=AIStudioClient)
@@ -192,19 +192,19 @@ async def test_handle_attempt_exception_retries_ambiguous_rpc_404_in_place():
 async def test_build_gemini_streaming_response_passes_requested_model(monkeypatch):
     from unittest.mock import AsyncMock, MagicMock
 
+    from aistudio_api.api.gemini import (
+        _build_gemini_streaming_response,
+    )
     from aistudio_api.api.schemas import (
         GeminiContent,
         GeminiGenerateContentRequest,
         GeminiPart,
     )
-    from aistudio_api.application.api_service_gemini import (
-        _build_gemini_streaming_response,
-    )
     from aistudio_api.infrastructure.gateway.client import AIStudioClient
 
     passed_model = None
     monkeypatch.setattr(
-        "aistudio_api.application.api_service_gemini.ensure_active_account", AsyncMock()
+        "aistudio_api.application.generation.ensure_active_account", AsyncMock()
     )
 
     async def fake_stream_generate_content(*args, **kwargs):
@@ -236,20 +236,20 @@ async def test_streaming_metadata_event_does_not_block_failover(monkeypatch):
     """验证在仅接收到 thought_signature 等内部元数据事件时发生异常，不会误判为已发送数据而阻断重试。"""
     from unittest.mock import AsyncMock, MagicMock
 
+    from aistudio_api.api.gemini import (
+        _build_gemini_streaming_response,
+    )
     from aistudio_api.api.schemas import (
         GeminiContent,
         GeminiGenerateContentRequest,
         GeminiPart,
-    )
-    from aistudio_api.application.api_service_gemini import (
-        _build_gemini_streaming_response,
     )
     from aistudio_api.domain.errors import RequestError
     from aistudio_api.infrastructure.gateway.client import AIStudioClient
 
     attempt_count = 0
     monkeypatch.setattr(
-        "aistudio_api.application.api_service_gemini.ensure_active_account", AsyncMock()
+        "aistudio_api.application.generation.ensure_active_account", AsyncMock()
     )
 
     async def fake_stream_generate_content(*args, **kwargs):

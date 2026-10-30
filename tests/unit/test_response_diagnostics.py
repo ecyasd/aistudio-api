@@ -13,11 +13,11 @@ import httpx
 import pytest
 from fastapi import Depends, FastAPI
 
-from aistudio_api.api import routes_errors
+from aistudio_api.api import gemini as api, routes_errors
 from aistudio_api.api.dependencies import require_web_auth
 from aistudio_api.api.error_middleware import ErrorRecordsMiddleware
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
-from aistudio_api.application import api_service_gemini as api, continuation
+from aistudio_api.application import continuation, generation as generation_execution
 from aistudio_api.application.chat_service import normalize_gemini_request
 from aistudio_api.config import settings
 from aistudio_api.domain.errors import RequestError
@@ -50,6 +50,20 @@ def trace(*, stream=False, auto_continue=False, model="gemini-4-argon"):
         yield errors.get_request_context()
     finally:
         errors.reset_request_context(token)
+
+
+def test_transport_probe_records_only_fixed_phase_and_bounded_counts(diagnostic_store):
+    with trace(stream=True):
+        diagnostics.note_timing("browser_request_started")
+        diagnostics.note_transport_wait("awaiting_ack", 20_001, repair_attempted=True)
+        diagnostics.note_transport_wait("SYNTHETIC_PRIVATE_BROWSER_PAYLOAD", 99_999)
+        diagnostics.finish_response_diagnostics("success", 200)
+    row = diagnostic_store.list_records()["items"][0]
+    assert row["transport_wait_phase"] == "awaiting_ack"
+    assert row["transport_wait_ms"] == 20_001
+    assert row["transport_probes"] == row["transport_repair_attempts"] == 1
+    assert "browser_request_started" in row["timings_ms"]
+    assert "SYNTHETIC_PRIVATE_BROWSER_PAYLOAD" not in json.dumps(row)
 
 
 def part(text=None, *, thought=False, signature=None):
@@ -292,10 +306,11 @@ async def test_client_counts_only_capture_success_and_continuation_has_explicit_
 @pytest.mark.parametrize("stream", [False, True])
 async def test_api_retry_and_continuation_counters_share_one_inbound_context(diagnostic_store, monkeypatch, stream):
     client = client_for([wire(chunk()), wire(chunk(part("A"), finish=2)), wire(chunk(part("B"), finish=1))])
-    monkeypatch.setattr(api, "ensure_active_account", AsyncMock())
+    monkeypatch.setattr(generation_execution, "ensure_active_account", AsyncMock())
     monkeypatch.setattr(api, "validate_account_availability", MagicMock())
-    monkeypatch.setattr(api, "account_id_for_auth_file", lambda _: "synthetic-account")
+    monkeypatch.setattr(generation_execution, "account_id_for_auth_file", lambda _: "synthetic-account")
     monkeypatch.setattr(api, "record_rotator_event", MagicMock())
+    monkeypatch.setattr(generation_execution, "record_rotator_event", api.record_rotator_event)
     monkeypatch.setattr(api.runtime_state, "record", MagicMock())
     req = GeminiGenerateContentRequest.model_validate({
         "contents": [{"role": "user", "parts": [{"text": "offline synthetic prompt"}]}],

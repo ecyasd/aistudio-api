@@ -261,7 +261,7 @@ async def test_rotator_auth_error_failover():
 @pytest.mark.asyncio
 async def test_try_switch_account_avalanche_protection():
     """测试并发多个 429 时，_switch_lock 防止级联切号。"""
-    from aistudio_api.api.state import runtime_state
+    from aistudio_api.application.runtime import runtime_state
 
     mock_rotator = MagicMock(spec=AccountRotator)
     mock_acc_service = MagicMock()
@@ -378,7 +378,7 @@ async def test_ensure_botguard_available_regions_fast_fail():
 @pytest.mark.asyncio
 async def test_runtime_state_record_model_stats():
     """测试 RuntimeState.record 正确更新 stats，不抛出 TypeError 'Field' object is not subscriptable。"""
-    from aistudio_api.api.state import RuntimeState
+    from aistudio_api.application.runtime import RuntimeState
 
     state = RuntimeState()
     state.record("models/gemini-3.8-flash", "errors")
@@ -570,7 +570,7 @@ async def test_ensure_authorization_header_concurrency_and_fallback():
 @pytest.mark.asyncio
 async def test_try_switch_account_concurrent_403_avalanche_and_in_place_recovery():
     """并发多个协程遭遇 403 时，在位自愈仅执行 1 次，自愈后立即清除 auth_cooldown 避免连锁 403。"""
-    from aistudio_api.api.state import runtime_state
+    from aistudio_api.application.runtime import runtime_state
 
     mock_rotator = MagicMock(spec=AccountRotator)
     mock_acc_service = MagicMock()

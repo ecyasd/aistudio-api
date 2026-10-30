@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock
 
-from aistudio_api.api.state import RuntimeState
 from aistudio_api.application.account_rotator import AccountRotator
+from aistudio_api.application.runtime import RuntimeState
 from aistudio_api.infrastructure.account.account_store import AccountMeta, AccountStore
 
 

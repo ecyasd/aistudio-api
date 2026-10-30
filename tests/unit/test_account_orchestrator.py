@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
-from aistudio_api.api.state import runtime_state
 from aistudio_api.application import account_rotator as rotator_module
 from aistudio_api.application.account_orchestrator import (
     AccountPreparationError,
@@ -21,6 +20,7 @@ from aistudio_api.application.account_orchestrator import (
 )
 from aistudio_api.application.account_rotator import AccountRotator, AccountStats
 from aistudio_api.application.account_service import AccountService
+from aistudio_api.application.runtime import runtime_state
 from aistudio_api.config import settings
 from aistudio_api.domain.errors import AuthError, SessionExpiredError
 from aistudio_api.infrastructure.account.account_store import AccountMeta, AccountStore
@@ -412,8 +412,8 @@ async def test_concurrent_switch_records_failed_lease_once(
 async def test_old_403_context_recovers_once_through_handler_or_pre_recorded_path(
     monkeypatch, pre_recorded
 ):
+    from aistudio_api.api.gemini import handle_attempt_exception
     from aistudio_api.application import account_orchestrator
-    from aistudio_api.application.api_service_gemini import handle_attempt_exception
 
     account = AccountMeta(
         id="same_account", name="Same", email=None, created_at="2026-10-18"

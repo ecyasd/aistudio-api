@@ -11,10 +11,11 @@ import httpx
 import pytest
 from fastapi import FastAPI, HTTPException
 
+from aistudio_api.api import gemini as service
 from aistudio_api.api.app import http_exception_handler
 from aistudio_api.api.dependencies import get_client
 from aistudio_api.api.routes_gemini import router
-from aistudio_api.application import api_service_gemini as service
+from aistudio_api.application import generation as generation_execution
 from aistudio_api.application.account_orchestrator import AccountPreparationError
 from aistudio_api.domain.errors import (
     AccountIdentityMismatchError,
@@ -57,7 +58,8 @@ def identity_api(monkeypatch):
     ))
     monkeypatch.setattr(service.runtime_state, "record", MagicMock())
     monkeypatch.setattr(service, "record_rotator_event", MagicMock())
-    monkeypatch.setattr(service, "ensure_active_account", AsyncMock())
+    monkeypatch.setattr(generation_execution, "record_rotator_event", service.record_rotator_event)
+    monkeypatch.setattr(generation_execution, "ensure_active_account", AsyncMock())
     monkeypatch.setattr(service, "try_switch_account", AsyncMock(return_value=False))
     app = FastAPI()
     app.include_router(router)
@@ -95,7 +97,7 @@ async def test_preparation_identity_error_reaches_http_or_sse_without_model_call
         identity_api.accounts.insert(0, SimpleNamespace(id="other-account"))
         raise AccountPreparationError("selected-account", error_type(SYNTHETIC_DIAGNOSTIC))
 
-    service.ensure_active_account.side_effect = prepare
+    generation_execution.ensure_active_account.side_effect = prepare
     suffix = "streamGenerateContent" if stream else "generateContent"
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=identity_api.app), base_url="http://offline",
@@ -153,7 +155,7 @@ async def test_identity_error_after_output_stays_in_band_without_retry(identity_
 @pytest.mark.parametrize("stream", [False, True])
 async def test_failover_identity_failure_keeps_target_type_and_stops(identity_api, stream):
     first_error = AccountIdentityMismatchError(SYNTHETIC_DIAGNOSTIC)
-    service.ensure_active_account.side_effect = AccountPreparationError("selected-account", first_error)
+    generation_execution.ensure_active_account.side_effect = AccountPreparationError("selected-account", first_error)
     service.try_switch_account.side_effect = AccountPreparationError(
         "failover-account", AccountIdentityUnavailableError(SYNTHETIC_DIAGNOSTIC),
     )
@@ -178,7 +180,7 @@ async def test_failover_identity_failure_keeps_target_type_and_stops(identity_ap
 @pytest.mark.parametrize("error_type", IDENTITY_ERRORS)
 @pytest.mark.parametrize("stream", [False, True])
 async def test_identity_failover_prepares_again_before_success(identity_api, error_type, stream):
-    service.ensure_active_account.side_effect = [
+    generation_execution.ensure_active_account.side_effect = [
         AccountPreparationError("selected-account", error_type(SYNTHETIC_DIAGNOSTIC)),
         None,
     ]
@@ -203,11 +205,11 @@ async def test_identity_failover_prepares_again_before_success(identity_api, err
     assert all("error" not in payload for payload in payloads)
     assert payloads[-1]["candidates"][0]["finishReason"] == "STOP"
     assert "synthetic verified reply" in response.text
-    service.ensure_active_account.assert_has_awaits([
+    generation_execution.ensure_active_account.assert_has_awaits([
         call(0, model="models/gemini-test"),
         call(1, model="models/gemini-test"),
     ])
-    assert service.ensure_active_account.await_count == 2
+    assert generation_execution.ensure_active_account.await_count == 2
     service.try_switch_account.assert_awaited_once()
     service.record_rotator_event.assert_called_once_with(
         "success", model="models/gemini-test", account_id="selected-account",

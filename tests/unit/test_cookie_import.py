@@ -162,8 +162,8 @@ def test_domain_overrides_scopes_osid_strictly_to_aistudio():
 @pytest.mark.asyncio
 async def test_import_bundle_flow(tmp_path):
     from aistudio_api.api.routes_accounts import ImportBundleRequest, import_bundle
-    from aistudio_api.api.state import RuntimeState
     from aistudio_api.application.account_service import AccountService
+    from aistudio_api.application.runtime import RuntimeState
     from aistudio_api.infrastructure.account.account_store import AccountStore
 
     store = AccountStore(accounts_dir=tmp_path / "accounts")
@@ -245,8 +245,8 @@ async def test_delete_cookie_group_migrates_active_account(tmp_path):
     from unittest.mock import AsyncMock, MagicMock
 
     from aistudio_api.api.routes_accounts import delete_cookie_group
-    from aistudio_api.api.state import RuntimeState
     from aistudio_api.application.account_service import AccountService
+    from aistudio_api.application.runtime import RuntimeState
     from aistudio_api.infrastructure.account.account_store import AccountStore
 
     store = AccountStore(accounts_dir=tmp_path / "accounts_grp_test")

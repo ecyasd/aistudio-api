@@ -8,12 +8,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from aistudio_api.domain.errors import BrowserTransportError
 from aistudio_api.infrastructure.browser.cdp_client import CDPConnection, CDPPage
 from aistudio_api.infrastructure.browser.scripts import (
     HOOKED_CLEANUP_JS,
     HOOKED_REQUEST_JS,
     STREAM_ACK_JS,
     STREAM_CLEANUP_JS,
+    STREAM_RESEND_JS,
+    STREAM_STATE_JS,
     STREAMING_INIT_JS,
 )
 from aistudio_api.infrastructure.gateway.transport import XHRStreamTransport
@@ -29,6 +32,276 @@ def make_synthetic_page():
     listeners = []
     page.on_binding.side_effect = lambda _name, callback: listeners.append(callback)
     return page, listeners
+
+
+async def test_stream_binding_registration_failure_never_dispatches_fetch():
+    page, _ = make_synthetic_page()
+    page.add_binding.side_effect = RuntimeError("CDP binding registration failed")
+    page.evaluate = AsyncMock()
+    transport = XHRStreamTransport()
+    with pytest.raises(RuntimeError, match="CDP binding registration failed"):
+        await anext(transport.send_streaming_request(
+            page, url="https://synthetic.invalid", headers={}, body="[]", timeout_ms=50,
+        ))
+    page.evaluate.assert_not_awaited()
+    assert transport.in_flight_count == 0
+
+
+@pytest.mark.parametrize("repaired", [True, False])
+async def test_missing_global_binding_repairs_only_after_explicit_no_dispatch_receipt(repaired):
+    page, listeners = make_synthetic_page()
+    inits, acks = [], []
+
+    async def evaluate(script, args=None, **_kwargs):
+        if script == STREAMING_INIT_JS:
+            inits.append(args["rid"])
+            if len(inits) == 1 or not repaired:
+                return {"started": False, "reason": "binding_unavailable"}
+            listeners[0](json.dumps({"rid": args["rid"], "type": "status", "status": 200, "seq": 1}))
+            return {"started": True}
+        if script == STREAM_ACK_JS:
+            acks.append(args["seq"])
+            if args["seq"] == 1:
+                listeners[0](json.dumps({"rid": args["rid"], "type": "done", "seq": 2}))
+        return None
+
+    page.evaluate = AsyncMock(side_effect=evaluate)
+    transport = XHRStreamTransport()
+    stream = transport.send_streaming_request(page, url="https://synthetic.invalid", headers={}, body="[]", timeout_ms=1000)
+    if repaired:
+        assert [event async for event in stream] == [("status", 200)]
+        assert acks == [1, 2], "completion must be acknowledged before browser cleanup"
+    else:
+        with pytest.raises(BrowserTransportError):
+            await anext(stream)
+    assert len(inits) == 2 and inits[0] == inits[1]
+    assert transport.in_flight_count == 0 and transport._buffered_bytes == 0
+    assert [call.args[0] for call in page.add_binding.await_args_list] == ["__aistudio_stream_push__", "__aistudio_stream_resume__"]
+
+
+async def test_no_response_headers_timeout_keeps_its_type_and_cleans_browser():
+    page, _ = make_synthetic_page()
+    page.evaluate = AsyncMock()
+    transport = XHRStreamTransport()
+    with pytest.raises(TimeoutError, match="no response status"):
+        await anext(transport.send_streaming_request(
+            page, url="https://synthetic.invalid", headers={}, body="[]", timeout_ms=30,
+        ))
+    assert page.evaluate.call_args.args[0] == STREAM_CLEANUP_JS
+    assert transport.in_flight_count == 0 and transport._buffered_bytes == 0
+
+
+@pytest.mark.parametrize("after_body", [False, True])
+async def test_silent_push_recovery_keeps_one_fetch_and_deduplicates_late_delivery(
+    monkeypatch, after_body
+):
+    from aistudio_api.infrastructure.gateway import transport as module
+
+    monkeypatch.setattr(module, "STREAM_PROBE_INTERVAL_S", 0.015)
+    page, listeners = make_synthetic_page()
+    captured = {}
+    last_seq = 3 if after_body else 1
+
+    def push(event, *, duplicate=False):
+        payload = json.dumps({"rid": captured["rid"], **event})
+        listeners[1](payload)
+        if duplicate:
+            listeners[0](payload)
+
+    async def evaluate(script, args=None, **_kwargs):
+        if script == STREAMING_INIT_JS:
+            captured.update(args)
+            if after_body:
+                push({"type": "status", "status": 200, "seq": 1})
+                push({"type": "chunk", "text": "first", "seq": 2})
+        elif script == STREAM_STATE_JS:
+            return {"phase": "awaiting_ack", "seq": last_seq, "bindingReady": True}
+        elif script == STREAM_RESEND_JS:
+            push({"type": "chunk", "text": "second", "seq": 3} if after_body else
+                 {"type": "status", "status": 200, "seq": 1}, duplicate=True)
+            return True
+        elif script == STREAM_ACK_JS:
+            if after_body and args["seq"] == 3:
+                push({"type": "done"})
+            elif not after_body:
+                push({"type": "chunk", "text": "second", "seq": 2} if args["seq"] == 1 else
+                     {"type": "done"})
+        return None
+
+    page.evaluate = AsyncMock(side_effect=evaluate)
+    transport = XHRStreamTransport()
+    events = [event async for event in transport.send_streaming_request(
+        page, url="https://synthetic.invalid", headers={}, body="x" * 300_000, timeout_ms=1500,
+    )]
+    assert events == ([("status", 200), ("chunk", b"first"), ("chunk", b"second")]
+                      if after_body else [("status", 200), ("chunk", b"second")])
+    assert sum(call.args[0] == STREAMING_INIT_JS for call in page.evaluate.call_args_list) == 1
+    assert [call.args for call in page.add_binding.call_args_list] == [
+        ("__aistudio_stream_push__",), (module.STREAM_RECOVERY_BINDING,),
+    ]
+    assert not transport._received_seq and not transport._cleanup_tasks
+    assert transport.in_flight_count == 0 and transport._buffered_bytes == 0
+
+
+@pytest.mark.parametrize("phase", ["fetch_pending", "read_pending"])
+async def test_slow_real_upstream_wait_does_not_restart_or_shorten_request(monkeypatch, phase):
+    from aistudio_api.infrastructure.gateway import transport as module
+
+    monkeypatch.setattr(module, "STREAM_PROBE_INTERVAL_S", 0.015)
+    page, listeners = make_synthetic_page()
+    captured = {}
+    probed = asyncio.Event()
+
+    async def evaluate(script, args=None, **_kwargs):
+        if script == STREAMING_INIT_JS:
+            captured.update(args)
+        elif script == STREAM_STATE_JS:
+            probed.set()
+            return {"phase": phase, "seq": 0, "bindingReady": True}
+        return None
+
+    async def upstream():
+        await probed.wait()
+        await asyncio.sleep(0.04)
+        for event in ({"type": "status", "status": 200}, {"type": "chunk", "text": "late"}, {"type": "done"}):
+            listeners[0](json.dumps({"rid": captured["rid"], **event}))
+
+    page.evaluate = AsyncMock(side_effect=evaluate)
+    task = asyncio.create_task(upstream())
+    transport = XHRStreamTransport()
+    try:
+        assert [event async for event in transport.send_streaming_request(
+            page, url="https://synthetic.invalid", headers={}, body="[]", timeout_ms=250,
+        )] == [("status", 200), ("chunk", b"late")]
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    page.add_binding.assert_awaited_once_with("__aistudio_stream_push__")
+    assert not transport._received_seq and transport.in_flight_count == 0
+
+
+async def test_stuck_stream_probe_can_be_cancelled_without_retaining_request(monkeypatch):
+    from aistudio_api.infrastructure.gateway import transport as module
+
+    monkeypatch.setattr(module, "STREAM_PROBE_INTERVAL_S", 0.01)
+    page, _ = make_synthetic_page()
+    entered = asyncio.Event()
+
+    async def evaluate(script, *_args, **_kwargs):
+        if script == STREAM_STATE_JS:
+            entered.set()
+            await asyncio.Event().wait()
+
+    page.evaluate = AsyncMock(side_effect=evaluate)
+    transport = XHRStreamTransport()
+    stream = transport.send_streaming_request(
+        page, url="https://synthetic.invalid", headers={}, body="[]", timeout_ms=1500,
+    )
+    task = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(entered.wait(), 0.5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await stream.aclose()
+    assert not transport._cleanup_tasks and not transport._received_seq
+    assert transport.in_flight_count == 0 and transport._buffered_bytes == 0
+
+
+async def test_long_prefill_can_later_recover_a_lost_first_status(monkeypatch):
+    from aistudio_api.infrastructure.gateway import transport as module
+
+    monkeypatch.setattr(module, "STREAM_PROBE_INTERVAL_S", 0.01)
+    page, listeners = make_synthetic_page()
+    captured = {}
+    probes = 0
+
+    def push(event):
+        listeners[1](json.dumps({"rid": captured["rid"], **event}))
+
+    async def evaluate(script, args=None, **_kwargs):
+        nonlocal probes
+        if script == STREAMING_INIT_JS:
+            captured.update(args)
+        elif script == STREAM_STATE_JS:
+            probes += 1
+            return {"phase": "fetch_pending", "seq": 0} if probes == 1 else {
+                "phase": "awaiting_ack", "seq": 1, "bindingReady": True,
+            }
+        elif script == STREAM_RESEND_JS:
+            push({"type": "status", "status": 200, "seq": 1})
+            return True
+        elif script == STREAM_ACK_JS:
+            push({"type": "done"})
+        return None
+
+    page.evaluate = AsyncMock(side_effect=evaluate)
+    stream = XHRStreamTransport().send_streaming_request(
+        page, url="https://synthetic.invalid", headers={}, body="x" * 300_000, timeout_ms=1500,
+    )
+    try:
+        assert await asyncio.wait_for(anext(stream), 0.3) == ("status", 200)
+        assert [event async for event in stream] == []
+    finally:
+        await stream.aclose()
+    assert probes == 2
+
+
+async def test_stream_probe_obeys_original_request_deadline_and_preserves_timeout(monkeypatch):
+    from aistudio_api.infrastructure.gateway import transport as module
+
+    monkeypatch.setattr(module, "STREAM_PROBE_INTERVAL_S", 0.01)
+    page, _ = make_synthetic_page()
+
+    async def evaluate(script, *_args, **_kwargs):
+        if script == STREAM_STATE_JS:
+            await asyncio.Event().wait()
+
+    page.evaluate = AsyncMock(side_effect=evaluate)
+    transport = XHRStreamTransport()
+    with pytest.raises(TimeoutError, match="before completion"):
+        await asyncio.wait_for(anext(transport.send_streaming_request(
+            page, url="https://synthetic.invalid", headers={}, body="[]", timeout_ms=60,
+        )), 0.3)
+    assert not transport._received_seq and not transport._cleanup_tasks
+    assert transport.in_flight_count == 0
+
+
+@pytest.mark.parametrize("after_body", [False, True])
+async def test_lost_browser_push_fails_promptly_instead_of_silence_until_deadline(
+    monkeypatch, after_body
+):
+    from aistudio_api.infrastructure.gateway import transport as module
+
+    monkeypatch.setattr(module, "STREAM_PROBE_INTERVAL_S", 0.02, raising=False)
+    page, listeners = make_synthetic_page()
+    browser_aborted = asyncio.Event()
+
+    async def evaluate(script, args=None, **_kwargs):
+        if script == STREAMING_INIT_JS and after_body:
+            for event in ({"type": "status", "status": 200, "seq": 1},
+                          {"type": "chunk", "text": "already delivered", "seq": 2}):
+                listeners[0](json.dumps({"rid": args["rid"], **event}))
+        elif script == STREAM_STATE_JS:
+            return {"phase": "awaiting_ack", "seq": 3 if after_body else 1}
+        elif script == STREAM_CLEANUP_JS:
+            browser_aborted.set()
+        return None
+
+    page.evaluate = AsyncMock(side_effect=evaluate)
+    transport = XHRStreamTransport()
+    stream = transport.send_streaming_request(
+        page, url="https://synthetic.invalid", headers={}, body="x" * 300_000, timeout_ms=1500,
+    )
+    try:
+        if after_body:
+            assert await anext(stream) == ("status", 200)
+            assert await anext(stream) == ("chunk", b"already delivered")
+        with pytest.raises(BrowserTransportError, match="CDP stream event delivery stalled"):
+            await asyncio.wait_for(anext(stream), 0.3)
+    finally:
+        await stream.aclose()
+    assert browser_aborted.is_set()
+    assert transport.in_flight_count == 0 and transport._buffered_bytes == 0
 
 
 @pytest.mark.asyncio

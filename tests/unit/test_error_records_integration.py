@@ -18,6 +18,7 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
 
 from aistudio_api.api.error_middleware import ErrorRecordsMiddleware, request_operation
+from aistudio_api.application import generation as generation_execution
 from aistudio_api.infrastructure.utils import error_records as records
 
 
@@ -166,8 +167,8 @@ def test_gemini_operation_never_contains_arbitrary_path_or_query_values():
 
 @pytest.fixture
 def synthetic_generation(monkeypatch):
+    from aistudio_api.api import gemini as service
     from aistudio_api.api.schemas import GeminiGenerateContentRequest
-    from aistudio_api.application import api_service_gemini as service
 
     context = SimpleNamespace(auth_file="synthetic-account", context_id=17)
 
@@ -180,10 +181,11 @@ def synthetic_generation(monkeypatch):
         clear_templates=MagicMock(),
         stream_generate_content=MagicMock(side_effect=AssertionError("No real model calls")),
     )
-    monkeypatch.setattr(service, "ensure_active_account", AsyncMock())
+    monkeypatch.setattr(generation_execution, "ensure_active_account", AsyncMock())
     monkeypatch.setattr(service, "try_switch_account", AsyncMock(return_value=False))
-    monkeypatch.setattr(service, "account_id_for_auth_file", lambda value: "acc_1234abcd")
+    monkeypatch.setattr(generation_execution, "account_id_for_auth_file", lambda value: "acc_1234abcd")
     monkeypatch.setattr(service, "record_rotator_event", MagicMock())
+    monkeypatch.setattr(generation_execution, "record_rotator_event", service.record_rotator_event)
     monkeypatch.setattr(service.runtime_state, "record", MagicMock())
     request = GeminiGenerateContentRequest.model_validate(
         {"contents": [{"role": "user", "parts": [{"text": "synthetic input"}]}]}
@@ -377,6 +379,31 @@ async def test_client_cancel_is_a_499_record_without_replacing_cancellation(diag
     assert events[0]["outcome"] == "cancelled"
     assert events[0]["transport_status"] == 200
     assert records.get_request_context() is None
+
+
+async def test_disconnect_observed_after_complete_response_keeps_success(diagnostic_store, monkeypatch):
+    from aistudio_api.infrastructure.utils import response_diagnostics
+
+    diagnostics = response_diagnostics.ResponseDiagnosticStore()
+    monkeypatch.setattr(response_diagnostics, "get_response_diagnostic_store", lambda: diagnostics)
+
+    async def app(scope, receive, send):
+        response_diagnostics.configure_generation(model="gemini-test", auto_continue=False)
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"data: {}\n\n", "more_body": False})
+        assert await receive() == {"type": "http.disconnect"}
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def send(_message):
+        pass
+
+    scope = {"type": "http", "path": "/v1beta/models/gemini-test:streamGenerateContent",
+             "method": "POST", "headers": []}
+    await ErrorRecordsMiddleware(app)(scope, receive, send)
+    assert diagnostics.list_records()["items"][0]["outcome"] == "success"
+    assert diagnostic_store.list_records()["items"] == []
 
 
 async def test_shared_context_crosses_base_http_child_tasks(diagnostic_store):

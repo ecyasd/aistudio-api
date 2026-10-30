@@ -13,7 +13,7 @@ from fastapi import FastAPI, HTTPException
 
 from aistudio_api.api import routes_accounts
 from aistudio_api.api.dependencies import get_account_service, get_runtime_state
-from aistudio_api.api.state import RuntimeState, runtime_state
+from aistudio_api.api.gemini import handle_attempt_exception
 from aistudio_api.application import account_orchestrator
 from aistudio_api.application.account_orchestrator import (
     ensure_active_account,
@@ -22,7 +22,7 @@ from aistudio_api.application.account_orchestrator import (
 )
 from aistudio_api.application.account_rotator import AccountRotator
 from aistudio_api.application.account_service import AccountService
-from aistudio_api.application.api_service_gemini import handle_attempt_exception
+from aistudio_api.application.runtime import RuntimeState, runtime_state
 from aistudio_api.domain.errors import AuthError, SessionExpiredError
 from aistudio_api.infrastructure.account.account_store import (
     AccountStore,

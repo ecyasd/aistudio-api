@@ -5,6 +5,7 @@ import YAML from 'yaml'
 import type { ParsedConfigYaml, ModelProfileItem, ModelOverrideMap } from './types.ts'
 import ProfileCard from './ProfileCard.vue'
 import ModelOverrideCard from './ModelOverrideCard.vue'
+import ModelRulePreview from './ModelRulePreview.vue'
 import SchemaDictionaryModal from './SchemaDictionaryModal.vue'
 import ConfigSwitch from './ConfigSwitch.vue'
 import FieldHelpTip from './FieldHelpTip.vue'
@@ -59,6 +60,7 @@ const filteredProfilesWithIndex = computed(() => {
 })
 
 const modelOverrides = computed(() => parsedConfig.value.model_defaults?.models || {})
+const previewYaml = computed(() => activeTab.value === 'yaml' ? rawYaml.value : serializeConfig(parsedConfig.value))
 
 // API keys belong to the key manager. Never retain or submit a cached copy
 // through the model editor, including when the user pastes an old config file.
@@ -498,6 +500,8 @@ onBeforeRouteLeave((_to, _from, next) => {
         </Button>
       </div>
     </div>
+
+    <ModelRulePreview :yaml-content="previewYaml" />
 
     <!-- Search Filter Bar in Visual Mode -->
     <div

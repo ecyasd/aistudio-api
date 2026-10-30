@@ -141,7 +141,7 @@ def test_explicit_owner_recovery_still_allows_normal_success(rotator_env, kind):
 def test_one_invalid_runtime_counter_cannot_drop_other_models_on_next_save(
     tmp_path, monkeypatch,
 ):
-    from aistudio_api.api import state as state_module
+    from aistudio_api.application import runtime as state_module
 
     path = tmp_path / "synthetic-stats.json"
     path.write_text(json.dumps({
@@ -166,7 +166,7 @@ def test_one_invalid_runtime_counter_cannot_drop_other_models_on_next_save(
 def test_invalid_runtime_counter_is_not_printed_in_exception_logs(
     tmp_path, monkeypatch, caplog,
 ):
-    from aistudio_api.api import state as state_module
+    from aistudio_api.application import runtime as state_module
 
     sentinel = "synthetic-private-counter-value"
     path = tmp_path / "synthetic-stats.json"
@@ -180,7 +180,7 @@ def test_invalid_runtime_counter_is_not_printed_in_exception_logs(
 def test_runtime_save_failure_preserves_disk_and_does_not_log_raw_exception(
     tmp_path, monkeypatch, caplog,
 ):
-    from aistudio_api.api import state as state_module
+    from aistudio_api.application import runtime as state_module
 
     sentinel = "synthetic-private-write-failure"
     path = tmp_path / "synthetic-stats.json"

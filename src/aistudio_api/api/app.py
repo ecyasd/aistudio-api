@@ -14,10 +14,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from aistudio_api.application.api_service_gemini import (
+from aistudio_api.api.gemini import (
     classify_gemini_error_payload,
     gemini_error_type,
 )
+from aistudio_api.application.runtime import runtime_state
 from aistudio_api.infrastructure.gateway.client import AIStudioClient
 from aistudio_api.infrastructure.gateway.model_defaults import (
     get_configured_logging_settings,
@@ -44,7 +45,6 @@ from .routes_system import (
     protected_router as system_protected_router,
     public_router as system_public_router,
 )
-from .state import runtime_state
 
 _log_cfg = get_configured_logging_settings()
 setup_logging(str(_log_cfg.get("level", "INFO")))

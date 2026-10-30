@@ -97,7 +97,7 @@ class ErrorRecordsMiddleware:
             message = await receive()
             if message["type"] == "http.request":
                 observe_request_body_bytes(len(message.get("body", b"")))
-            if message["type"] == "http.disconnect":
+            if message["type"] == "http.disconnect" and not completed:
                 disconnected = True
             return message
 
@@ -140,7 +140,10 @@ class ErrorRecordsMiddleware:
             raise
         finally:
             try:
-                if cancelled or (disconnected and not completed):
+                # HTTP middleware can forward an empty final body after its
+                # inner stream was cancelled. That body cannot undo a peer
+                # disconnect already observed while the response was active.
+                if cancelled or disconnected:
                     if not has_final_failure():
                         record_failure(asyncio.CancelledError(), source="http", operation=operation, http_status=499)
                     finish_request("cancelled", transport_status=status)
@@ -154,7 +157,7 @@ class ErrorRecordsMiddleware:
                     finish_request("warning" if getattr(context, "warning", False) else "recovered", transport_status=status)
             finally:
                 outcome = (
-                    "cancelled" if cancelled or (disconnected and not completed)
+                    "cancelled" if cancelled or disconnected
                     else "failed" if raised or has_final_failure() or not completed
                     or (status is not None and status >= 400)
                     else "recovered" if has_recorded_failure() else "success"

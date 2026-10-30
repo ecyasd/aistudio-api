@@ -12,7 +12,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from aistudio_api.api import routes_accounts, routes_system
-from aistudio_api.application import account_orchestrator
+from aistudio_api.application import (
+    account_orchestrator,
+    generation as generation_execution,
+)
 from aistudio_api.infrastructure.account.account_store import AccountMeta
 from aistudio_api.infrastructure.browser.cdp_client import CDPConnection, CDPPage
 from aistudio_api.infrastructure.gateway.session import BrowserSession
@@ -86,7 +89,7 @@ async def test_failed_binding_registration_can_be_retried():
 
 @pytest.mark.asyncio
 async def test_nonstream_retries_reuse_the_normalized_long_request(monkeypatch):
-    from aistudio_api.application import api_service_gemini as service
+    from aistudio_api.api import gemini as service
     from aistudio_api.domain.errors import RequestError
     from aistudio_api.domain.models import Candidate, ContentPart, ModelOutput
 
@@ -101,13 +104,14 @@ async def test_nonstream_retries_reuse_the_normalized_long_request(monkeypatch):
         yield SimpleNamespace(auth_file=None, context_id=1)
 
     monkeypatch.setattr(service, "normalize_gemini_request", normalize)
-    monkeypatch.setattr(service, "ensure_active_account", AsyncMock())
+    monkeypatch.setattr(generation_execution, "ensure_active_account", AsyncMock())
     monkeypatch.setattr(service, "handle_attempt_exception", AsyncMock(return_value=True))
-    monkeypatch.setattr(service, "_persist_successful_cookies", AsyncMock())
-    monkeypatch.setattr(service, "account_id_for_auth_file", lambda _path: None)
+    monkeypatch.setattr(generation_execution, "_persist_successful_cookies", AsyncMock())
+    monkeypatch.setattr(generation_execution, "account_id_for_auth_file", lambda _path: None)
     monkeypatch.setattr(service, "record_rotator_event", MagicMock())
+    monkeypatch.setattr(generation_execution, "record_rotator_event", service.record_rotator_event)
     monkeypatch.setattr(service.runtime_state, "record", MagicMock())
-    monkeypatch.setattr(service.continuation, "generate_content", generate)
+    monkeypatch.setattr(generation_execution.continuation, "generate_content", generate)
     request = SimpleNamespace(contents=["synthetic long input"], autoContinue=False)
     await service._generate_non_streaming("models/synthetic", request,
                                         SimpleNamespace(session=SimpleNamespace(request_scope=scope)))

@@ -22,9 +22,9 @@ from aistudio_api.domain.models import Candidate, ContentPart, ModelOutput
 @pytest.fixture
 def mock_client(monkeypatch, tmp_path) -> MagicMock:
     """Supply account metadata and a leased fake browser to the real API path."""
-    from aistudio_api.api.state import runtime_state
-    from aistudio_api.application import api_service_gemini
+    from aistudio_api.api import gemini as api_service_gemini
     from aistudio_api.application.account_rotator import AccountStats
+    from aistudio_api.application.runtime import runtime_state
     from aistudio_api.infrastructure.gateway import model_defaults
 
     monkeypatch.setattr(model_defaults, "get_configured_api_keys", lambda: {"test-key"})
@@ -119,7 +119,7 @@ async def test_genai_sdk_opt_in_continuation_keeps_one_account_and_sums_usage(
     mock_client: MagicMock, stream: bool,
 ) -> None:
     """The SDK extension reaches both real API handlers without extra leases."""
-    from aistudio_api.api.state import runtime_state
+    from aistudio_api.application.runtime import runtime_state
 
     calls: list[dict[str, object]] = []
     closed: list[bool] = []
@@ -193,7 +193,7 @@ async def test_genai_sdk_opt_in_continuation_keeps_one_account_and_sums_usage(
 async def test_nonstream_failed_continuation_never_replays_first_round(
     mock_client: MagicMock,
 ) -> None:
-    from aistudio_api.api.state import runtime_state
+    from aistudio_api.application.runtime import runtime_state
     from aistudio_api.domain.errors import IncompleteResponseError
 
     mock_client.generate_content = AsyncMock(side_effect=[
@@ -245,7 +245,7 @@ async def test_auto_continue_requires_explicit_json_boolean(
 def test_continuation_deadline_has_gemini_deadline_status(stream: bool) -> None:
     from fastapi import HTTPException
 
-    from aistudio_api.application import api_service_gemini as api
+    from aistudio_api.api import gemini as api
 
     error = RequestError(504, "Automatic continuation exceeded the request time budget")
     classified = error if stream else HTTPException(504, detail={"message": str(error)})

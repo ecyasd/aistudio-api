@@ -11,9 +11,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
+from aistudio_api.api import gemini as api
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
-from aistudio_api.application import api_service_gemini as api
-from aistudio_api.domain.errors import IncompleteResponseError, RequestError
+from aistudio_api.application import generation as generation_execution
+from aistudio_api.domain.errors import (
+    BrowserTransportError,
+    IncompleteResponseError,
+    RequestError,
+)
 from aistudio_api.infrastructure.gateway.capture import CapturedRequest
 from aistudio_api.infrastructure.gateway.stream_parser import (
     IncrementalJSONStreamParser,
@@ -61,9 +66,10 @@ def recovery_env(monkeypatch):
         generate_content=AsyncMock(),
         stream_generate_content=MagicMock(),
     )
-    monkeypatch.setattr(api, "ensure_active_account", AsyncMock())
+    monkeypatch.setattr(generation_execution, "ensure_active_account", AsyncMock())
     monkeypatch.setattr(api, "try_switch_account", AsyncMock(return_value=False))
     monkeypatch.setattr(api, "record_rotator_event", MagicMock())
+    monkeypatch.setattr(generation_execution, "record_rotator_event", api.record_rotator_event)
     monkeypatch.setattr(api, "record_failure", MagicMock())
     monkeypatch.setattr(api, "has_final_failure", lambda: False)
     monkeypatch.setattr(api.runtime_state, "record", MagicMock())
@@ -135,6 +141,28 @@ async def _request(env, *, stream):
         async for frame in response.body_iterator
         if frame.startswith("data: ")
     ]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("failure,code", [
+    (TimeoutError("streaming request timeout: no response status"), 504),
+    (BrowserTransportError("CDP stream event delivery stalled"), 503),
+])
+async def test_transport_exhaustion_does_not_rotate_or_resend_generation(recovery_env, stream, failure, code):
+    env = recovery_env
+    _install_responses(env, [failure, _response(_part(text="should not be requested"), finish=1)])
+    api.try_switch_account.return_value = True
+    if stream:
+        result = await _request(env, stream=True)
+        assert result[-1]["error"]["code"] == code
+    else:
+        with pytest.raises(HTTPException) as caught:
+            await _request(env, stream=False)
+        assert caught.value.status_code == code
+    assert env.calls == [42], "one bounded original transport, no blind model resubmission"
+    assert not env.leases
+    api.try_switch_account.assert_not_awaited()
+    assert not api.record_rotator_event.called
 
 
 @pytest.mark.parametrize("stream", [False, True])

@@ -49,6 +49,7 @@ _IDENTITY_DETAILS: dict[str, str] = {
 }
 _BROWSER_EXCEPTIONS = {
     "InvalidRequestTemplateError", "BrowserError", "TargetClosedError", "CDPError",
+    "BrowserTransportError",
 }
 _NETWORK_EXCEPTIONS = {
     "ConnectError", "ReadError", "WriteError", "RemoteProtocolError", "ProxyError",
@@ -76,6 +77,7 @@ class RequestErrorContext:
     transport_status: int | None = None
     start_monotonic: float = field(default_factory=time.monotonic)
     response_diagnostics: Any | None = field(default=None, repr=False)
+    account_ids: list[str] = field(default_factory=list)
 
 
 _REQUEST_CONTEXT: contextvars.ContextVar[RequestErrorContext | None] = (
@@ -99,6 +101,14 @@ def get_request_context() -> RequestErrorContext | None:
 def get_request_id() -> str | None:
     context = get_request_context()
     return context.request_id if context else None
+
+
+def note_request_account(account_id: str | None) -> None:
+    """Associate only safe actual lease/failure identities, never the UI selection."""
+    context = get_request_context()
+    if (context is not None and isinstance(account_id, str) and _ACCOUNT.fullmatch(account_id)
+            and account_id not in context.account_ids and len(context.account_ids) < 32):
+        context.account_ids.append(account_id)
 
 
 def has_final_failure() -> bool:
@@ -319,6 +329,7 @@ class ErrorRecordStore:
                 ),
             })
             assert event is not None
+            note_request_account(event["account_id"])
             self._records.append(event)
             self._prune()
             if context:
@@ -343,12 +354,15 @@ class ErrorRecordStore:
                         record["transport_status"] = transport_status
 
     def list_records(self, *, limit: int = 50, status: int | None = None,
-                     category: str | None = None, cursor: str | None = None) -> dict[str, Any]:
+                     category: str | None = None, cursor: str | None = None,
+                     account_id: str | None = None, request_id: str | None = None) -> dict[str, Any]:
         with self._lock:
             self._prune()
             records = [dict(event) for event in reversed(self._records)
                        if (status is None or event["status"] == status)
-                       and (category is None or event["category"] == category)]
+                       and (category is None or event["category"] == category)
+                       and (account_id is None or event["account_id"] == account_id)
+                       and (request_id is None or event["request_id"] == request_id)]
             total = len(records)
             offset = 0
             if cursor:

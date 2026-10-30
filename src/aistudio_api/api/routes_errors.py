@@ -6,7 +6,11 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query, Response
 
-from aistudio_api.infrastructure.utils.error_records import get_error_record_store
+from aistudio_api.infrastructure.utils.error_records import (
+    _ACCOUNT,
+    _REQUEST,
+    get_error_record_store,
+)
 from aistudio_api.infrastructure.utils.response_diagnostics import (
     get_response_diagnostic_store,
 )
@@ -25,6 +29,8 @@ async def list_errors(
     status: Annotated[int | None, Query(ge=400, le=599)] = None,
     category: Annotated[str | None, Query(max_length=32)] = None,
     cursor: Annotated[str | None, Query(pattern=r"^[a-f0-9]{32}$")] = None,
+    account_id: Annotated[str | None, Query(max_length=36, pattern="^" + _ACCOUNT.pattern.removesuffix(r"\Z") + "$")] = None,
+    request_id: Annotated[str | None, Query(max_length=36, pattern="^" + _REQUEST.pattern.removesuffix(r"\Z") + "$")] = None,
     include_diagnostics: bool = False,
 ) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
@@ -34,9 +40,12 @@ async def list_errors(
     try:
         result = get_error_record_store().list_records(
             limit=limit, status=status, category=category, cursor=cursor,
+            account_id=account_id, request_id=request_id,
         )
         if include_diagnostics:
-            result["diagnostics"] = get_response_diagnostic_store().list_records(limit=limit)
+            result["diagnostics"] = get_response_diagnostic_store().list_records(
+                limit=limit, account_id=account_id, request_id=request_id,
+            )
         return result
     except OSError as exc:
         raise HTTPException(status_code=503, detail="错误记录暂时不可用") from exc

@@ -23,7 +23,7 @@ from aistudio_api.infrastructure.utils.logger import get_logger
 logger = get_logger("routes.models")
 
 if TYPE_CHECKING:
-    from aistudio_api.api.state import RuntimeState
+    from aistudio_api.application.runtime import RuntimeState
 router = APIRouter()
 
 

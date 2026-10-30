@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
+import { diagnosticContext } from '@/utils/diagnosticContext.ts'
 import { ChevronLeft, ChevronRight, FileWarning, RefreshCw, Search } from 'lucide-vue-next'
 import { useErrorsStore } from '@/stores/errors.ts'
 import { usePolling } from '@/composables/usePolling.ts'
@@ -10,7 +12,21 @@ import Button from '@/components/ui/Button.vue'
 import Modal from '@/components/ui/Modal.vue'
 
 const errorsStore = useErrorsStore()
-const { result, items, diagnosticItems, statusFilter, categoryFilter, loading, error, lastUpdated, page, matchesFilters } = storeToRefs(errorsStore)
+const { result, items, diagnosticItems, statusFilter, categoryFilter, accountFilter, requestFilter, loading, error, lastUpdated, page, matchesFilters } = storeToRefs(errorsStore)
+const route = useRoute()
+const router = useRouter()
+watch(() => route.query, query => {
+  const context = diagnosticContext(query)
+  accountFilter.value = context.account
+  requestFilter.value = context.request
+  statusFilter.value = ''
+  categoryFilter.value = ''
+}, { immediate: true })
+function clearFilters() {
+  statusFilter.value = ''
+  categoryFilter.value = ''
+  void router.replace({ path: '/error-records', query: {} })
+}
 const selected = ref<ErrorRecord | null>(null)
 const detailsOpen = computed({
   get: () => selected.value !== null,
@@ -107,6 +123,10 @@ const preparationReasons: Record<string, string> = {
   account_change: '切换账号', credentials_change: '账号凭据已更新', forced_refresh: '主动刷新会话',
   browser_recovery: '浏览器重新准备', page_recovery: '账号页面重新准备', session_not_ready: '会话尚未就绪',
 }
+const transportPhases: Record<string, string> = {
+  fetch_pending: '等待上游响应头', read_pending: '等待上游下一片段', awaiting_ack: '等待片段确认',
+  binding_missing: '推送通道缺失', page_unresponsive: '浏览器页面无响应', state_missing: '原流状态丢失',
+}
 
 function recordedPreparation(record: ResponseDiagnostic) {
   return preparationMilestones.filter(([key]) => record.timings_ms?.[key] != null)
@@ -128,7 +148,10 @@ async function poll() {
 }
 
 usePolling(poll, 5000)
-watch([statusFilter, categoryFilter], () => { void errorsStore.refresh() })
+watch([statusFilter, categoryFilter, accountFilter, requestFilter], () => {
+  selected.value = null
+  void errorsStore.refresh()
+})
 watch(items, (records) => {
   if (selected.value) selected.value = records.find(record => record.id === selected.value?.id) ?? null
 })
@@ -166,6 +189,31 @@ onUnmounted(errorsStore.cancel)
       <span>重试成功的记录会标为“重试后成功”；流式请求即使 HTTP 返回 200，也可能有后续失败记录。</span>
     </div>
 
+    <div
+      v-if="accountFilter || requestFilter"
+      class="rounded-xl border border-brand-100 bg-brand-50 px-4 py-3 text-xs text-gray-700 space-y-2"
+    >
+      <p
+        v-if="accountFilter"
+        class="break-all"
+      >
+        账号范围：<span class="font-mono">{{ accountFilter }}</span>
+      </p>
+      <p
+        v-if="requestFilter"
+        class="break-all"
+      >
+        请求链路：<span class="font-mono">{{ requestFilter }}</span>（包含跨账号重试）
+      </p>
+      <p>账号与请求范围同时用于响应探测和错误记录；仅保留最近 10 分钟。</p>
+      <RouterLink
+        to="/error-records"
+        class="inline-block py-1 text-brand-700 underline underline-offset-4"
+      >
+        查看全部最近请求
+      </RouterLink>
+    </div>
+
     <section
       aria-labelledby="response-diagnostics-title"
       class="bg-white border border-gray-200 rounded-2xl overflow-hidden"
@@ -178,7 +226,7 @@ onUnmounted(errorsStore.cancel)
           >
             响应探测
           </h3>
-          <span class="text-xs text-gray-500">最近 {{ diagnosticItems.length }} 次请求 · 与错误筛选、页码无关</span>
+          <span class="text-xs text-gray-500">最近 {{ diagnosticItems.length }} 次请求 · 按账号 / 请求范围，独立于错误码及页码</span>
         </div>
         <p class="mt-2 text-xs text-gray-500 leading-relaxed">
           成功与失败请求均记录，只保留顺序和计数，不含思考、正文或签名原文。
@@ -250,8 +298,40 @@ onUnmounted(errorsStore.cancel)
               <dt class="text-gray-400">
                 关联请求 ID
               </dt>
-              <dd class="mt-1 font-mono text-gray-700 break-all select-all">
-                {{ record.request_id }}
+              <dd class="mt-1 font-mono text-gray-700 break-all">
+                <RouterLink
+                  :to="{ path: '/error-records', query: { request_id: record.request_id } }"
+                  class="text-brand-700 underline underline-offset-4"
+                >
+                  {{ record.request_id }}
+                </RouterLink>
+              </dd>
+            </div>
+            <div>
+              <dt class="text-gray-400">
+                实际使用账号
+              </dt>
+              <dd class="mt-1 flex flex-wrap gap-2 font-mono">
+                <RouterLink
+                  v-for="id in record.account_ids ?? []"
+                  :key="id"
+                  :to="{ path: '/accounts', query: { account_id: id } }"
+                  class="text-brand-700 underline underline-offset-4 break-all"
+                >
+                  {{ id }}
+                </RouterLink>
+                <span
+                  v-if="!record.account_ids?.length"
+                  class="text-gray-500"
+                >未租用账号 / 旧记录</span>
+              </dd>
+            </div>
+            <div>
+              <dt class="text-gray-400">
+                传输等待 / 原流恢复
+              </dt>
+              <dd class="mt-1 text-gray-700">
+                {{ transportPhases[record.transport_wait_phase ?? ''] ?? '未记录等待阶段' }} · 探测 {{ record.transport_probes ?? '未记录' }} 次 · 恢复尝试 {{ record.transport_repair_attempts ?? '未记录' }} 次
               </dd>
             </div>
             <div>
@@ -373,8 +453,8 @@ onUnmounted(errorsStore.cancel)
       </label>
       <Button
         variant="ghost"
-        :disabled="!statusFilter && !categoryFilter"
-        @click="statusFilter = ''; categoryFilter = ''"
+        :disabled="!statusFilter && !categoryFilter && !accountFilter && !requestFilter"
+        @click="clearFilters"
       >
         清除筛选
       </Button>
@@ -430,7 +510,7 @@ onUnmounted(errorsStore.cancel)
       >
         <FileWarning class="w-8 h-8 mx-auto text-gray-300" />
         <p class="mt-3 text-sm font-medium text-gray-700">
-          {{ statusFilter || categoryFilter ? '最近 10 分钟没有符合筛选条件的错误' : '暂无实时错误' }}
+          {{ statusFilter || categoryFilter || accountFilter || requestFilter ? '最近 10 分钟没有符合筛选条件的错误' : '暂无实时错误' }}
         </p>
         <p class="mt-2 text-xs text-gray-500">
           {{ statusFilter || categoryFilter ? '可以清除筛选，查看其他分类。' : '发生新错误后会自动显示，过期记录自动清除。' }}
@@ -497,7 +577,25 @@ onUnmounted(errorsStore.cancel)
                   {{ record.summary }}
                 </p>
                 <p class="mt-1 text-[11px] text-gray-400 font-mono break-all">
-                  请求 {{ record.request_id || '无关联请求' }}
+                  <RouterLink
+                    v-if="record.request_id"
+                    :to="{ path: '/error-records', query: { request_id: record.request_id } }"
+                    class="text-brand-700 underline underline-offset-4"
+                  >
+                    查看完整请求链路
+                  </RouterLink>
+                  <span v-else>无关联请求</span>
+                </p>
+                <p
+                  v-if="record.account_id"
+                  class="mt-2 text-xs font-mono break-all"
+                >
+                  <RouterLink
+                    :to="{ path: '/accounts', query: { account_id: record.account_id } }"
+                    class="text-brand-700 underline underline-offset-4"
+                  >
+                    账号 {{ record.account_id }}
+                  </RouterLink>
                 </p>
               </td>
               <td class="px-4 py-4">

@@ -52,6 +52,32 @@ function setup(relative, api, props = {}) {
   return { state, polls, events, stop() { callbacks.forEach(callback => callback()); scope.stop() } }
 }
 
+{
+  const pending = []
+  const props = vue.reactive({ yamlContent: 'model_defaults: {profiles: []}' })
+  const fixture = setup('components/config/ModelRulePreview.vue', {
+    previewModelRules(model, yamlContent, signal) {
+      const item = deferred(); pending.push({ ...item, model, yamlContent, signal }); return item.promise
+    },
+  }, props)
+  const state = fixture.state
+  state.model.value = 'models/抗截断/gemini-test'
+  const older = state.runPreview()
+  assert.equal(pending[0].yamlContent, props.yamlContent)
+  props.yamlContent = 'model_defaults: {profiles: [], models: {gemini-test: {default_tools: []}}}'
+  assert.equal(pending[0].signal.aborted, true, 'editing the draft cancels its now-stale preview')
+  const newer = state.runPreview()
+  pending[1].resolve({ marker: 'current' }); await newer
+  pending[0].resolve({ marker: 'stale' }); await older
+  assert.equal(state.preview.value.marker, 'current')
+  const leaving = state.runPreview()
+  fixture.stop()
+  assert.equal(pending[2].signal.aborted, true)
+  pending[2].resolve({ marker: 'unmounted' }); await leaving
+  assert.equal(state.preview.value, null, 'unmounted previews cannot commit late results')
+}
+checks.push('model preview uses the unsaved draft, aborts on edits and disposal, and ignores late responses')
+
 for (const [method, apiMethod, stateKey] of [['fetchStats', 'getStats', 'stats'], ['fetchRotation', 'getRotation', 'rotation'], ['checkHealth', 'health', 'health']]) {
   const requests = []
   const store = load('stores/system.ts', {

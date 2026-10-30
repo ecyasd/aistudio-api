@@ -20,12 +20,12 @@ from aistudio_api.api.routes_accounts import (
     import_cookies,
     probe_and_import,
 )
-from aistudio_api.api.state import RuntimeState
 from aistudio_api.application.account_rotator import (
     AccountRotator,
     get_pacific_date_key,
 )
 from aistudio_api.application.account_service import AccountService
+from aistudio_api.application.runtime import RuntimeState
 from aistudio_api.config import settings
 from aistudio_api.infrastructure.account.account_store import AccountStore
 from aistudio_api.infrastructure.gateway.model_defaults import (

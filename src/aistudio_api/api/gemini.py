@@ -1,4 +1,4 @@
-"""Gemini-compatible application service handlers."""
+"""Gemini HTTP mapping, error policy and bounded SSE delivery."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import asyncio
 import json
 import re
 import traceback
-from collections.abc import AsyncGenerator
-from contextlib import AsyncExitStack, aclosing, suppress
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from contextlib import suppress
 from typing import TypedDict, cast
 
 from anyio import CancelScope
@@ -23,15 +23,11 @@ from aistudio_api.api.response_models import (
 )
 from aistudio_api.api.responses import to_gemini_parts, to_gemini_usage_metadata
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
-from aistudio_api.api.state import runtime_state
-from aistudio_api.application import continuation
 from aistudio_api.application.account_orchestrator import (
     AUTH_GENERATION_UNTRACKED,
     MAX_RETRIES,
     AccountPreparationError,
     account_generation_is_current,
-    account_id_for_auth_file,
-    ensure_active_account,
     quota_unavailable_error,
     record_rotator_event,
     try_switch_account,
@@ -41,14 +37,20 @@ from aistudio_api.application.chat_service import (
     NormalizedGeminiRequest,
     normalize_gemini_request,
 )
-from aistudio_api.application.inference_limits import inference_limiter
+from aistudio_api.application.generation import (
+    AttemptFailure,
+    GenerationDeadlineExceeded,
+    GenerationEvent,
+    GenerationRun,
+)
 from aistudio_api.application.model_selection import parse_model_selection
-from aistudio_api.config import settings
+from aistudio_api.application.runtime import runtime_state
 from aistudio_api.domain.errors import (
     AccountIdentityMismatchError,
     AccountIdentityUnavailableError,
     AistudioError,
     AuthError,
+    BrowserTransportError,
     IncompleteResponseError,
     RequestError,
     SessionExpiredError,
@@ -66,14 +68,11 @@ from aistudio_api.infrastructure.utils.error_records import (
 from aistudio_api.infrastructure.utils.logger import get_logger
 from aistudio_api.infrastructure.utils.response_diagnostics import (
     configure_generation,
-    note_attempt,
-    note_timing,
 )
 
 logger = get_logger("api.gemini")
 SSE_HEARTBEAT_INTERVAL_SECONDS = 15.0
 SSE_SEND_TIMEOUT_SECONDS = 30.0
-COOKIE_CHECKPOINT_TIMEOUT_SECONDS = 3.0
 ACCOUNT_IDENTITY_MESSAGES = {
     "upstream_account_mismatch": (
         "AI Studio account identity does not match the selected account. "
@@ -193,6 +192,8 @@ def classify_gemini_error_payload(exc: Exception) -> tuple[int, str, str]:
             clean_msg,
             status_map.get(status, "INTERNAL" if status >= 500 else "UNKNOWN"),
         )
+    if isinstance(exc, BrowserTransportError):
+        return 503, "Browser stream delivery failed", "UNAVAILABLE"
     if isinstance(exc, TimeoutError):
         return 504, "Upstream preparation or generation timed out", "DEADLINE_EXCEEDED"
     if isinstance(exc, AistudioError):
@@ -450,6 +451,20 @@ async def _handle_attempt_exception(
         client.clear_templates()
         return True
 
+    # The transport has already waited for its idle budget and, for a lost
+    # push, attempted to repair the original stream. The broad session-hang
+    # matcher also accepts "timeout"/"CDP"; do not let it rotate accounts and
+    # start another multi-minute generation for these terminal failures.
+    if isinstance(exc, TimeoutError):
+        raise HTTPException(
+            504, detail={"message": "Upstream preparation or generation timed out", "type": "upstream_timeout"}
+        ) from exc
+
+    if isinstance(exc, BrowserTransportError):
+        raise HTTPException(
+            503, detail={"message": "Browser stream delivery failed", "type": "browser_transport_error"}
+        ) from exc
+
     if is_browser_session_hang_error(exc):
         logger.warning(
             "模板或 BotGuard 捕获超时 (%d/%d): %s，切换账号重试",
@@ -484,11 +499,6 @@ async def _handle_attempt_exception(
         logger.warning("Gemini 上游请求错误 (%d): %s", status_code, clean_msg)
         raise HTTPException(
             status_code, detail={"message": clean_msg, "type": error_type}
-        ) from exc
-
-    if isinstance(exc, TimeoutError):
-        raise HTTPException(
-            504, detail={"message": "Upstream preparation or generation timed out", "type": "upstream_timeout"}
         ) from exc
 
     if isinstance(exc, AistudioError):
@@ -539,132 +549,69 @@ async def handle_gemini_generate_content(
             client=client, req=req, model_path=model_path, prepared_request=normalized
         )
 
+    return await _generate_non_streaming(model_path, req, client)
+
+
+def _generation_run(
+    client: AIStudioClient, normalized: NormalizedGeminiRequest,
+    req: GeminiGenerateContentRequest, model_path: str,
+) -> GenerationRun:
+    async def recover(failure: AttemptFailure) -> bool:
+        identity = failure.identity
+        return await handle_attempt_exception(
+            failure.error, attempt=failure.number, model_path=model_path,
+            normalized_model=failure.model, client=client,
+            has_yielded_data=failure.replay_forbidden,
+            account_id=identity.account_id, request_context_id=identity.context_id,
+            request_auth_generation=identity.auth_generation,
+        )
+
+    return GenerationRun(client, normalized, auto_continue=req.autoContinue, recover=recover)
+
+
+async def _generate_non_streaming(
+    model_path: str, req: GeminiGenerateContentRequest, client: AIStudioClient,
+):
     try:
-        # Continuation shares one total budget across admission, preparation
-        # and retries. Ordinary generation keeps its progress-based idle limit.
-        async with asyncio.timeout(settings.timeout_stream if req.autoContinue else None):
-            async with inference_limiter.slot():
-                return await _generate_non_streaming(model_path, req, client)
-    except TimeoutError as exc:
+        normalized = normalize_gemini_request(req, model_path)
+    except (ValueError, RequestValidationError) as exc:
+        raise HTTPException(400, detail={"message": str(exc)}) from exc
+    try:
+        output = await _generation_run(client, normalized, req, model_path).generate()
+    except GenerationDeadlineExceeded as exc:
         raise HTTPException(504, detail={
             "message": "Automatic continuation exceeded the request time budget",
             "type": "upstream_timeout",
         }) from exc
-
-
-async def _generate_non_streaming(
-    model_path: str, req: GeminiGenerateContentRequest, client: AIStudioClient
-):
-
-    last_error: Exception | None = None
-    normalized: NormalizedGeminiRequest | None = None
-    for attempt in range(MAX_RETRIES):
-        note_attempt(attempt)
-        account_id: str | None = None
-        request_context_id: int | None = None
-        request_auth_generation: object = AUTH_GENERATION_UNTRACKED
-        try:
-            if normalized is None:
-                normalized = normalize_gemini_request(req, model_path)
-            note_timing("account_preparation_started")
-            await ensure_active_account(attempt, model=model_path)
-            note_timing("account_ready")
-            logger.info(
-                "Gemini 生成请求: model=%s, 对话轮数=%s, 流式=否, 尝试第 %d 次",
-                normalized.model,
-                len(req.contents),
-                attempt + 1,
+    return GeminiGenerateContentResponse(
+        candidates=[
+            GeminiCandidateResponse(
+                content=GeminiContentResponse(
+                    parts=to_gemini_parts(
+                        output.text,
+                        function_calls=output.function_calls,
+                        function_responses=output.function_responses,
+                        thinking=output.thinking,
+                        images=output.images,
+                        reasoning_images=output.reasoning_images,
+                        source_parts=(output.candidates[0].parts or None)
+                        if output.candidates else None,
+                    ),
+                ),
+                finishReason=to_gemini_finish_reason(
+                    output.candidates[0].finish_reason
+                    if output.candidates
+                    else None
+                ),
+                index=0,
             )
-            # Lease the actual browser context before the client begins work.
-            # A concurrent activation may already differ from registry.active.
-            async with client.session.request_scope() as ctx:
-                account_id = account_id_for_auth_file(ctx.auth_file)
-                request_context_id = ctx.context_id
-                request_auth_generation = getattr(ctx, "auth_generation", AUTH_GENERATION_UNTRACKED)
-                output = await continuation.generate_content(
-                    client, normalized, auto_continue=req.autoContinue,
-                )
-
-                await _persist_successful_cookies(client, ctx)
-
-            if request_auth_generation is AUTH_GENERATION_UNTRACKED:
-                record_rotator_event("success", model=normalized.model, account_id=account_id)
-            else:
-                record_rotator_event("success", model=normalized.model, account_id=account_id,
-                                     auth_generation=request_auth_generation)
-            runtime_state.record(normalized.model, "success", output.usage)
-            logger.info(
-                "Gemini 生成完成: model=%s, 输入Tokens=%s, 输出Tokens=%s",
-                normalized.model,
-                output.usage.get("prompt_tokens") if output.usage else 0,
-                output.usage.get("completion_tokens") if output.usage else 0,
-            )
-            return GeminiGenerateContentResponse(
-                candidates=[
-                    GeminiCandidateResponse(
-                        content=GeminiContentResponse(
-                            parts=to_gemini_parts(
-                                output.text,
-                                function_calls=output.function_calls,
-                                function_responses=output.function_responses,
-                                thinking=output.thinking,
-                                images=output.images,
-                                reasoning_images=output.reasoning_images,
-                                source_parts=(output.candidates[0].parts or None)
-                                if output.candidates else None,
-                            ),
-                        ),
-                        finishReason=to_gemini_finish_reason(
-                            output.candidates[0].finish_reason
-                            if output.candidates
-                            else None
-                        ),
-                        index=0,
-                    )
-                ],
-                usageMetadata=to_gemini_usage_metadata(output.usage),
-                modelVersion=normalized.model,
-                responseId=output.response_id or None,
-            )
-        except Exception as exc:
-            generated_before_failure = isinstance(exc, continuation.ContinuationError)
-            if isinstance(exc, continuation.ContinuationError):
-                exc = exc.original_error
-            last_error = exc
-            if await handle_attempt_exception(
-                exc,
-                attempt=attempt,
-                model_path=model_path,
-                normalized_model=normalized.model if normalized else None,
-                client=client,
-                has_yielded_data=generated_before_failure,
-                account_id=account_id,
-                request_context_id=request_context_id,
-                request_auth_generation=request_auth_generation,
-            ):
-                continue
-            raise
+        ],
+        usageMetadata=to_gemini_usage_metadata(output.usage),
+        modelVersion=normalized.model,
+        responseId=output.response_id or None,
+    )
 
 
-    raise quota_unavailable_error(model_path) from last_error
-
-
-async def _persist_successful_cookies(client: AIStudioClient, context: object) -> None:
-    """Checkpoint a verified lease within a small optional completion budget."""
-    persist = getattr(client.session, "persist_context_cookies", None)
-    if persist is None:
-        return
-    try:
-        # The upstream response is complete. A stalled CDP cookie read must not
-        # hold its final event, inference slot and account lease for another
-        # full CDP timeout. Stay in the owning task so cancellation closes this
-        # operation before the lease is released; no detached checkpoint may
-        # outlive or cross into a later request. Atomic/CAS storage preserves
-        # the previous verified export if a read is cancelled before writing.
-        async with asyncio.timeout(COOKIE_CHECKPOINT_TIMEOUT_SECONDS):
-            await persist(context)
-    except Exception as exc:
-        logger.warning("保存已验证会话 Cookie 失败: type=%s", type(exc).__name__)
 
 
 def format_sse_event(
@@ -828,24 +775,18 @@ def _preflight_gemini_stream(
 
 
 async def _sse_with_heartbeats(
-    source: AsyncGenerator[str, None], *, interval: float
+    source: Callable[[Callable[[str], Awaitable[None]]], Awaitable[None]], *, interval: float,
 ) -> AsyncGenerator[str, None]:
-    """Advance the source in one task, with bounded buffering and cancel cleanup.
-
-    Keeping the producer task alive for the whole stream also preserves request
-    ContextVars across yields. A heartbeat never cancels a pending upstream read.
-    """
+    """Run generation and close its resources in one task, with one bounded queue."""
     queue: asyncio.Queue[str | Exception | None] = asyncio.Queue(maxsize=1)
 
     async def produce() -> None:
-        async with aclosing(source):
-            try:
-                async for chunk in source:
-                    await queue.put(chunk)
-            except Exception as exc:
-                await queue.put(exc)
-            else:
-                await queue.put(None)
+        try:
+            await source(queue.put)
+        except Exception as exc:
+            await queue.put(exc)
+        else:
+            await queue.put(None)
 
     producer = asyncio.create_task(produce(), name="gemini-sse-producer")
     pending: asyncio.Task[str | Exception | None] | None = None
@@ -904,165 +845,57 @@ class _GeminiStreamingResponse(StreamingResponse):
 
 
 def _build_gemini_streaming_response(
-    *,
-    client: AIStudioClient,
-    req: GeminiGenerateContentRequest,
-    model_path: str,
+    *, client: AIStudioClient, req: GeminiGenerateContentRequest, model_path: str,
     prepared_request: NormalizedGeminiRequest | None = None,
 ) -> StreamingResponse:
-    async def stream_response():
+    async def produce(emit: Callable[[str], Awaitable[None]]) -> None:
         normalized = None
-        account_id: str | None = None
-        request_auth_generation: object = AUTH_GENERATION_UNTRACKED
+        run: GenerationRun | None = None
         try:
-            logger.info(
-                "Gemini 流式请求: model=%s, 对话轮数=%s",
-                model_path,
-                len(req.contents),
-            )
-            final_usage: dict[str, object] | None = None
-            final_finish_reason: str = "FINISH_REASON_UNSPECIFIED"
-            latest_response_id: str | None = None
-            for stream_attempt in range(MAX_RETRIES):
-                note_attempt(stream_attempt)
-                has_yielded_data = False
-                account_id = None
-                request_context_id = None
-                request_auth_generation = AUTH_GENERATION_UNTRACKED
-                # Metadata from an attempt that emitted no body belongs to that
-                # attempt only, including signatures and any partial usage.
-                final_usage = None
-                final_finish_reason = "FINISH_REASON_UNSPECIFIED"
-                latest_response_id = None
-                try:
-                    normalized = prepared_request or normalize_gemini_request(req, model_path)
-                    note_timing("account_preparation_started")
-                    await ensure_active_account(stream_attempt, model=model_path)
-                    note_timing("account_ready")
-                    async with client.session.request_scope() as ctx:
-                        account_id = account_id_for_auth_file(ctx.auth_file)
-                        request_context_id = ctx.context_id
-                        request_auth_generation = getattr(ctx, "auth_generation", AUTH_GENERATION_UNTRACKED)
-                        async with aclosing(continuation.stream_generate_content(
-                            client, normalized, auto_continue=req.autoContinue,
-                            force_refresh_capture=stream_attempt > 0,
-                        )) as upstream:
-                            async for event_type, text in upstream:
-                                if event_type == "usage":
-                                    final_usage = text if isinstance(text, dict) else None
-                                elif event_type == "finish_reason":
-                                    final_finish_reason = (
-                                        to_gemini_finish_reason(text)
-                                        if isinstance(text, int)
-                                        else str(text)
-                                    )
-                                elif event_type == "response_id":
-                                    latest_response_id = str(text)
-                                elif event_type == "thought_signature":
-                                    # Legacy metadata-only events cannot be assigned
-                                    # to another Part. The gateway emits full Parts.
-                                    # Retain standalone signatures only after data;
-                                    # pre-output metadata must not suppress retries.
-                                    if has_yielded_data:
-                                        signature_chunk = format_sse_event(
-                                            event_type, text,
-                                            model_version=normalized.model,
-                                            response_id=latest_response_id,
-                                        )
-                                        if signature_chunk:
-                                            yield signature_chunk
-                                else:
-                                    chunk = format_sse_event(
-                                        event_type,
-                                        text,
-                                        model_version=normalized.model,
-                                        response_id=latest_response_id,
-                                    )
-                                    if chunk:
-                                        has_yielded_data = True
-                                        yield chunk
-                        await _persist_successful_cookies(client, ctx)
-                    break
-                except Exception as exc:
-                    if await handle_attempt_exception(
-                        exc,
-                        attempt=stream_attempt,
-                        model_path=model_path,
-                        normalized_model=normalized.model if normalized else None,
-                        client=client,
-                        has_yielded_data=has_yielded_data,
-                        account_id=account_id,
-                        request_context_id=request_context_id,
-                        request_auth_generation=request_auth_generation,
-                    ):
-                        continue
-                    raise
+            normalized = prepared_request or normalize_gemini_request(req, model_path)
+            run = _generation_run(client, normalized, req, model_path)
 
-            target_model = normalized.model if normalized else model_path
-            if request_auth_generation is AUTH_GENERATION_UNTRACKED:
-                record_rotator_event("success", model=target_model, account_id=account_id)
-            else:
-                record_rotator_event("success", model=target_model, account_id=account_id,
-                                     auth_generation=request_auth_generation)
-            if normalized is not None:
-                runtime_state.record(normalized.model, "success", final_usage)
-            logger.info(
-                "Gemini 流式完成: model=%s, 输入Tokens=%s, 输出Tokens=%s",
-                target_model,
-                final_usage.get("prompt_tokens") if final_usage else 0,
-                final_usage.get("completion_tokens") if final_usage else 0,
-            )
-            yield format_sse_usage(
-                final_usage,
-                finish_reason=final_finish_reason,
-                model_version=target_model,
-                response_id=latest_response_id,
-            )
-        except Exception as exc:
-            if not has_final_failure():
-                record_failure(exc, source="gemini_stream", operation="stream_generate_content",
-                               model=normalized.model if normalized else model_path,
-                               account_id=account_id,
-                               http_status=classify_gemini_error_payload(exc)[0])
-            yield format_sse_error(exc)
+            async def deliver(event: GenerationEvent) -> bool:
+                chunk = format_sse_event(
+                    event.kind, event.payload, model_version=event.model,
+                    response_id=event.response_id,
+                )
+                if not chunk:
+                    return False
+                await emit(chunk)
+                return True
 
-
-    async def admitted_stream():
-        deadline = (
-            asyncio.get_running_loop().time() + settings.timeout_stream
-            if req.autoContinue else None
-        )
-        try:
-            async with AsyncExitStack() as resources:
-                async with asyncio.timeout_at(deadline):
-                    await resources.enter_async_context(inference_limiter.slot())
-                chunks = await resources.enter_async_context(aclosing(stream_response()))
-                while True:
-                    try:
-                        # One deadline covers every attempt, including account
-                        # switches. Never leave a timeout active across yield.
-                        async with asyncio.timeout_at(deadline):
-                            chunk = await anext(chunks)
-                    except StopAsyncIteration:
-                        break
-                    yield chunk
-        except TimeoutError as exc:
+            complete = await run.stream(deliver)
+            finish_reason = (
+                to_gemini_finish_reason(complete.finish_reason)
+                if isinstance(complete.finish_reason, int) or complete.finish_reason is None
+                else complete.finish_reason
+            )
+            await emit(format_sse_usage(
+                complete.usage, finish_reason=finish_reason,
+                model_version=complete.model, response_id=complete.response_id,
+            ))
+        except GenerationDeadlineExceeded as exc:
             failure = HTTPException(504, detail={
                 "message": "Automatic continuation exceeded the request time budget",
                 "type": "upstream_timeout",
             })
             record_failure(exc, source="gemini_stream", operation="stream_generate_content",
                            http_status=504)
-            yield format_sse_error(failure)
-        except HTTPException as exc:
-            record_failure(exc, source="gemini_stream", operation="inference_admission",
-                           http_status=exc.status_code)
-            yield format_sse_error(exc)
+            await emit(format_sse_error(failure))
+        except Exception as exc:
+            if not has_final_failure():
+                record_failure(
+                    exc, source="gemini_stream",
+                    operation="inference_admission" if run is not None and not run.admitted else "stream_generate_content",
+                    model=normalized.model if normalized else model_path,
+                    account_id=run.identity.account_id if run is not None else None,
+                    http_status=classify_gemini_error_payload(exc)[0],
+                )
+            await emit(format_sse_error(exc))
 
     return _GeminiStreamingResponse(
-        _sse_with_heartbeats(
-            admitted_stream(), interval=SSE_HEARTBEAT_INTERVAL_SECONDS
-        ),
+        _sse_with_heartbeats(produce, interval=SSE_HEARTBEAT_INTERVAL_SECONDS),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

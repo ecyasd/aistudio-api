@@ -10,9 +10,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import ValidationError
 
+from aistudio_api.api import gemini as api
 from aistudio_api.api.responses import to_gemini_parts
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
-from aistudio_api.application import api_service_gemini as api
+from aistudio_api.application import generation as generation_execution
 from aistudio_api.application.chat_service import normalize_gemini_request
 from aistudio_api.domain.errors import RequestError
 from aistudio_api.infrastructure.gateway.capture import CapturedRequest
@@ -146,10 +147,11 @@ async def test_public_response_keeps_code_parts_in_order_with_metadata(
         generate_content=generate, stream_generate_content=generate_stream,
         clear_templates=MagicMock(),
     )
-    monkeypatch.setattr(api, "ensure_active_account", AsyncMock())
+    monkeypatch.setattr(generation_execution, "ensure_active_account", AsyncMock())
     monkeypatch.setattr(api, "validate_account_availability", MagicMock())
-    monkeypatch.setattr(api, "account_id_for_auth_file", lambda _: "synthetic-account")
+    monkeypatch.setattr(generation_execution, "account_id_for_auth_file", lambda _: "synthetic-account")
     monkeypatch.setattr(api, "record_rotator_event", MagicMock())
+    monkeypatch.setattr(generation_execution, "record_rotator_event", api.record_rotator_event)
     monkeypatch.setattr(api, "record_failure", MagicMock())
     monkeypatch.setattr(api.runtime_state, "record", MagicMock())
     request = GeminiGenerateContentRequest.model_validate({

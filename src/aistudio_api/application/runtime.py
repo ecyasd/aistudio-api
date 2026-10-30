@@ -1,4 +1,4 @@
-"""Shared API runtime state."""
+"""Application runtime state and persistent model counters."""
 
 from __future__ import annotations
 

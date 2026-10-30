@@ -416,53 +416,73 @@ def _load_yaml_config(config_path: Path) -> dict[str, object]:
     loaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     if not isinstance(loaded, dict):
         loaded = {}
-    merged: dict[str, object] = _default_config()
-    merged.update(loaded)
-    raw_merged_defaults = merged.get("model_defaults")
-    raw_loaded_defaults = loaded.get("model_defaults")
-    if isinstance(raw_merged_defaults, dict) and isinstance(raw_loaded_defaults, dict):
-        def_config = _default_config()
-        def_md = def_config.get("model_defaults")
-        merged_model_defaults = dict(def_md if isinstance(def_md, dict) else {})
-        merged_model_defaults.update(raw_loaded_defaults)
-        merged["model_defaults"] = merged_model_defaults
+    merged = _with_builtin_defaults(loaded)
     _CONFIG_CACHE[path_key] = (mtime, merged)
     return merged
 
 
+def _with_builtin_defaults(loaded: dict[str, object]) -> dict[str, object]:
+    merged = _default_config()
+    raw_defaults = merged["model_defaults"]
+    raw_loaded = loaded.get("model_defaults")
+    merged.update(loaded)
+    if isinstance(raw_defaults, dict) and isinstance(raw_loaded, dict):
+        merged["model_defaults"] = {**raw_defaults, **raw_loaded}
+    return merged
+
+
+def _profiles(config: dict[str, object]) -> tuple[ModelProfile, ...]:
+    raw_md = config.get("model_defaults")
+    raw_profiles = raw_md.get("profiles") if isinstance(raw_md, dict) else None
+    return tuple(
+        _profile_from_mapping(item) for item in (raw_profiles or []) if isinstance(item, dict)
+    ) if isinstance(raw_profiles, list) else ()
+
+
+def _overrides(config: dict[str, object]) -> dict[str, ModelDefaults]:
+    raw_md = config.get("model_defaults")
+    raw_models = raw_md.get("models") if isinstance(raw_md, dict) else None
+    return {
+        _normalize_model_name(str(name)): _defaults_from_mapping(
+            rule if isinstance(rule, dict) else {}
+        ) for name, rule in raw_models.items()
+    } if isinstance(raw_models, dict) else {}
+
+
 @lru_cache(maxsize=8)
 def _compiled_profiles(config_path: str) -> tuple[ModelProfile, ...]:
-    config = _load_yaml_config(Path(config_path))
-    raw_md = config.get("model_defaults")
-    model_defaults = raw_md if isinstance(raw_md, dict) else {}
-    raw_profiles = model_defaults.get("profiles")
-    profiles_list = raw_profiles if isinstance(raw_profiles, list) else []
-    return tuple(
-        _profile_from_mapping(item) for item in profiles_list if isinstance(item, dict)
-    )
+    return _profiles(_load_yaml_config(Path(config_path)))
 
 
 @lru_cache(maxsize=8)
 def _compiled_model_overrides(config_path: str) -> dict[str, ModelDefaults]:
-    config = _load_yaml_config(Path(config_path))
-    raw_md = config.get("model_defaults")
-    model_defaults = raw_md if isinstance(raw_md, dict) else {}
-    raw_models = model_defaults.get("models")
-    models_dict = raw_models if isinstance(raw_models, dict) else {}
-    overrides: dict[str, ModelDefaults] = {}
-    for model_name, raw_defaults in models_dict.items():
-        overrides[_normalize_model_name(str(model_name))] = _defaults_from_mapping(
-            raw_defaults if isinstance(raw_defaults, dict) else {}
-        )
-    return overrides
+    return _overrides(_load_yaml_config(Path(config_path)))
 
 
 def resolve_model_defaults(
     model: str, *, config_path: str | os.PathLike[str] | None = None
 ) -> ModelDefaults:
-    normalized = _normalize_model_name(model)
     resolved_path = str(_resolve_config_path(config_path))
     config = _load_yaml_config(Path(resolved_path))
+    return _resolve_rules(model, config, _compiled_profiles(resolved_path),
+                          _compiled_model_overrides(resolved_path))[0]
+
+
+def preview_model_defaults(
+    model: str, *, config: dict[str, object] | None = None,
+) -> tuple[ModelDefaults, list[dict[str, object]]]:
+    """Resolve a draft without writing files or changing the runtime cache."""
+    document = (_load_yaml_config(_resolve_config_path(None)) if config is None
+                else _with_builtin_defaults(config))
+    validate_model_config(document)
+    return _resolve_rules(model, document, _profiles(document), _overrides(document))
+
+
+def _resolve_rules(
+    model: str, config: dict[str, object], profiles: tuple[ModelProfile, ...],
+    overrides: dict[str, ModelDefaults],
+) -> tuple[ModelDefaults, list[dict[str, object]]]:
+    normalized = _normalize_model_name(model)
     raw_md = config.get("model_defaults")
     global_drop = False
     if isinstance(raw_md, dict) and "drop_unsupported_params" in raw_md:
@@ -470,14 +490,16 @@ def resolve_model_defaults(
     elif "drop_unsupported_params" in config:
         global_drop = bool(config["drop_unsupported_params"])
 
-    profiles = _compiled_profiles(resolved_path)
+    matched: list[dict[str, object]] = []
     resolved = ModelDefaults(drop_unsupported_params=global_drop)
-    for profile in profiles:
+    for index, profile in enumerate(profiles):
         if profile.matches(normalized):
             resolved = resolved.merged(profile.defaults)
-    override = _compiled_model_overrides(resolved_path).get(normalized)
+            matched.append({"kind": "profile", "name": profile.name, "index": index})
+    override = overrides.get(normalized)
     if override is not None:
         resolved = resolved.overridden(override)
+        matched.append({"kind": "model", "name": normalized})
 
     if resolved.is_image_model:
         allowed = {"google_search", "image_search", "google_search_and_image_search"}
@@ -487,7 +509,7 @@ def resolve_model_defaults(
 
             resolved = replace(resolved, default_tools=filtered)
 
-    return resolved
+    return resolved, matched
 
 
 def get_configured_api_key_items(

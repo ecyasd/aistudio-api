@@ -6,8 +6,8 @@ import contextlib
 from typing import TYPE_CHECKING
 
 import yaml
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, StrictBool, ValidationError, field_validator
+from fastapi import APIRouter, Depends, HTTPException, Response
+from pydantic import BaseModel, Field, StrictBool, ValidationError, field_validator
 
 from aistudio_api.api.dependencies import get_runtime_state
 from aistudio_api.api.response_models import (
@@ -17,10 +17,16 @@ from aistudio_api.api.response_models import (
     StatsTotalsResponse,
 )
 from aistudio_api.application import account_orchestrator
+from aistudio_api.application.model_selection import parse_model_selection
 from aistudio_api.infrastructure.gateway.model_defaults import (
     _resolve_config_path,
     invalidate_config_cache,
+    preview_model_defaults,
     validate_model_config,
+)
+from aistudio_api.infrastructure.gateway.wire_types import (
+    AistudioGenerationConfig,
+    AistudioImageOutputMode,
 )
 from aistudio_api.infrastructure.utils.config_store import (
     ConfigConflictError,
@@ -33,7 +39,7 @@ from aistudio_api.infrastructure.utils.logger import get_logger
 logger = get_logger("routes.system")
 
 if TYPE_CHECKING:
-    from aistudio_api.api.state import RuntimeState
+    from aistudio_api.application.runtime import RuntimeState
 
 public_router = APIRouter()
 protected_router = APIRouter()
@@ -44,7 +50,7 @@ def health_response() -> HealthResponse:
 
 
 def stats_response() -> StatsResponse:
-    from aistudio_api.api.state import runtime_state
+    from aistudio_api.application.runtime import runtime_state
 
     stats = dict(runtime_state.model_stats)
     totals = StatsTotalsResponse(
@@ -255,6 +261,51 @@ def _apply_logging_settings(config: LoggingConfigRequest) -> None:
 class ConfigYamlUpdateRequest(BaseModel):
     yaml_content: str
     baseline_yaml_content: str | None = None
+
+
+class ModelPreviewRequest(BaseModel):
+    model: str = Field(min_length=1, max_length=160, pattern=r"^(?:models/)?(?:抗截断/)?[A-Za-z0-9][A-Za-z0-9._-]*$")
+    yaml_content: str | None = Field(default=None, max_length=1_000_000)
+
+
+@protected_router.post("/config/model-preview")
+async def preview_model_rules(req: ModelPreviewRequest, response: Response) -> dict[str, object]:
+    """Read-only rule resolution; no account/session preparation or writes."""
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Vary"] = "Authorization"
+    draft = (_parse_config_yaml(req.yaml_content, normalize_logging=False)
+             if req.yaml_content is not None else None)
+    try:
+        selection = parse_model_selection(req.model)
+        defaults, matched = preview_model_defaults(selection.base_model, config=draft)
+    except (ValueError, TypeError, KeyError, OverflowError, yaml.YAMLError) as exc:
+        raise HTTPException(400, detail="模型名称或规则无效，请检查模型、结构、枚举及数值") from exc
+    except OSError as exc:
+        raise HTTPException(503, detail="模型规则暂时不可读取") from exc
+    generation = defaults.generation_config_overrides()
+    # Unknown extension attributes are ignored by the wire encoder. Make that
+    # visible instead of presenting them as effective generation parameters.
+    supported = {key for key, value in vars(AistudioGenerationConfig).items()
+                 if isinstance(value, property)}
+    return {
+        "model": selection.base_model,
+        "auto_continue": selection.auto_continue,
+        "source": "draft" if draft is not None else "saved",
+        "matched_rules": matched,
+        "ignored_generation_keys": sorted(set(generation) - supported),
+        "effective": {
+            "is_image_model": defaults.is_image_model,
+            "default_tools": defaults.default_tools,
+            "generation_config_defaults": {
+                key: value.to_wire() if isinstance(value, AistudioImageOutputMode) else value
+                for key, value in generation.items() if key in supported
+            },
+            "clear_generation_config_indexes": defaults.clear_generation_config_indexes,
+            "safety_settings": defaults.safety_settings_overrides(),
+            "disable_safety_settings": defaults.disable_safety_settings,
+            "drop_unsupported_params": defaults.drop_unsupported_params,
+        },
+    }
 
 
 @protected_router.get("/config")

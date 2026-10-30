@@ -10,14 +10,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from aistudio_api.api import gemini as service
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
-from aistudio_api.application import api_service_gemini as service
+from aistudio_api.application import generation as generation_execution
 from aistudio_api.domain.models import Candidate, ContentPart, ModelOutput
 
 
 @pytest.fixture
 def checkpoint_budget(monkeypatch):
-    monkeypatch.setattr(service, "COOKIE_CHECKPOINT_TIMEOUT_SECONDS", 0.01, raising=False)
+    monkeypatch.setattr(generation_execution, "COOKIE_CHECKPOINT_TIMEOUT_SECONDS", 0.01, raising=False)
 
 
 async def test_checkpoint_success_keeps_the_exact_leased_context(
@@ -34,7 +35,7 @@ async def test_checkpoint_success_keeps_the_exact_leased_context(
     persist = AsyncMock(side_effect=save)
     client = SimpleNamespace(session=SimpleNamespace(persist_context_cookies=persist))
 
-    await service._persist_successful_cookies(client, context)
+    await generation_execution._persist_successful_cookies(client, context)
 
     persist.assert_awaited_once_with(context)
     assert json.loads(saved.read_text(encoding="utf-8")) == {
@@ -66,7 +67,7 @@ async def test_checkpoint_timeout_preserves_last_saved_data_and_closes_in_place(
         session=SimpleNamespace(persist_context_cookies=stalled_persist)
     )
     async with asyncio.timeout(1):
-        await service._persist_successful_cookies(client, context)
+        await generation_execution._persist_successful_cookies(client, context)
 
     assert entered.is_set()
     assert closed.is_set()
@@ -79,13 +80,13 @@ async def test_checkpoint_failure_remains_optional(checkpoint_budget):
     persist = AsyncMock(side_effect=RuntimeError("synthetic checkpoint unavailable"))
     client = SimpleNamespace(session=SimpleNamespace(persist_context_cookies=persist))
 
-    await service._persist_successful_cookies(client, object())
+    await generation_execution._persist_successful_cookies(client, object())
 
     persist.assert_awaited_once()
 
 
 async def test_checkpoint_cancellation_propagates_and_closes_in_place(monkeypatch):
-    monkeypatch.setattr(service, "COOKIE_CHECKPOINT_TIMEOUT_SECONDS", 60, raising=False)
+    monkeypatch.setattr(generation_execution, "COOKIE_CHECKPOINT_TIMEOUT_SECONDS", 60, raising=False)
     entered = asyncio.Event()
     closed = asyncio.Event()
 
@@ -99,7 +100,7 @@ async def test_checkpoint_cancellation_propagates_and_closes_in_place(monkeypatc
     client = SimpleNamespace(
         session=SimpleNamespace(persist_context_cookies=stalled_persist)
     )
-    task = asyncio.create_task(service._persist_successful_cookies(client, object()))
+    task = asyncio.create_task(generation_execution._persist_successful_cookies(client, object()))
     await asyncio.wait_for(entered.wait(), 1)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -154,10 +155,11 @@ async def test_completed_response_releases_lease_after_checkpoint_budget(
             )
         ),
     )
-    monkeypatch.setattr(service, "ensure_active_account", AsyncMock())
+    monkeypatch.setattr(generation_execution, "ensure_active_account", AsyncMock())
     monkeypatch.setattr(service, "validate_account_availability", lambda _model: None)
-    monkeypatch.setattr(service, "account_id_for_auth_file", lambda _path: "account-1")
+    monkeypatch.setattr(generation_execution, "account_id_for_auth_file", lambda _path: "account-1")
     monkeypatch.setattr(service, "record_rotator_event", MagicMock())
+    monkeypatch.setattr(generation_execution, "record_rotator_event", service.record_rotator_event)
     monkeypatch.setattr(service.runtime_state, "record", MagicMock())
     req = GeminiGenerateContentRequest.model_validate(
         {"contents": [{"role": "user", "parts": [{"text": "synthetic question"}]}]}
