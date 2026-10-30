@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -23,6 +24,7 @@ from aistudio_api.infrastructure.gateway.wire_codec import (
     InvalidRequestTemplateError,
 )
 from aistudio_api.infrastructure.utils.logger import get_logger
+from aistudio_api.infrastructure.utils.response_diagnostics import note_timing
 
 log = get_logger("session.botguard")
 
@@ -137,6 +139,12 @@ async def click_run_button(page: CDPPage) -> bool:
     return await page.click("button:has(mat-icon)")
 
 
+async def _wait_for_template_capture(captured: asyncio.Event, poll_seconds: float = 1.0) -> None:
+    """Wake on a valid request body while retaining bounded liveness polling."""
+    with suppress(TimeoutError):
+        await asyncio.wait_for(captured.wait(), timeout=poll_seconds)
+
+
 async def bootstrap_botguard_and_template(
     page: CDPPage,
     reload_cookies_cb: Callable[[CDPPage], Awaitable[bool]] | None = None,
@@ -196,6 +204,7 @@ async def _capture_botguard_and_template_once(
 
     try:
         snap_key = await install_page_hooks(page)
+        note_timing("botguard_hooks_ready")
     except Exception as exc:
         if is_login_page_url(getattr(page, "url", "")):
             raise SessionExpiredError(
@@ -203,8 +212,9 @@ async def _capture_botguard_and_template_once(
             ) from exc
         raise
 
-    t0 = time.time()
+    t0 = time.monotonic()
     captured: dict[str, object] = {}
+    captured_ready = asyncio.Event()
     original_text: str = ""
     invalid_template_seen = False
     probe_stopped = False
@@ -226,12 +236,14 @@ async def _capture_botguard_and_template_once(
         captured["url"] = url
         captured["headers"] = req.get("headers") or {}
         captured["body"] = body
+        captured_ready.set()
 
     unsub = page.on_request(on_req)
     try:
         await page.evaluate(DIALOG_CLEANUP_JS)
-        await page.evaluate(
-            """(() => {
+        if await page.evaluate("() => !!document.querySelector('textarea')") is not True:
+            await page.evaluate(
+                """(() => {
             const clickable = Array.from(document.querySelectorAll('button, mat-card, a, [role="button"], [role="tab"], .nav-item'));
             const targets = ['Playground', 'Code and Chat', 'Chat prompt', 'New chat', 'Start building', 'Create prompt'];
             for (const term of targets) {
@@ -239,8 +251,8 @@ async def _capture_botguard_and_template_once(
                 if (target) { target.click(); return; }
             }
         })()"""
-        )
-        await page.wait_for_timeout(800)
+            )
+            await page.wait_for_timeout(800)
 
         try:
             await page.wait_for_selector("textarea", timeout_s=15.0)
@@ -270,6 +282,7 @@ async def _capture_botguard_and_template_once(
         )
         await enable_temporary_chat(page)
         await page.fill("textarea", BOTGUARD_BOOTSTRAP_PROMPT)
+        note_timing("botguard_prompt_filled")
         await page.wait_for_timeout(600)
         await page.evaluate(DIALOG_CLEANUP_JS)
 
@@ -277,9 +290,10 @@ async def _capture_botguard_and_template_once(
             raise RuntimeError(
                 "failed to trigger run button while capturing BotGuardService"
             )
+        note_timing("botguard_run_dispatched")
 
         service_seen = False
-        for i in range(max_wait_seconds):
+        for _ in range(max_wait_seconds):
             if is_proc_alive_cb and not is_proc_alive_cb():
                 raise RuntimeError("Browser process died during BotGuard capture")
             if page.is_closed():
@@ -291,7 +305,7 @@ async def _capture_botguard_and_template_once(
                     "Google login redirect during BotGuard capture"
                 )
 
-            await page.wait_for_timeout(1000)
+            await _wait_for_template_capture(captured_ready)
             if await page.evaluate("() => !!window.__AISTUDIO__?.service"):
                 service_seen = True
                 # The hook stores `service` before its asynchronous snapshot
@@ -308,11 +322,14 @@ async def _capture_botguard_and_template_once(
                     await page.evaluate(DOM_GC_CLEANUP_JS)
 
                 log.info(
-                    "BotGuard 握手成功并截获模板，耗时 %d 秒 (累计 %.1f 秒)",
-                    i + 1,
-                    time.time() - t0,
+                    "BotGuard 握手成功并截获模板，耗时 %.1f 秒",
+                    time.monotonic() - t0,
                 )
+                note_timing("botguard_template_ready")
                 return snap_key, captured
+            # A body alone does not prove that the required service hook is
+            # ready. Resume bounded polling instead of spinning on a set event.
+            captured_ready.clear()
 
         if invalid_template_seen or service_seen:
             raise InvalidRequestTemplateError(

@@ -139,6 +139,21 @@ def test_prompt_size_uses_final_report_of_first_reporting_call_without_summing_r
     assert diagnostic_store.list_records()["items"][0]["prompt_tokens"] == 80_001
 
 
+@pytest.mark.parametrize("tokens,warning", [(63_999, False), (64_000, True)])
+def test_large_input_fast_completion_is_observable_without_changing_generation(diagnostic_store, tokens, warning):
+    with trace():
+        diagnostics.begin_upstream_call()
+        parse_usage_metadata([tokens, 1, tokens + 1])
+        diagnostics.observe_candidate(Candidate(parts=[ContentPart(text="synthetic")], finish_reason=1))
+        diagnostics.finish_response_diagnostics("success", 200)
+    item = diagnostic_store.list_records()["items"][0]
+    assert item["prompt_tokens"] == tokens and item["outcome"] == "success"
+    assert "slow_first_body" not in item["flags"]
+    assert ("large_input" in item["flags"]) is warning
+    assert diagnostics.logger.warning.call_count == int(warning)
+    assert diagnostics.logger.info.call_count == int(not warning)
+
+
 @pytest.mark.parametrize("tokens,expected", [(None, None), (True, None), (-1, None), (0, 0), (80_000, 80_000)])
 def test_prompt_usage_keeps_unknown_distinct_from_zero(diagnostic_store, tokens, expected):
     with trace():

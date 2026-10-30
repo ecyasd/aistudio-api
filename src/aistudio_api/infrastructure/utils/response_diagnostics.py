@@ -22,6 +22,7 @@ RETENTION_MINUTES = 10
 MAX_SEQUENCE = 32
 MAX_COUNT = 2_147_483_647
 SLOW_FIRST_BODY_MS = 10_000
+LARGE_INPUT_TOKENS = 64_000
 _MODEL = re.compile(r"(?:models/)?(?:gemini|gemma)[a-z0-9_.-]{0,90}\Z")
 _REQUEST = re.compile(r"req_[a-f0-9]{8,32}\Z")
 _PHASES = frozenset({"body", "thought", "empty_thought", "finish"})
@@ -29,6 +30,7 @@ _FLAGS = frozenset({
     "marker_in_body", "thought_after_body", "empty_thought", "content_after_finish",
     "multiple_upstream_calls", "retried", "auto_continued", "sequence_limited",
     "slow_first_body",
+    "large_input",
 })
 _OUTCOMES = frozenset({"success", "recovered", "failed", "cancelled"})
 _ERROR_KINDS = frozenset({
@@ -45,6 +47,10 @@ _TIMINGS = (
     "capture_started", "template_ready", "snapshot_ready", "upstream_started",
     "transport_dispatched", "upstream_headers", "upstream_first_byte",
     "first_thought", "first_body", "response_started", "first_data_sent",
+    "browser_launch_started", "browser_ready", "browser_context_ready",
+    "browser_cookies_loaded", "browser_navigation_ready", "botguard_hooks_ready",
+    "botguard_prompt_filled", "botguard_run_dispatched", "botguard_template_ready",
+    "session_checkpoint_done",
 )
 logger = get_logger("response_diagnostics")
 _store: ResponseDiagnosticStore | None = None
@@ -399,6 +405,8 @@ def finish_response_diagnostics(outcome: str, transport_status: int | None = Non
         duration_ms = _count(int(max(0, time.monotonic() - current.started) * 1000))
         if current.timings_ms.get("first_body", duration_ms) >= SLOW_FIRST_BODY_MS:
             current.flags.add("slow_first_body")
+        if current.prompt_tokens is not None and current.prompt_tokens >= LARGE_INPUT_TOKENS:
+            current.flags.add("large_input")
         error_kind = "cancelled" if outcome == "cancelled" else None
         for event in context.recorded_event_keys.values():
             if event.get("category") in _ERROR_KINDS:
@@ -424,6 +432,6 @@ def finish_response_diagnostics(outcome: str, transport_status: int | None = Non
                 get_response_diagnostic_store().record(summary)
             with contextlib.suppress(Exception):
                 log = logger.warning if summary["outcome"] in {"failed", "cancelled"} or current.flags.intersection({
-                    "marker_in_body", "thought_after_body", "content_after_finish", "slow_first_body",
+                    "marker_in_body", "thought_after_body", "content_after_finish", "slow_first_body", "large_input",
                 }) else logger.info
                 log("response_diagnostic %s", json.dumps(summary, separators=(",", ":")))
