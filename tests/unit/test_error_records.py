@@ -59,6 +59,7 @@ async def test_asyncio_deadline_and_admission_timeout_are_not_client_cancellatio
     wrapped = HTTPException(503, "Admission queue timed out")
     wrapped.__cause__ = timeout
     assert records.classify_failure(wrapped, http_status=503)[:2] == (503, "timeout")
+    assert records.classify_failure(wrapped)[:2] == (503, "timeout")
     assert records.classify_failure(asyncio.CancelledError())[:2] == (499, "cancelled")
 
 
