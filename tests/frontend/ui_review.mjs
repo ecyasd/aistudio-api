@@ -152,4 +152,48 @@ for (const filter of ['expired', 'search', 'all']) {
 }
 checks.push('whole-group deletion confirms all members including accounts hidden by search or status filters')
 
+{
+  let fail = true
+  const unmounts = [], focused = []
+  const load = loader({
+    stubComponents: true,
+    globals: { AbortController },
+    hooks: { onMounted() {}, onUnmounted(callback) { unmounts.push(callback) } },
+    imports: {
+      '@/api/system.ts': { systemApi: { getConfig: async () => {
+        if (fail) throw new Error('Synthetic unavailable configuration')
+        return { auth_enabled: true, yaml_content: 'model_defaults: {}' }
+      } } },
+      '@/stores/toast.ts': { useToastStore: () => ({ error() {} }) },
+      '@/composables/usePolling.ts': { usePolling() {} },
+    },
+  })
+  const scope = vue.effectScope()
+  const state = scope.run(() => load('views/SettingsView.vue').default.setup({}, { expose() {} }))
+  state.sectionTabs.value = { querySelector: selector => ({ focus() { focused.push(selector) } }) }
+  let prevented = 0
+  const key = value => ({ key: value, preventDefault() { prevented++ } })
+  state.onSectionKeydown(key('ArrowLeft'), 0)
+  assert.equal(state.activeSection.value, 'runtime')
+  assert.equal(focused.at(-1), '#settings-tab-runtime')
+  state.onSectionKeydown(key('Home'), 2)
+  assert.equal(state.activeSection.value, 'access')
+  state.onSectionKeydown(key('ArrowRight'), 0)
+  assert.equal(state.activeSection.value, 'models')
+  state.onSectionKeydown(key('End'), 1)
+  assert.equal(state.activeSection.value, 'runtime')
+  state.onSectionKeydown(key('ArrowDown'), 2)
+  assert.equal(prevented, 4, 'vertical arrows retain ordinary page scrolling')
+  await state.loadConfig()
+  assert(state.configError.value, 'a failed read must expose a recoverable error state')
+  fail = false
+  await state.loadConfig()
+  assert.equal(state.configError.value, '')
+  assert.equal(state.config.value.auth_enabled, true)
+  assert.equal(state.activeSection.value, 'runtime', 'refresh must preserve the selected task')
+  unmounts.forEach(callback => callback())
+  scope.stop()
+  checks.push('settings task tabs support keyboard focus and configuration errors recover without changing tasks')
+}
+
 console.log(JSON.stringify({ passed: true, checks, syntheticOnly: true }))

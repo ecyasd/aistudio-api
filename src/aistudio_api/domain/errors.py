@@ -13,6 +13,10 @@ class AuthError(AistudioError):
     pass
 
 
+class BrowserTransportError(AistudioError):
+    """The browser stream event channel could not be restored safely."""
+
+
 class SessionExpiredError(AuthError):
     """明确被 Google 重定向至登录页（Cookie 真正失效）。"""
 
@@ -131,6 +135,8 @@ def is_transient_rpc_error(exc: Exception) -> bool:
 
 def is_browser_session_hang_error(exc: Exception) -> bool:
     """识别由于 CDP 断开、模板捕获超时或 BotGuard 握手未就绪引起的会话挂起异常。"""
+    if isinstance(exc, BrowserTransportError):
+        return True
     if isinstance(exc, (RuntimeError, TimeoutError)):
         err = str(exc).lower()
         return any(

@@ -129,8 +129,8 @@ async def test_api_keys_can_be_managed_without_path_encoding(monkeypatch, tmp_pa
 async def test_rotation_status_and_clear_cooldown():
     from unittest.mock import MagicMock
 
-    from aistudio_api.api.state import runtime_state
     from aistudio_api.application.account_rotator import AccountRotator
+    from aistudio_api.application.runtime import runtime_state
 
     mock_rotator = MagicMock(spec=AccountRotator)
     mock_rotator.get_all_stats.return_value = {"acc_1": {"requests": 1}}

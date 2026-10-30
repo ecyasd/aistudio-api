@@ -7,11 +7,10 @@ from collections.abc import Iterable
 
 from fastapi import HTTPException, Request
 
+from aistudio_api.application.runtime import runtime_state
 from aistudio_api.config import settings
 from aistudio_api.infrastructure.gateway.client import AIStudioClient
 from aistudio_api.infrastructure.utils.logger import get_logger
-
-from .state import runtime_state
 
 logger = get_logger("auth")
 

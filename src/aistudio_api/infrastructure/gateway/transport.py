@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from anyio import CancelScope
 
+from aistudio_api.domain.errors import BrowserTransportError
 from aistudio_api.infrastructure.account.cookie_parser import (
     calculate_sapisid_hash,
     select_signing_cookies,
@@ -20,6 +21,8 @@ from aistudio_api.infrastructure.browser.scripts import (
     HOOKED_REQUEST_JS,
     STREAM_ACK_JS,
     STREAM_CLEANUP_JS,
+    STREAM_RESEND_JS,
+    STREAM_STATE_JS,
     STREAMING_INIT_JS,
     build_hooked_request_args,
     build_streaming_init_args,
@@ -29,7 +32,10 @@ if TYPE_CHECKING:
     from aistudio_api.infrastructure.browser.cdp_client import CDPPage
 
 from aistudio_api.infrastructure.utils.logger import get_logger
-from aistudio_api.infrastructure.utils.response_diagnostics import note_timing
+from aistudio_api.infrastructure.utils.response_diagnostics import (
+    note_timing,
+    note_transport_wait,
+)
 
 logger = get_logger("transport")
 
@@ -43,6 +49,9 @@ MAX_TOTAL_BUFFER_BYTES = 8 * 1024 * 1024
 MAX_STREAM_EVENTS = 32
 CONSUMER_TIMEOUT_S = 30.0
 CLEANUP_TIMEOUT_S = 2.0
+STREAM_PROBE_INTERVAL_S = 20.0
+STREAM_PROBE_TIMEOUT_S = 2.0
+STREAM_RECOVERY_BINDING = "__aistudio_stream_resume__"
 
 
 def _signing_cookies(page: CDPPage | None, cookies: list[dict[str, object]]) -> dict[str, str]:
@@ -94,6 +103,7 @@ class XHRStreamTransport:
         self._buffered_bytes = 0
         self._pages: dict[str, CDPPage] = {}
         self._failed: set[str] = set()
+        self._received_seq: dict[str, int] = {}
         self._cleanup_tasks: set[asyncio.Task[None]] = set()
 
     async def _cleanup_browser(self, page: CDPPage, script: str, rid: str) -> None:
@@ -158,6 +168,16 @@ class XHRStreamTransport:
                     rid = str(data.get("rid") or "")
                     q = self._queues.get(rid)
                     if q is not None and rid not in self._failed:
+                        seq = data.get("seq")
+                        if type(seq) is int and seq > 0:
+                            previous = self._received_seq.get(rid, 0)
+                            # Recovery can re-send the one unacknowledged
+                            # browser event. Never deliver its text twice.
+                            if seq <= previous:
+                                return
+                            if seq != previous + 1:
+                                self._fail_stream(rid, "stream event sequence invalid")
+                                return
                         text = data.get("text")
                         size = len(text.encode("utf-8")) if isinstance(text, str) else 0
                         # A UTF-8 decoder can carry at most three previous bytes
@@ -172,6 +192,8 @@ class XHRStreamTransport:
                             return
                         try:
                             q.put_nowait(data)
+                            if type(seq) is int and seq > 0:
+                                self._received_seq[rid] = seq
                             self._queue_bytes[rid] = (
                                 self._queue_bytes.get(rid, 0) + size
                             )
@@ -183,13 +205,76 @@ class XHRStreamTransport:
 
         if hasattr(page, "on_binding"):
             page.on_binding("__aistudio_stream_push__", on_stream_push)
+            page.on_binding(STREAM_RECOVERY_BINDING, on_stream_push)
         elif hasattr(page, "cdp") and hasattr(page.cdp, "on"):
 
             def listener(params: dict[str, object]) -> None:
-                if params.get("name") == "__aistudio_stream_push__":
+                if params.get("name") in {"__aistudio_stream_push__", STREAM_RECOVERY_BINDING}:
                     on_stream_push(str(params.get("payload") or ""))
 
             page.cdp.on("Runtime.bindingCalled", listener)
+
+    async def _probe_silent_stream(
+        self, page: CDPPage, rid: str, *, idle_s: float, remaining_s: float,
+        allow_repair: bool,
+    ) -> tuple[dict[str, object] | None, bool]:
+        """Inspect counters; restore at most one lost push without another fetch."""
+        queue = self._queues[rid]
+        phase = "state_missing"
+        repaired = False
+        waiting_for_event = False
+        try:
+            async with asyncio.timeout(min(remaining_s, STREAM_PROBE_TIMEOUT_S)):
+                state = await page.evaluate(STREAM_STATE_JS, rid, timeout_s=STREAM_PROBE_TIMEOUT_S)
+                if not queue.empty():
+                    return queue.get_nowait(), False
+                if not isinstance(state, dict):
+                    raise BrowserTransportError("CDP stream state disappeared")
+                raw_phase = state.get("phase")
+                if isinstance(raw_phase, str) and raw_phase in {"fetch_pending", "read_pending", "awaiting_ack"}:
+                    phase = raw_phase
+                binding_missing = state.get("bindingReady") is False
+                if binding_missing:
+                    phase = "binding_missing"
+                if phase not in {"awaiting_ack", "binding_missing"}:
+                    return None, False
+                seq = state.get("seq")
+                if not allow_repair:
+                    raise BrowserTransportError("CDP stream event delivery stalled")
+                # Use a separate binding without detaching the shared channel:
+                # another request can still be using this same page.
+                if hasattr(page, "add_binding"):
+                    await page.add_binding(STREAM_RECOVERY_BINDING)
+                else:
+                    await page.cdp.send("Runtime.addBinding", {"name": STREAM_RECOVERY_BINDING})
+                repaired = True
+                if not queue.empty():
+                    return queue.get_nowait(), True
+                if type(seq) is not int or seq < 0:
+                    raise BrowserTransportError("CDP stream event delivery stalled")
+                if raw_phase == "awaiting_ack" and seq <= self._received_seq.get(rid, 0):
+                    raise BrowserTransportError("CDP stream event delivery stalled")
+                resent = await page.evaluate(
+                    STREAM_RESEND_JS, {"rid": rid, "seq": seq}, timeout_s=STREAM_PROBE_TIMEOUT_S,
+                )
+                if resent is not True:
+                    raise BrowserTransportError("CDP stream event delivery stalled")
+                if raw_phase != "awaiting_ack":
+                    return None, True
+                waiting_for_event = True
+                event = await queue.get()
+                return event, True
+        except TimeoutError:
+            if not queue.empty():
+                return queue.get_nowait(), repaired
+            if remaining_s <= STREAM_PROBE_TIMEOUT_S:
+                raise TimeoutError("streaming response timed out before completion") from None
+            if waiting_for_event:
+                raise BrowserTransportError("CDP stream event delivery stalled") from None
+            phase = "page_unresponsive"
+            raise BrowserTransportError("CDP stream state probe timed out") from None
+        finally:
+            note_transport_wait(phase, int(idle_s * 1000), repair_attempted=repaired)
 
     async def send_hooked_request(
         self,
@@ -273,13 +358,11 @@ class XHRStreamTransport:
             )
             self._ensure_page_binding(page)
             if hasattr(page, "add_binding"):
-                with suppress(Exception):
-                    await page.add_binding("__aistudio_stream_push__")
+                await page.add_binding("__aistudio_stream_push__")
             elif hasattr(page, "cdp") and hasattr(page.cdp, "send"):
-                with suppress(Exception):
-                    await page.cdp.send(
-                        "Runtime.addBinding", {"name": "__aistudio_stream_push__"}
-                    )
+                await page.cdp.send(
+                    "Runtime.addBinding", {"name": "__aistudio_stream_push__"}
+                )
         rid = uuid.uuid4().hex
 
         queue: asyncio.Queue[dict[str, object]] = asyncio.Queue(
@@ -288,6 +371,7 @@ class XHRStreamTransport:
         self._queues[rid] = queue
         self._queue_bytes[rid] = 0
         self._pages[rid] = page
+        self._received_seq[rid] = 0
 
         init_args = build_streaming_init_args(
             url=url,
@@ -302,15 +386,38 @@ class XHRStreamTransport:
         )
         status_sent = False
         is_terminal = False
+        last_progress_at = asyncio.get_running_loop().time()
+        last_probe_at = last_progress_at
+        repaired_stream = False
 
         try:
             async with asyncio.timeout_at(deadline):
                 note_timing("transport_dispatched")
-                await page.evaluate(
+                receipt = await page.evaluate(
                     STREAMING_INIT_JS,
                     init_args,
                     timeout_s=max(deadline - asyncio.get_running_loop().time(), 0.001),
                 )
+                if (isinstance(receipt, dict) and receipt.get("started") is False
+                        and receipt.get("reason") == "binding_unavailable"):
+                    # The browser confirmed it has not called fetch. Its global
+                    # binding can disappear while CDPPage's registration cache
+                    # still says installed. Add a separate native channel; never
+                    # detach a shared channel used by another active stream.
+                    if hasattr(page, "add_binding"):
+                        await page.add_binding(STREAM_RECOVERY_BINDING)
+                    else:
+                        await page.cdp.send("Runtime.addBinding", {"name": STREAM_RECOVERY_BINDING})
+                    note_transport_wait("binding_missing", 0, repair_attempted=True)
+                    receipt = await page.evaluate(
+                        STREAMING_INIT_JS, init_args,
+                        timeout_s=max(deadline - asyncio.get_running_loop().time(), 0.001),
+                    )
+                    if not isinstance(receipt, dict) or receipt.get("started") is not True:
+                        raise BrowserTransportError("CDP stream binding unavailable before dispatch")
+                if isinstance(receipt, dict) and receipt.get("started") is True:
+                    note_timing("browser_request_started")
+            last_progress_at = asyncio.get_running_loop().time()
             while not is_terminal:
                 if page.is_closed() is True:
                     raise RuntimeError("Browser page closed during streaming")
@@ -320,6 +427,8 @@ class XHRStreamTransport:
                     break
 
                 step_timeout = min(remaining, 1.0)
+                next_probe_in = STREAM_PROBE_INTERVAL_S - (now - max(last_progress_at, last_probe_at))
+                step_timeout = min(step_timeout, max(0.001, next_probe_in))
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=step_timeout)
                 except TimeoutError:
@@ -327,7 +436,19 @@ class XHRStreamTransport:
                         raise RuntimeError(
                             "Browser page closed during streaming"
                         ) from None
-                    continue
+                    now = asyncio.get_running_loop().time()
+                    if now >= deadline:
+                        break
+                    if now - max(last_progress_at, last_probe_at) < STREAM_PROBE_INTERVAL_S:
+                        continue
+                    last_probe_at = now
+                    event, repaired = await self._probe_silent_stream(
+                        page, rid, idle_s=now - last_progress_at,
+                        remaining_s=max(deadline - now, 0.001), allow_repair=not repaired_stream,
+                    )
+                    repaired_stream = repaired_stream or repaired
+                    if event is None:
+                        continue
                 etype = str(event.get("type") or "")
                 event_text = event.get("text")
                 event_size = (
@@ -349,12 +470,13 @@ class XHRStreamTransport:
                         deadline = asyncio.get_running_loop().time() + timeout_s
                 elif etype == "error":
                     message = str(event.get("message") or "unknown error")
+                    if message in {"timeout", "slow consumer timeout"}:
+                        raise TimeoutError(f"streaming request failed: {message}")
                     raise RuntimeError(f"streaming request failed: {message}")
                 elif etype == "aborted":
                     raise RuntimeError("streaming request failed: cancelled")
                 elif etype == "done":
                     is_terminal = True
-                    break
                 seq = event.get("seq")
                 if isinstance(seq, int) and seq > 0:
                     await asyncio.wait_for(
@@ -365,8 +487,9 @@ class XHRStreamTransport:
                         ),
                         timeout=CLEANUP_TIMEOUT_S,
                     )
+                last_progress_at = asyncio.get_running_loop().time()
             if not status_sent:
-                raise RuntimeError("streaming request timeout: no response status")
+                raise TimeoutError("streaming request timeout: no response status")
             if not is_terminal:
                 raise TimeoutError("streaming response timed out before completion")
         finally:
@@ -374,5 +497,6 @@ class XHRStreamTransport:
             self._queues.pop(rid, None)
             self._pages.pop(rid, None)
             self._failed.discard(rid)
+            self._received_seq.pop(rid, None)
             with CancelScope(shield=True):
                 await asyncio.shield(self._schedule_cleanup(page, STREAM_CLEANUP_JS, rid))

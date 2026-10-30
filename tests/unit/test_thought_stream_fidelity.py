@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from aistudio_api.api.gemini import format_sse_event
 from aistudio_api.api.responses import to_gemini_parts
-from aistudio_api.application.api_service_gemini import format_sse_event
 from aistudio_api.infrastructure.gateway.capture import CapturedRequest
 from aistudio_api.infrastructure.gateway.streaming import StreamingGateway
 from aistudio_api.infrastructure.gateway.wire_parser import parse_text_output

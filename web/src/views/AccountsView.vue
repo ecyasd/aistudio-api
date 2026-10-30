@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
+import { RouterLink, useRoute } from 'vue-router'
+import { diagnosticContext } from '@/utils/diagnosticContext.ts'
 import { useAccountsStore } from '@/stores/accounts.ts'
 import { useSystemStore } from '@/stores/system.ts'
 import { usePolling } from '@/composables/usePolling.ts'
@@ -12,6 +14,8 @@ import { Plus, RotateCcw, ArrowRightLeft } from 'lucide-vue-next'
 
 const accountsStore = useAccountsStore()
 const systemStore = useSystemStore()
+const route = useRoute()
+const focusedAccount = computed(() => diagnosticContext(route.query).account)
 
 const importModalOpen = ref(false)
 const editModalOpen = ref(false)
@@ -86,10 +90,37 @@ async function handleForceNext() {
       </div>
     </div>
 
+    <div
+      v-if="focusedAccount"
+      class="rounded-xl border border-brand-100 bg-brand-50 px-4 py-3 text-xs text-gray-700 space-y-2"
+    >
+      <p class="font-mono break-all">
+        诊断关联账号：{{ focusedAccount }}
+      </p>
+      <p v-if="!accountsStore.accountRows.some(account => account.id === focusedAccount)">
+        此账号已删除或尚未载入，最近诊断仍按原账号 ID 保留至过期。
+      </p>
+      <div class="flex flex-wrap gap-4">
+        <RouterLink
+          to="/accounts"
+          class="text-brand-700 underline underline-offset-4"
+        >
+          查看全部账号
+        </RouterLink>
+        <RouterLink
+          :to="{ path: '/error-records', query: { account_id: focusedAccount } }"
+          class="text-brand-700 underline underline-offset-4"
+        >
+          查看该账号最近诊断
+        </RouterLink>
+      </div>
+    </div>
+
     <!-- Account Table -->
     <AccountTable
       :accounts="accountsStore.accountRows"
       :active-id="accountsStore.activeId"
+      :focus-account="focusedAccount"
       @edit-name="handleEditName"
     />
 

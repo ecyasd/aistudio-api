@@ -1,4 +1,5 @@
 """Keep caller authentication failures distinct from service Google failures."""
+
 import json
 import os
 from types import SimpleNamespace
@@ -7,7 +8,8 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import HTTPException
 
-from aistudio_api.application import api_service_gemini as service
+from aistudio_api.api import gemini as service
+from aistudio_api.application import generation as generation_execution
 from aistudio_api.domain.errors import AuthError, SessionExpiredError
 from aistudio_api.infrastructure.utils.common import atomic_write_json
 
@@ -18,6 +20,7 @@ from aistudio_api.infrastructure.utils.common import atomic_write_json
 ])
 async def test_upstream_auth_is_503_for_http_and_sse(monkeypatch, error, category):
     monkeypatch.setattr(service, "record_rotator_event", MagicMock())
+    monkeypatch.setattr(generation_execution, "record_rotator_event", service.record_rotator_event)
     with pytest.raises(HTTPException) as caught:
         await service._handle_attempt_exception(
             error, attempt=0, model_path="models/test", normalized_model="test",

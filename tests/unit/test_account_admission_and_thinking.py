@@ -12,8 +12,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
+from aistudio_api.api.gemini import handle_gemini_generate_content
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
-from aistudio_api.api.state import runtime_state
 from aistudio_api.application import (
     account_orchestrator as orchestrator,
     account_rotator as rotator_module,
@@ -22,8 +22,8 @@ from aistudio_api.application.account_rotator import (
     AccountRotator,
     get_pacific_date_key,
 )
-from aistudio_api.application.api_service_gemini import handle_gemini_generate_content
 from aistudio_api.application.chat_service import normalize_gemini_request
+from aistudio_api.application.runtime import runtime_state
 from aistudio_api.config import settings
 
 MODEL = "gemini-admission-test"

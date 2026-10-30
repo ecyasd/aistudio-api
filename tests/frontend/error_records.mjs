@@ -14,6 +14,15 @@ const ts = require('typescript')
 const { parse, compileScript } = require('@vue/compiler-sfc')
 const { renderToString } = require('@vue/server-renderer')
 const checks = []
+const routeFixture = vue.reactive({ query: {} })
+const routerFixture = { replace: async location => { routeFixture.query = location.query ?? {} } }
+const RouterLink = vue.defineComponent({
+  props: ['to'], setup: (props, { slots }) => () => {
+    const target = props.to
+    const query = typeof target === 'object' && target.query ? `?${new URLSearchParams(target.query)}` : ''
+    return vue.h('a', { href: typeof target === 'string' ? target : `${target.path}${query}` }, slots.default?.())
+  },
+})
 const pageRequests = []
 const pollCallbacks = []
 const pollIntervals = []
@@ -35,6 +44,7 @@ function execute(source, filename, overrides = {}, globals = {}) {
     exports: module.exports, module, console, AbortController, URLSearchParams, Date: FixtureDate, ...globals,
     require(name) {
       if (name in overrides) return overrides[name]
+      if (name === 'vue-router') return { RouterLink, useRoute: () => routeFixture, useRouter: () => routerFixture }
       if (name === '@/api/errors.ts') return { errorsApi: { list: async (query, signal) => {
         pageRequests.push({ ...query, signal })
         return requestImpl(query, signal)
@@ -248,7 +258,7 @@ assert.match(html, /服务重启后清空/)
 assert.match(html, /过期记录自动清除/)
 assert.match(html, /响应探测/)
 assert.match(html, /暂无响应探测记录/)
-assert.match(html, /与错误筛选、页码无关/)
+assert.match(html, /独立于错误码及页码/)
 assert.match(html, /本页显示最新 25 条/)
 assert.match(html, /上游次数按开始重放的尝试计数/)
 checks.push('a successful empty response explains the ten-minute live window and restart clearing')
@@ -427,6 +437,61 @@ for (const [stamp, hours] of [
   ['2026-07-01T06:30:00Z', 0.5],
 ]) assert.equal(millisecondsUntilPacificMidnight(new Date(stamp)), hours * 3_600_000, stamp)
 checks.push('Pacific quota countdown uses actual winter/summer offsets and 23/25-hour daylight-saving transition days')
+
+store = freshStore()
+const contextRecord = record({ account_id: 'acc_11111111', request_id: 'req_11111111' })
+const contextDiagnostic = diagnostic({ account_ids: ['acc_11111111', 'acc_22222222'], request_id: 'req_11111111',
+  transport_wait_phase: 'awaiting_ack', transport_probes: 2, transport_repair_attempts: 1 })
+requestImpl = async () => response([contextRecord], { diagnostics: { items: [contextDiagnostic], retention: { minutes: 10, max_records: 100 } } })
+await store.refresh()
+store.accountFilter = 'acc_33333333'
+assert.equal(store.items.length, 0)
+assert.equal(store.diagnosticItems.length, 0)
+assert.equal(store.matchesFilters, false)
+requestImpl = async () => { throw new Error('synthetic context refresh failure') }
+await store.refresh()
+assert.equal(store.items.length, 0, 'failed context navigation cannot show another account as the current account')
+checks.push('account context changes hide unrelated cached errors and diagnostics even when the new read fails')
+
+const pendingContext = []
+requestImpl = (query, signal) => new Promise(resolve => pendingContext.push({ query, signal, resolve }))
+const oldContextRead = store.refresh()
+store.accountFilter = 'acc_11111111'
+store.requestFilter = 'req_11111111'
+const newContextRead = store.refresh()
+assert.equal(pendingContext[0].signal.aborted, true)
+pendingContext[1].resolve(response([contextRecord]))
+await newContextRead
+pendingContext[0].resolve(response([record({ account_id: 'acc_33333333' })]))
+await oldContextRead
+assert.equal(store.items[0].account_id, 'acc_11111111')
+assert.equal(pendingContext[1].query.account_id, 'acc_11111111')
+assert.equal(pendingContext[1].query.request_id, 'req_11111111')
+assert.equal(store.page, 1)
+checks.push('account and request filters travel together and older responses cannot replace a newer context')
+
+routeFixture.query = { account_id: 'acc_11111111' }
+requestImpl = async () => response([contextRecord], { diagnostics: { items: [contextDiagnostic], retention: { minutes: 10, max_records: 100 } } })
+await store.refresh()
+html = await render()
+assert.match(html, /账号范围/)
+assert.match(html, /\/accounts\?account_id=acc_11111111/)
+assert.match(html, /\/error-records\?request_id=req_11111111/)
+assert.match(html, /等待片段确认/)
+assert.match(html, /恢复尝试 1 次/)
+const routeScope = vue.effectScope()
+routeScope.run(() => setupView.setup({}, { expose() {} }))
+routeFixture.query = { request_id: 'req_11111111' }
+await vue.nextTick()
+assert.equal(store.accountFilter, '', 'request-chain links must include attempts using other accounts')
+assert.equal(store.requestFilter, 'req_11111111')
+routeScope.stop()
+routeFixture.query = {}
+checks.push('account and request links preserve exact identities and request navigation clears the account restriction')
+
+const contextParser = load('utils/diagnosticContext.ts').diagnosticContext
+assert.equal(contextParser({ account_id: ['acc_11111111'], request_id: 'unsafe-request' }).account, '')
+assert.equal(contextParser({ account_id: 'acc_11111111' }).account, 'acc_11111111')
 
 const result = { passed: true, checks, groups: checks.length, syntheticOnly: true, upstreamModelCalls: false }
 console.log(JSON.stringify(result))

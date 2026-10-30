@@ -11,8 +11,8 @@ import httpx
 import pytest
 
 from aistudio_api.api.app import app
-from aistudio_api.api.state import runtime_state
 from aistudio_api.application.account_service import AccountService
+from aistudio_api.application.runtime import runtime_state
 from aistudio_api.config import settings
 from aistudio_api.infrastructure.account.account_store import AccountMeta
 
@@ -46,6 +46,20 @@ def _client() -> httpx.AsyncClient:
         transport=httpx.ASGITransport(app=app), base_url="http://test",
         headers={"Authorization": "Bearer synthetic-management-only"},
     )
+
+
+async def test_no_active_account_is_normal_empty_state_without_error_pollution(setup_mock_account_service, monkeypatch):
+    from aistudio_api.infrastructure.utils import error_records
+
+    store = error_records.ErrorRecordStore()
+    monkeypatch.setattr(error_records, "get_error_record_store", lambda: store)
+    setup_mock_account_service.get_active_account.return_value = None
+    async with _client() as client:
+        for _ in range(3):
+            response = await client.get("/api/accounts/active")
+            assert response.status_code == 200
+            assert response.json() is None
+    assert not store.list_records()["items"], "routine empty-account polling is not a generation error"
 
 
 @pytest.mark.parametrize("created_at", ["2026-10-30T12:34:56Z", "2026-10-30 12:34:56", ""])

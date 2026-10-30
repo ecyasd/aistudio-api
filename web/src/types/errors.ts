@@ -26,6 +26,7 @@ export interface ErrorRecord {
 
 export interface ResponseDiagnostic {
   request_id: string
+  account_ids?: string[]
   time: string
   model: string | null
   stream: boolean
@@ -38,6 +39,10 @@ export interface ResponseDiagnostic {
   thought_tokens?: number | null
   session_preparation_reason?: string | null
   browser_idle_timeout_s?: number | null
+  transport_wait_phase?: string | null
+  transport_probes?: number
+  transport_repair_attempts?: number
+  transport_wait_ms?: number
   timings_ms?: Record<string, number>
   upstream_calls: number
   retries: number
@@ -70,4 +75,6 @@ export interface ErrorRecordsQuery {
   category?: string
   cursor?: string | null
   include_diagnostics?: boolean
+  account_id?: string
+  request_id?: string
 }

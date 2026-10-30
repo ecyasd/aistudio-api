@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
+import { RouterLink } from 'vue-router'
 import type { AccountWithStats } from '@/types/accounts.ts'
 import Badge from '@/components/ui/Badge.vue'
 import Button from '@/components/ui/Button.vue'
@@ -176,7 +177,13 @@ async function handleDetectEmail() {
         </div>
 
         <!-- Action Buttons -->
-        <div class="flex items-center gap-1.5 ml-1">
+        <div class="flex flex-wrap items-center gap-1.5 ml-1">
+          <RouterLink
+            :to="{ path: '/error-records', query: { account_id: account.id } }"
+            class="px-2 py-1.5 text-xs font-medium text-brand-700 rounded-lg hover:bg-brand-50 focus-visible:outline-2 focus-visible:outline-brand-500"
+          >
+            查看诊断
+          </RouterLink>
           <!-- 登录态失效状态下的快捷恢复按钮 -->
           <button
             v-if="account.session_expired"

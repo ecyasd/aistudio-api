@@ -34,6 +34,77 @@ function browser(fetch) {
             }
         }};
 }
+{
+    let fetches = 0;
+    const b = browser(async () => { fetches++; throw new Error('unreachable'); });
+    delete b.window.__aistudio_stream_push__;
+    const receipt = b.run('streaming_init.js', defaults);
+    assert.equal(receipt.started, false);
+    assert.equal(receipt.reason, 'binding_unavailable');
+    assert.equal(fetches, 0);
+    assert.equal(b.timers.size, 0);
+    checks.push('missing native push fails before posting upstream');
+}
+{
+    let fetches = 0;
+    const bytes = new TextEncoder().encode('SYNTHETIC_PRIVATE_RESPONSE');
+    let reads = 0;
+    const reader = {read: async () => ++reads === 1 ? {done: false, value: bytes} : {done: true},
+        cancel: async () => {}, releaseLock() {}};
+    const b = browser(async () => { fetches++; return {status: 200, body: {getReader: () => reader}}; });
+    const nativePush = b.window.__aistudio_stream_push__;
+    b.window.__aistudio_stream_push__ = () => {};
+    b.run('streaming_init.js', defaults);
+    await tick();
+    const state = b.run('stream_state.js', 'one');
+    assert.equal(state.phase, 'awaiting_ack');
+    assert.equal(state.seq, 1);
+    assert.equal(reads, 0);
+    assert.equal(JSON.stringify(state).includes('SYNTHETIC_PRIVATE_RESPONSE'), false);
+    b.window.__aistudio_stream_resume__ = nativePush;
+    assert.equal(b.run('stream_resend.js', {rid: 'one', seq: 999}), false);
+    assert.equal(b.events.length, 0);
+    assert.equal(b.run('stream_resend.js', {rid: 'one', seq: 1}), true);
+    for (let count = 0; count < 30 && !b.events.some(event => event.type === 'done'); count++) {
+        const event = b.events.at(-1);
+        b.run('stream_ack.js', {rid: 'one', seq: event.seq});
+        await tick();
+    }
+    assert.equal(b.events.filter(event => event.type === 'chunk').map(event => event.text).join(''),
+        'SYNTHETIC_PRIVATE_RESPONSE');
+    assert.equal(b.events.at(-1).type, 'done');
+    assert.equal(fetches, 1);
+    b.run('stream_ack.js', {rid: 'one', seq: b.events.at(-1).seq});
+    await tick();
+    assert.equal(b.timers.size, 0);
+    checks.push('native push recovery preserves original response and never repeats fetch');
+}
+{
+    let fetches = 0, lostDone = false;
+    const b = browser(async () => { fetches++; return {status: 200, body: null}; });
+    const receive = b.window.__aistudio_stream_push__;
+    b.window.__aistudio_stream_push__ = payload => {
+        if (JSON.parse(payload).type === 'done' && !lostDone) { lostDone = true; return; }
+        receive(payload);
+    };
+    b.run('streaming_init.js', defaults);
+    await tick();
+    b.run('stream_ack.js', {rid: 'one', seq: b.events.at(-1).seq});
+    await tick();
+    assert.equal(lostDone, true);
+    const state = b.run('stream_state.js', 'one');
+    assert.ok(state, 'lost completion must retain the original stream for recovery');
+    assert.equal(state.phase, 'awaiting_ack');
+    b.window.__aistudio_stream_resume__ = receive;
+    assert.equal(b.run('stream_resend.js', {rid: 'one', seq: state.seq}), true);
+    assert.equal(b.events.at(-1).type, 'done');
+    b.run('stream_ack.js', {rid: 'one', seq: state.seq});
+    await tick();
+    assert.equal(fetches, 1, 'completion recovery must not resend a generation');
+    assert.equal(b.run('stream_state.js', 'one'), null);
+    assert.equal(b.timers.size, 0);
+    checks.push('lost completion is recovered and acknowledged without another fetch');
+}
 for (const mode of ['stalled body timeout', 'body read rejection', 'explicit cancellation']) {
     let signal;
     let rejectRead;
@@ -110,6 +181,8 @@ for (const mode of ['response total bound', 'single read bound']) {
     assert.equal(b.events.filter(e => e.type === 'chunk').map(e => e.text).join(''), '你好a世界');
     assert.equal(b.events.at(-1).type, 'done');
     assert.equal(reads, 2);
+    b.run('stream_ack.js', {rid: 'one', seq: b.events.at(-1).seq});
+    await tick();
     assert.equal(b.timers.size, 0);
     assert.equal(Object.keys(b.window.__AISTUDIO__.streams).length, 0);
     checks.push('bounded stream ACK ordering and split UTF-8');
@@ -141,6 +214,8 @@ for (const budget of ['synthetic', 'production']) {
         expected);
     assert.equal(b.events.filter(event => event.type === 'chunk').length, 8);
     assert.equal(b.events.at(-1).type, 'done');
+    b.run('stream_ack.js', {rid: 'one', seq: b.events.at(-1).seq});
+    await tick();
     assert.equal(b.timers.size, 0);
     checks.push(`active consumer can drain one read beyond upstream idle budget (${budget} byte limits)`);
 }

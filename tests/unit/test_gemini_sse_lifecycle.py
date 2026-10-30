@@ -5,17 +5,19 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from contextvars import ContextVar
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from aistudio_api.application import generation as generation_execution
+
 
 @pytest.fixture
 def sse_env(monkeypatch):
-    from aistudio_api.application import api_service_gemini as service
+    from aistudio_api.api import gemini as service
     from aistudio_api.application.account_rotator import AccountStats
 
     accounts = [SimpleNamespace(id="test-account", auth_generation=None)]
@@ -48,7 +50,8 @@ def sse_env(monkeypatch):
     monkeypatch.setattr(service.runtime_state, "rotator", rotator)
     monkeypatch.setattr(service.runtime_state, "record", MagicMock())
     monkeypatch.setattr(service, "record_rotator_event", MagicMock())
-    monkeypatch.setattr(service, "ensure_active_account", AsyncMock())
+    monkeypatch.setattr(generation_execution, "record_rotator_event", service.record_rotator_event)
+    monkeypatch.setattr(generation_execution, "ensure_active_account", AsyncMock())
     monkeypatch.setattr(service, "try_switch_account", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "SSE_HEARTBEAT_INTERVAL_SECONDS", 0.01)
     return SimpleNamespace(
@@ -72,6 +75,98 @@ def _live_sse_tasks():
         for task in asyncio.all_tasks()
         if not task.done() and task.get_name().startswith("gemini-sse-")
     ]
+
+
+@pytest.mark.parametrize("phase", ["before_output", "during_output", "retry_before_output"])
+async def test_disconnect_through_http_middleware_never_reports_retry_success(
+    sse_env, request_body, monkeypatch, phase
+):
+    from starlette.middleware.base import BaseHTTPMiddleware
+
+    from aistudio_api.api.error_middleware import ErrorRecordsMiddleware
+    from aistudio_api.infrastructure.utils import error_records, response_diagnostics
+
+    errors = error_records.ErrorRecordStore()
+    diagnostics = response_diagnostics.ResponseDiagnosticStore()
+    monkeypatch.setattr(error_records, "get_error_record_store", lambda: errors)
+    monkeypatch.setattr(response_diagnostics, "get_response_diagnostic_store", lambda: diagnostics)
+    sse_env.client.session.reset_if_active = AsyncMock(return_value=True)
+    entered = asyncio.Event()
+    disconnect = asyncio.Event()
+    attempts = 0
+
+    async def upstream(**_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if phase == "retry_before_output" and attempts == 1:
+            raise RuntimeError("streaming request timeout: no response status")
+        entered.set()
+        if phase == "during_output":
+            yield "body", "synthetic partial response"
+        await asyncio.Event().wait()
+
+    sse_env.client.stream_generate_content.side_effect = upstream
+    response = sse_env.service._build_gemini_streaming_response(
+        client=sse_env.client, req=request_body, model_path="gemini-test"
+    )
+
+    async def endpoint(scope, receive, send):
+        await receive()
+        response_diagnostics.configure_generation(model="gemini-test", auto_continue=False)
+        await response(scope, receive, send)
+
+    async def pass_through(request, call_next):
+        return await call_next(request)
+
+    app = ErrorRecordsMiddleware(BaseHTTPMiddleware(endpoint, dispatch=pass_through))
+    request_received = False
+
+    async def receive():
+        nonlocal request_received
+        if not request_received:
+            request_received = True
+            return {"type": "http.request", "body": b"{}", "more_body": False}
+        await disconnect.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if message["type"] == "http.response.body" and message.get("body"):
+            disconnect.set()
+
+    scope = {"type": "http", "asgi": {"spec_version": "2.3"},
+             "method": "POST", "path": "/v1beta/models/gemini-test:streamGenerateContent",
+             "headers": [], "query_string": b""}
+    await asyncio.wait_for(app(scope, receive, send), 2)
+    assert entered.is_set()
+    assert attempts == (2 if phase == "retry_before_output" else 1)
+    assert diagnostics.list_records()["items"][0]["outcome"] == "cancelled"
+    events = errors.list_records()["items"]
+    assert events and all(event["outcome"] == "cancelled" for event in events)
+    sse_env.service.runtime_state.record.assert_not_called()
+    assert not sse_env.leased and not _live_sse_tasks()
+
+
+async def test_browser_delivery_failure_after_body_is_a_503_without_replaying_model(
+    sse_env, request_body
+):
+    from aistudio_api.domain.errors import BrowserTransportError
+
+    async def upstream(**_kwargs):
+        yield "body", "synthetic partial response"
+        raise BrowserTransportError("CDP stream event delivery stalled")
+
+    sse_env.client.stream_generate_content.side_effect = upstream
+    response = sse_env.service._build_gemini_streaming_response(
+        client=sse_env.client, req=request_body, model_path="gemini-test"
+    )
+    chunks = "".join([chunk async for chunk in response.body_iterator])
+    assert "synthetic partial response" in chunks
+    assert '"code": 503' in chunks and '"status": "UNAVAILABLE"' in chunks
+    assert '"finishReason"' not in chunks
+    assert sse_env.client.stream_generate_content.call_count == 1
+    sse_env.service.try_switch_account.assert_not_awaited()
+    sse_env.service.runtime_state.record.assert_not_called()
+    assert not sse_env.leased and not _live_sse_tasks()
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -108,7 +203,7 @@ async def test_repeated_204_is_a_real_502_error(sse_env, request_body, stream):
 async def test_native_preparation_timeout_returns_nonempty_504(sse_env, request_body, stream):
     from fastapi import HTTPException
 
-    sse_env.service.ensure_active_account.side_effect = TimeoutError()
+    generation_execution.ensure_active_account.side_effect = TimeoutError()
     operation = sse_env.service.handle_gemini_generate_content(
         "gemini-test", request_body, sse_env.client, stream=stream
     )
@@ -132,9 +227,9 @@ async def test_continuation_retries_share_total_request_deadline(sse_env, reques
     from aistudio_api.domain.errors import RequestError
 
     service = sse_env.service
-    monkeypatch.setattr(service, "settings", SimpleNamespace(timeout_stream=0.11))
+    monkeypatch.setattr(generation_execution, "settings", SimpleNamespace(timeout_stream=0.11))
     limiter = InferenceLimiter(concurrency=1, wait_seconds=1)
-    monkeypatch.setattr(service, "inference_limiter", limiter)
+    monkeypatch.setattr(generation_execution, "inference_limiter", limiter)
     calls, closed = [], []
 
     async def upstream(**kwargs):
@@ -168,7 +263,7 @@ async def test_continuation_retries_share_total_request_deadline(sse_env, reques
 
 async def test_ordinary_progressing_stream_can_outlive_continuation_budget(sse_env, request_body, monkeypatch):
     service = sse_env.service
-    monkeypatch.setattr(service, "settings", SimpleNamespace(timeout_stream=0.005))
+    monkeypatch.setattr(generation_execution, "settings", SimpleNamespace(timeout_stream=0.005))
 
     async def upstream(**kwargs):
         for _ in range(4):
@@ -225,7 +320,7 @@ async def test_preflight_returns_real_http_error_without_starting_browser(
     assert response.status_code == expected
     assert "text/event-stream" not in response.headers["content-type"]
     sse_env.client.stream_generate_content.assert_not_called()
-    service.ensure_active_account.assert_not_awaited()
+    generation_execution.ensure_active_account.assert_not_awaited()
     service.try_switch_account.assert_not_awaited()
     service.runtime_state.record.assert_not_called()
 
@@ -247,10 +342,18 @@ async def test_preflight_does_not_mutate_daily_stats_or_preselect_account(
     )
     assert response.status_code == 200
     assert stats.to_dict() == before
-    service.ensure_active_account.assert_not_awaited()
+    generation_execution.ensure_active_account.assert_not_awaited()
     service.try_switch_account.assert_not_awaited()
     sse_env.client.stream_generate_content.assert_not_called()
     await response.body_iterator.aclose()
+
+
+def _publish_source(source):
+    async def produce(emit):
+        async with aclosing(source):
+            async for chunk in source:
+                await emit(chunk)
+    return produce
 
 
 async def test_heartbeats_preserve_chunks_and_one_producer_context(sse_env):
@@ -273,7 +376,7 @@ async def test_heartbeats_preserve_chunks_and_one_producer_context(sse_env):
             context.reset(token)
             closed.set()
 
-    stream = service._sse_with_heartbeats(source(), interval=0.01)
+    stream = service._sse_with_heartbeats(_publish_source(source()), interval=0.01)
     assert await asyncio.wait_for(anext(stream), 1) == "\n\n"
     assert await asyncio.wait_for(anext(stream), 1) == "\n\n"
     release.set()
@@ -297,7 +400,7 @@ async def test_slow_client_keeps_bounded_buffer_and_aclose_stops_producer(sse_en
         finally:
             closed.set()
 
-    stream = sse_env.service._sse_with_heartbeats(source(), interval=0.01)
+    stream = sse_env.service._sse_with_heartbeats(_publish_source(source()), interval=0.01)
     assert await anext(stream) == "data: 0\n\n"
     await asyncio.sleep(0.01)
     # One yielded chunk, one queued chunk and at most one blocked queue.put.
@@ -312,7 +415,7 @@ async def test_cancelled_upstream_does_not_send_heartbeats_forever(sse_env):
         raise asyncio.CancelledError
         yield "unreachable"  # pragma: no cover
 
-    stream = sse_env.service._sse_with_heartbeats(source(), interval=0.01)
+    stream = sse_env.service._sse_with_heartbeats(_publish_source(source()), interval=0.01)
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(anext(stream), 1)
     assert not _live_sse_tasks()
@@ -332,7 +435,7 @@ async def test_cancel_during_account_initialization_closes_waiting_task(
         finally:
             closed.set()
 
-    service.ensure_active_account.side_effect = initialize
+    generation_execution.ensure_active_account.side_effect = initialize
     response = service._build_gemini_streaming_response(
         client=sse_env.client, req=request_body, model_path="gemini-test"
     )
@@ -457,7 +560,7 @@ async def test_repeated_interrupt_and_immediate_reroll_releases_only_old_request
 
     service = sse_env.service
     limiter = InferenceLimiter(concurrency=1, max_waiting=2, wait_seconds=1)
-    monkeypatch.setattr(service, "inference_limiter", limiter)
+    monkeypatch.setattr(generation_execution, "inference_limiter", limiter)
     entered = asyncio.Event()
     calls, closed = [], []
 
@@ -593,7 +696,7 @@ async def test_state_change_after_preflight_is_still_an_in_band_error(
     response = await service.handle_gemini_generate_content(
         "gemini-test", request_body, sse_env.client, stream=True
     )
-    service.ensure_active_account.side_effect = HTTPException(503, "account removed")
+    generation_execution.ensure_active_account.side_effect = HTTPException(503, "account removed")
     chunks = [chunk async for chunk in response.body_iterator]
     assert response.status_code == 200
     assert json.loads(chunks[-1][6:])["error"]["code"] == 503
@@ -720,6 +823,7 @@ async def test_last_attempt_failure_does_not_become_success(sse_env, request_bod
     from aistudio_api.domain.errors import UsageLimitExceeded
 
     monkeypatch.setattr(sse_env.service, "MAX_RETRIES", 1)
+    monkeypatch.setattr(generation_execution, "MAX_RETRIES", sse_env.service.MAX_RETRIES)
     sse_env.service.try_switch_account.return_value = True
 
     async def upstream(**kwargs):
@@ -784,7 +888,7 @@ async def test_bootstrap_failure_keeps_the_attempted_account_when_active_changed
             "test-account", SessionExpiredError("offline bootstrap login redirect")
         )
 
-    service.ensure_active_account.side_effect = initialize
+    generation_execution.ensure_active_account.side_effect = initialize
     if stream:
         response = await service.handle_gemini_generate_content(
             "gemini-test", request_body, sse_env.client, stream=True
@@ -865,6 +969,6 @@ async def test_nonstream_invalid_request_does_not_bootstrap(sse_env, request_bod
             "gemini-test", request_body, sse_env.client, stream=False
         )
     assert caught.value.status_code == 400
-    sse_env.service.ensure_active_account.assert_not_awaited()
+    generation_execution.ensure_active_account.assert_not_awaited()
     sse_env.client.generate_content.assert_not_awaited()
     sse_env.service.runtime_state.record.assert_not_called()

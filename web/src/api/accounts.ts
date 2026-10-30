@@ -14,8 +14,8 @@ export const accountsApi = {
     return request<Account[]>('/api/accounts')
   },
 
-  getActive(): Promise<Account> {
-    return request<Account>('/api/accounts/active')
+  getActive(): Promise<Account | null> {
+    return request<Account | null>('/api/accounts/active')
   },
 
   activate(id: string): Promise<Account> {

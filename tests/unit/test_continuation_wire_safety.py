@@ -10,8 +10,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
+from aistudio_api.api import gemini as api
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
-from aistudio_api.application import api_service_gemini as api
+from aistudio_api.application import generation as generation_execution
 from aistudio_api.infrastructure.gateway.capture import CapturedRequest
 from aistudio_api.infrastructure.gateway.streaming import StreamingGateway
 from aistudio_api.infrastructure.gateway.wire_parser import (
@@ -97,9 +98,10 @@ def wire_env(monkeypatch):
             leases.remove(context)
             released.append(context.context_id)
 
-    monkeypatch.setattr(api, "ensure_active_account", AsyncMock())
+    monkeypatch.setattr(generation_execution, "ensure_active_account", AsyncMock())
     monkeypatch.setattr(api, "try_switch_account", AsyncMock(return_value=False))
     monkeypatch.setattr(api, "record_rotator_event", MagicMock())
+    monkeypatch.setattr(generation_execution, "record_rotator_event", api.record_rotator_event)
     monkeypatch.setattr(api.runtime_state, "record", MagicMock())
     monkeypatch.setattr(api.runtime_state, "account_service", SimpleNamespace(
         list_accounts=lambda: [account], get_active_account=lambda: account,

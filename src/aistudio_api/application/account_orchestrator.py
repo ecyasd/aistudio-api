@@ -10,11 +10,11 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from aistudio_api.api.state import runtime_state
 from aistudio_api.application.account_rotator import (
     AccountStats,
     get_seconds_until_pacific_midnight,
 )
+from aistudio_api.application.runtime import runtime_state
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 logger = get_logger("orchestrator")

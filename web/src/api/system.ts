@@ -11,10 +11,16 @@ import type {
   UpdateLoggingConfigResponse,
   HealthCheckResponse,
   BrowserStatusResponse,
+  ModelRulePreview,
 } from '@/types'
 
 
 export const systemApi = {
+  previewModelRules(model: string, yamlContent: string, signal?: AbortSignal): Promise<ModelRulePreview> {
+    return request('/config/model-preview', {
+      method: 'POST', body: JSON.stringify({ model, yaml_content: yamlContent }), signal,
+    })
+  },
   getBrowserStatus(signal?: AbortSignal): Promise<BrowserStatusResponse> {
     return request<BrowserStatusResponse>('/browser/status', { signal })
   },

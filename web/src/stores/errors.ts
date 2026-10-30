@@ -8,6 +8,8 @@ export const useErrorsStore = defineStore('errors', () => {
   const result = ref<ErrorRecordsResponse | null>(null)
   const statusFilter = ref('')
   const categoryFilter = ref('')
+  const accountFilter = ref('')
+  const requestFilter = ref('')
   const loading = ref(false)
   const error = ref('')
   const lastUpdated = ref<Date | null>(null)
@@ -16,21 +18,28 @@ export const useErrorsStore = defineStore('errors', () => {
   const previousCursors = ref<(string | null)[]>([])
   const displayedStatus = ref('')
   const displayedCategory = ref('')
+  const displayedAccount = ref('')
+  const displayedRequest = ref('')
   let sequence = 0
   let controller: AbortController | null = null
 
   const items = computed(() => {
     const cutoff = observedAt.value - (result.value?.retention.minutes ?? 10) * 60_000
-    return result.value?.items.filter(record => Date.parse(record.time) >= cutoff) ?? []
+    return result.value?.items.filter(record => Date.parse(record.time) >= cutoff
+      && (!accountFilter.value || record.account_id === accountFilter.value)
+      && (!requestFilter.value || record.request_id === requestFilter.value)) ?? []
   })
   const diagnosticItems = computed(() => {
     const diagnostics = result.value?.diagnostics
     const cutoff = observedAt.value - (diagnostics?.retention.minutes ?? 10) * 60_000
-    return diagnostics?.items.filter(record => Date.parse(record.time) >= cutoff) ?? []
+    return diagnostics?.items.filter(record => Date.parse(record.time) >= cutoff
+      && (!accountFilter.value || record.account_ids?.includes(accountFilter.value))
+      && (!requestFilter.value || record.request_id === requestFilter.value)) ?? []
   })
   const page = computed(() => previousCursors.value.length + 1)
   const matchesFilters = computed(() => displayedStatus.value === statusFilter.value
-    && displayedCategory.value === categoryFilter.value)
+    && displayedCategory.value === categoryFilter.value
+    && displayedAccount.value === accountFilter.value && displayedRequest.value === requestFilter.value)
 
   async function fetchPage(cursor: string | null, trail: (string | null)[]): Promise<boolean> {
     const requestSequence = ++sequence
@@ -39,6 +48,8 @@ export const useErrorsStore = defineStore('errors', () => {
     controller = new AbortController()
     const status = statusFilter.value
     const category = categoryFilter.value
+    const account = accountFilter.value
+    const request = requestFilter.value
     loading.value = true
     error.value = ''
     try {
@@ -48,6 +59,8 @@ export const useErrorsStore = defineStore('errors', () => {
         category: category || undefined,
         cursor,
         include_diagnostics: true,
+        account_id: account || undefined,
+        request_id: request || undefined,
       }, controller.signal)
       if (requestSequence !== sequence) return false
       result.value = response
@@ -56,6 +69,8 @@ export const useErrorsStore = defineStore('errors', () => {
       previousCursors.value = trail
       displayedStatus.value = status
       displayedCategory.value = category
+      displayedAccount.value = account
+      displayedRequest.value = request
       lastUpdated.value = new Date()
       return true
     } catch (err: unknown) {
@@ -103,7 +118,7 @@ export const useErrorsStore = defineStore('errors', () => {
   }
 
   return {
-    result, items, diagnosticItems, statusFilter, categoryFilter, loading, error, lastUpdated,
+    result, items, diagnosticItems, statusFilter, categoryFilter, accountFilter, requestFilter, loading, error, lastUpdated,
     page, matchesFilters, refresh, reload, nextPage, previousPage, cancel,
   }
 })

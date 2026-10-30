@@ -5,15 +5,15 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
+from aistudio_api.api.gemini import handle_attempt_exception
 from aistudio_api.api.routes_system import browser_status
-from aistudio_api.application.api_service_gemini import handle_attempt_exception
 from aistudio_api.infrastructure.gateway.wire_codec import InvalidRequestTemplateError
 
 
 @pytest.mark.asyncio
 async def test_invalid_internal_template_recovers_once_without_account_rotation(monkeypatch):
     rotate = AsyncMock()
-    monkeypatch.setattr("aistudio_api.application.api_service_gemini.try_switch_account", rotate)
+    monkeypatch.setattr("aistudio_api.api.gemini.try_switch_account", rotate)
     session = SimpleNamespace(reset_if_active=AsyncMock(return_value=True))
     client = SimpleNamespace(clear_templates=MagicMock(), session=session)
     kwargs = {"model_path": "synthetic", "normalized_model": "synthetic", "client": client,

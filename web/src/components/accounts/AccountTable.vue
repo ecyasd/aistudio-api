@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, toRef, onMounted } from 'vue'
+import { ref, computed, toRef, onMounted, watch } from 'vue'
 import type { AccountWithStats } from '@/types/accounts.ts'
 import { useAccountsStore } from '@/stores/accounts.ts'
 import { useSystemStore } from '@/stores/system.ts'
@@ -22,6 +22,7 @@ import {
 const props = defineProps<{
   accounts: AccountWithStats[]
   activeId: string
+  focusAccount?: string
 }>()
 
 const emit = defineEmits<{
@@ -35,10 +36,14 @@ const toast = useToastStore()
 // 搜索与状态过滤
 const searchKeyword = ref('')
 const statusFilter = ref<'all' | 'ready' | 'limited' | 'expired'>('all')
+watch(() => props.focusAccount, value => {
+  if (value) { searchKeyword.value = ''; statusFilter.value = 'all' }
+}, { immediate: true })
 
 const filteredAccounts = computed<AccountWithStats[]>(() => {
   const kw = searchKeyword.value.trim().toLowerCase()
   return props.accounts.filter((acc) => {
+    if (props.focusAccount && acc.id !== props.focusAccount) return false
     // 状态过滤
     if (statusFilter.value === 'expired') {
       if (!acc.session_expired) return false
@@ -88,7 +93,7 @@ function saveCollapsedState(set: Set<string>) {
 }
 
 function isGroupCollapsed(cid: string): boolean {
-  return collapsedCookieIds.value.has(cid)
+  return !props.focusAccount && collapsedCookieIds.value.has(cid)
 }
 
 function toggleCookieGroup(cid: string) {

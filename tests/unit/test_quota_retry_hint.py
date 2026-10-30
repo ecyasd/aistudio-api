@@ -8,11 +8,12 @@ import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 
+from aistudio_api.api import gemini as service
 from aistudio_api.api.app import http_exception_handler
 from aistudio_api.application import (
     account_orchestrator as orchestration,
     account_rotator as rotation,
-    api_service_gemini as service,
+    generation as generation_execution,
 )
 from aistudio_api.application.account_rotator import AccountStats
 from aistudio_api.domain.errors import UsageLimitExceeded
@@ -37,6 +38,7 @@ async def test_terminal_temporary_429_never_claims_midnight_reset(monkeypatch):
         stats.record_rate_limited(model)
 
     monkeypatch.setattr(service, "record_rotator_event", record)
+    monkeypatch.setattr(generation_execution, "record_rotator_event", service.record_rotator_event)
     monkeypatch.setattr(service.runtime_state, "record", lambda *_args, **_kwargs: None)
     with pytest.raises(HTTPException) as caught:
         await service.handle_attempt_exception(

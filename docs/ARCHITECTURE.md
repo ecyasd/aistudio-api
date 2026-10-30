@@ -33,6 +33,17 @@
 
 系统采用分层设计（Layered Architecture），划分为 **API 接入层**、**Application 应用服务层**、**Domain 领域层** 与 **Infrastructure 基础设施层**：
 
+生成调用的公共 HTTP 入口在 `api/gemini.py`，请求执行归属在 `application/generation.py`。
+`GenerationRun` 为流式与非流式提供同一套准入、重试、实际账号租约、可选 Cookie checkpoint 和成功记账。
+每次尝试使用独立的 `AttemptIdentity` 记录账号、context 和凭据代际；失败恢复接收该尝试的完整归属。
+流式输出交给 HTTP 层编码，只有已接受的内容才标记为发布；发布后失败不能重放原请求。
+非流式保留原重放传输，流式保留原增量网关，不用一种上游传输模拟另一种。
+
+HTTP 层拥有 SSE 编码、心跳、单槽反压队列、发送超时和 ASGI 清理。唯一 producer task
+执行 `GenerationRun`，在同一任务中取得和释放租约、推进和关闭上游迭代器。
+续写的绝对期限围绕准入、准备和上游等待启用，不跨越交付回调或下游反压等待。
+运行统计与应用依赖位于 `application/runtime.py`，应用编排不再依赖 API 层的状态模块。
+
 ```mermaid
 flowchart TD
     Client["客户端调用方<br/>(cURL / Python SDK / Web 控制台)"]
@@ -42,10 +53,12 @@ flowchart TD
         RoutesModels["routes_models.py<br/>模型发现与能力查询"]
         RoutesAccounts["routes_accounts.py<br/>账号与 Cookie 管理"]
         RoutesSystem["routes_system.py<br/>系统监控与配置热重载"]
+        GeminiHTTP["gemini.py<br/>Gemini HTTP / SSE 交付与错误映射"]
     end
 
     subgraph AppLayer ["2. Application 应用服务层"]
-        APISvc["api_service_gemini.py<br/>请求生命周期与流式处理"]
+        APISvc["generation.py<br/>GenerationRun 请求执行与尝试归属"]
+        Runtime["runtime.py<br/>应用运行状态与统计"]
         Orchestrator["account_orchestrator.py<br/>_switch_lock 防雪崩切号编排"]
         ChatSvc["chat_service.py<br/>多模态请求规范化"]
         AccountRotator["account_rotator.py<br/>模型级 Sticky 调度与 429 隔离"]
@@ -112,6 +125,7 @@ flowchart TD
 | `routes_models.py` | 动态向上游拉取并缓存可用模型列表（如 `gemini-3.7-flash`、`gemini-3.8-flash` 等） |
 | `routes_accounts.py` | 提供 Cookie 单条/Bundle文件导入、多账号递归探活（`u/0`, `u/1`...）、手动激活与删除接口 |
 | `routes_system.py` | 公开最小健康状态、受管理认证保护的监控指标与配置接口 |
+| `gemini.py` | Gemini 请求预检、HTTP 错误映射、响应序列化、SSE 心跳、反压和发送清理；将生成尝试交给应用层 |
 | `dependencies.py` | 分离管理密码和模型调用密钥；模型支持 Query 参数 `?key=`、Header `x-goog-api-key`、`x-api-key` 或 `Bearer`，空调用密钥配置拒绝请求 |
 
 ### 2.2 应用服务层 (`src/aistudio_api/application/`)
@@ -122,7 +136,8 @@ flowchart TD
 | `account_rotator.py` | 负责多账号的 Sticky 黏性调度，按模型维护 429 限流与 403 鉴权异常隔离状态，每日美西午夜重置 |
 | `account_orchestrator.py` | 提供全局防雪崩互斥锁（`_switch_lock`），在并发 429 与 403 异常时实现安全有序故障转移切号与单账号在位自愈 |
 | `account_service.py` | 账号领域用例（Cookie 保存、批量探活导入、凭据激活）封装，杜绝路由层穿透访问存储私有属性 |
-| `api_service_gemini.py` | 编排请求全生命周期，协调捕获模板、签名、传输重放及 SSE 流式响应 |
+| `generation.py` | `GenerationRun` 统一两种响应模式的准入、准备、重试、租约、checkpoint 和完成记账；交付与 HTTP 编码分离 |
+| `runtime.py` | 应用客户端、账号服务、调度器与模型统计的运行状态；保留原持久化格式 |
 | `model_selection.py` | 将 `抗截断/<base>` 选择器映射为原模型，保持账号准入、冷却、模板与统计共用原模型身份 |
 | `continuation.py` | 仅在真实 `MAX_TOKENS` 完成后执行有界续写；保留每轮 Part、签名和对话边界，累计用量 |
 | `inference_limits.py` | 限制推理并发、等待队列和排队时长；取消及退出时释放名额 |
@@ -173,7 +188,7 @@ sequenceDiagram
     actor Client as 客户端调用方
     participant API as FastAPI 路由层
     participant Rotator as AccountRotator
-    participant APISvc as api_service_gemini
+    participant APISvc as Gemini HTTP / GenerationRun
     participant Facade as AIStudioClient
     participant Capture as RequestCaptureService
     participant Session as BrowserSession
@@ -271,7 +286,7 @@ checkpoint 在原任务和原账号租约内清理，取消向外传播，不创
 
 诊断只保留固定字段、有限计数和代码定义的阶段/信号。不会保存提示词、正文、思考内容、Part 签名、账号、请求头或 URL。标记检测使用有界的分片状态，跨片段命中也只保留计数。每轮上游调用重置阶段检测，避免把抗截断的下一轮思考误报为同轮正文后思考。
 
-管理接口 `GET /errors?include_diagnostics=true` 额外返回 `diagnostics`，包含最近响应的 `items` 和 `retention`；未指定时保持原错误记录结构。错误筛选和分页不限制响应诊断窗口。诊断独立保留最近 10 分钟、最多 100 条，服务重启后清空；每次请求结束也将同一份白名单摘要写入现有服务日志，供窗口外排查。正文标记、正文后思考和完成后内容的信号，以及失败和取消摘要使用 WARNING；普通成功和恢复使用 INFO。日志受现有级别及保留期限约束，不改变用户日志设置，也不保证无限期留存。
+管理接口 `GET /errors?include_diagnostics=true` 额外返回 `diagnostics`，包含最近响应的 `items` 和 `retention`；未指定时保持原错误记录结构。账号与请求 ID 同时限定错误和响应诊断，筛选先于错误分页；错误码、分类和错误页码不限制响应诊断窗口。诊断独立保留最近 10 分钟、最多 100 条，服务重启后清空；每次请求结束也将同一份白名单摘要写入现有服务日志，供窗口外排查。正文标记、正文后思考和完成后内容的信号，以及失败和取消摘要使用 WARNING；普通成功和恢复使用 INFO。日志受现有级别及保留期限约束，不改变用户日志设置，也不保证无限期留存。
 
 思考诊断还记录 Part 数、请求是否显式提供配置及规范化覆盖中的已知 mode/level；未知值为 null，不推断最终 wire 默认值。思考 token 采用每次上游调用最后报告的累计值，再跨调用相加（含失败重试）；缺失 usage 不推断为零，部分轮次缺失时只代表已观测累计值，不代表全部实际消耗。
 

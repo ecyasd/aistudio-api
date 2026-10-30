@@ -1,4 +1,11 @@
 (args) => {
+    let pushBinding = typeof window.__aistudio_stream_resume__ === 'function'
+        ? window.__aistudio_stream_resume__ : window.__aistudio_stream_push__;
+    if (typeof pushBinding !== 'function') {
+        // An explicit pre-dispatch receipt permits repairing the native
+        // channel without ever repeating an upstream generation request.
+        return {started: false, reason: 'binding_unavailable'};
+    }
     const rid = args.rid;
     window.__AISTUDIO__ = window.__AISTUDIO__ || {};
     const streams = window.__AISTUDIO__.streams = window.__AISTUDIO__.streams || {};
@@ -10,11 +17,12 @@
     let timeoutId;
     let pending = null;
     let sequence = 0;
+    let phase = 'fetch_pending';
     function push(event) {
-        if (typeof window.__aistudio_stream_push__ !== 'function') {
+        if (typeof pushBinding !== 'function') {
             throw new Error('stream binding unavailable');
         }
-        window.__aistudio_stream_push__(JSON.stringify({...event, rid}));
+        pushBinding(JSON.stringify({...event, rid}));
     }
     function cleanup() {
         clearTimeout(timeoutId);
@@ -49,12 +57,25 @@
         return new Promise((resolve, reject) => {
             const seq = ++sequence;
             const timer = setTimeout(() => abort('slow consumer timeout'), args.consumerTimeout * 1000);
-            pending = {seq, resolve, reject, timer};
-            try { push({...event, seq}); } catch (_) { abort('stream binding unavailable'); }
+            pending = {seq, resolve, reject, timer, event: {...event, seq}};
+            try { push(pending.event); } catch (_) { abort('stream binding unavailable'); }
         });
     }
     streams[rid] = {
         abort,
+        state() {
+            return {phase: pending ? 'awaiting_ack' : phase,
+                seq: pending ? pending.seq : sequence,
+                bindingReady: typeof pushBinding === 'function'};
+        },
+        resume(seq) {
+            const replacement = window.__aistudio_stream_resume__;
+            if (typeof replacement !== 'function' || closed) return false;
+            if (pending && pending.seq !== seq) return false;
+            pushBinding = replacement;
+            if (pending) push(pending.event);
+            return true;
+        },
         ack(seq) {
             if (!pending || pending.seq !== seq) return;
             const current = pending;
@@ -76,6 +97,7 @@
                 signal: controller.signal,
             });
             if (closed) return;
+            phase = 'read_pending';
             resetTimeout();
             await send({type: 'status', status: response.status || 0});
             const decoder = new TextDecoder('utf-8', {fatal: true});
@@ -101,7 +123,9 @@
             }
             const remaining = decoder.decode();
             if (remaining) await send({type: 'chunk', text: remaining});
-            if (!closed) push({type: 'done'});
+            // Completion can be lost on the same CDP channel as a body chunk.
+            // Keep the original stream recoverable until Python confirms it.
+            if (!closed) await send({type: 'done'});
             closed = true;
             cleanup();
         } catch (_) {
@@ -112,4 +136,5 @@
             }
         }
     })();
+    return {started: true};
 }

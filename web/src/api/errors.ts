@@ -6,8 +6,12 @@ function isResponseDiagnostic(value: unknown): value is ResponseDiagnostic {
   const record = value as Record<string, unknown>
   const counters = ['duration_ms', 'upstream_calls', 'retries', 'body_chars', 'thought_chars',
     'thought_after_body', 'empty_thought_parts', 'marker_count']
-  const inputCounters = ['request_body_bytes', 'prompt_tokens', 'thought_tokens', 'browser_idle_timeout_s']
+  const inputCounters = ['request_body_bytes', 'prompt_tokens', 'thought_tokens', 'browser_idle_timeout_s',
+    'transport_probes', 'transport_repair_attempts', 'transport_wait_ms']
   return typeof record.request_id === 'string' && typeof record.time === 'string'
+    && (record.account_ids === undefined || (Array.isArray(record.account_ids) && record.account_ids.length <= 32
+      && record.account_ids.every(value => typeof value === 'string')))
+    && (record.transport_wait_phase == null || typeof record.transport_wait_phase === 'string')
     && Number.isFinite(Date.parse(record.time))
     && (record.model === null || typeof record.model === 'string')
     && typeof record.stream === 'boolean' && typeof record.auto_continue === 'boolean'
@@ -30,6 +34,8 @@ export const errorsApi = {
     params.set('limit', String(query.limit ?? 25))
     if (query.status != null) params.set('status', String(query.status))
     if (query.category) params.set('category', query.category)
+    if (query.account_id) params.set('account_id', query.account_id)
+    if (query.request_id) params.set('request_id', query.request_id)
     if (query.cursor) params.set('cursor', query.cursor)
     if (query.include_diagnostics) params.set('include_diagnostics', 'true')
     const response = await request<ErrorRecordsResponse>(`/errors?${params}`, { signal })

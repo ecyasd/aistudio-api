@@ -17,8 +17,8 @@ from aistudio_api.infrastructure.account.cookie_parser import parse_cookie_strin
 from aistudio_api.infrastructure.utils.common import mask_email
 
 if TYPE_CHECKING:
-    from aistudio_api.api.state import RuntimeState
     from aistudio_api.application.account_service import AccountService
+    from aistudio_api.application.runtime import RuntimeState
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 log = get_logger("accounts")
@@ -116,14 +116,14 @@ async def list_accounts(
     return [to_account_response(a) for a in accounts]
 
 
-@router.get("/active", response_model=AccountResponse)
+@router.get("/active", response_model=AccountResponse | None)
 async def get_active_account(
     account_service: AccountService = Depends(get_account_service),
-) -> AccountResponse:
+) -> AccountResponse | None:
     """获取当前活跃账号。"""
     account = account_service.get_active_account()
     if account is None:
-        raise HTTPException(status_code=404, detail="没有活跃账号")
+        return None
     return to_account_response(account)
 
 

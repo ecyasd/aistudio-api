@@ -1,0 +1,1 @@
+function c(a){const t=a.account_id,e=a.request_id;return{account:typeof t=="string"&&/^(?:acc_[a-f0-9]{8}|[a-f0-9]{32}|[a-f0-9-]{36})$/.test(t)?t:"",request:typeof e=="string"&&/^(?:req_[a-f0-9]{8,32}|[a-f0-9]{32}|[a-f0-9-]{36})$/.test(e)?e:""}}export{c as d};

@@ -12,10 +12,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from aistudio_api.api import gemini as service
 from aistudio_api.api.dependencies import get_client, require_api_key
 from aistudio_api.api.error_middleware import ErrorRecordsMiddleware
 from aistudio_api.api.nonstream_disconnect import NonStreamingDisconnectMiddleware
-from aistudio_api.application import api_service_gemini as service
+from aistudio_api.application import generation as generation_execution
 from aistudio_api.application.inference_limits import InferenceLimiter
 from aistudio_api.domain.errors import RequestError
 from aistudio_api.domain.models import Candidate, ModelOutput
@@ -77,10 +78,11 @@ def generation(monkeypatch):
     from aistudio_api.api.app import app
 
     limiter = InferenceLimiter(concurrency=2, max_waiting=4, wait_seconds=1)
-    monkeypatch.setattr(service, "inference_limiter", limiter)
-    monkeypatch.setattr(service, "ensure_active_account", AsyncMock())
-    monkeypatch.setattr(service, "account_id_for_auth_file", lambda _path: "synthetic-account")
+    monkeypatch.setattr(generation_execution, "inference_limiter", limiter)
+    monkeypatch.setattr(generation_execution, "ensure_active_account", AsyncMock())
+    monkeypatch.setattr(generation_execution, "account_id_for_auth_file", lambda _path: "synthetic-account")
     monkeypatch.setattr(service, "record_rotator_event", MagicMock())
+    monkeypatch.setattr(generation_execution, "record_rotator_event", service.record_rotator_event)
     monkeypatch.setattr(service.runtime_state, "record", MagicMock())
     diagnostics = response_diagnostics.ResponseDiagnosticStore()
     errors = error_records.ErrorRecordStore()
@@ -118,7 +120,7 @@ def generation(monkeypatch):
             env.closed.append(True)
 
     client = SimpleNamespace(session=SimpleNamespace(request_scope=request_scope))
-    monkeypatch.setattr(service.continuation, "generate_content", upstream)
+    monkeypatch.setattr(generation_execution.continuation, "generate_content", upstream)
     monkeypatch.setitem(app.dependency_overrides, get_client, lambda: client)
     monkeypatch.setitem(app.dependency_overrides, require_api_key, lambda: None)
     return env
@@ -193,7 +195,7 @@ async def test_disconnect_while_preparing_account_releases_slot(generation):
         finally:
             closed.set()
 
-    service.ensure_active_account.side_effect = prepare
+    generation_execution.ensure_active_account.side_effect = prepare
     connection = Connection()
     task = connection.start(env.app)
     try:
@@ -487,7 +489,7 @@ async def test_disconnect_during_real_session_transition_restores_ready_context(
         await session.transition_to_account("synthetic-new-auth")
 
     monkeypatch.setattr(session_module, "bootstrap_botguard_and_template", bootstrap)
-    service.ensure_active_account.side_effect = prepare
+    generation_execution.ensure_active_account.side_effect = prepare
     connection = Connection()
     task = connection.start(secured(env.app))
     try:
