@@ -404,17 +404,20 @@ checks.push('the shared polling scheduler stops while hidden, refreshes on visib
 store = freshStore()
 requestImpl = async () => response([], { diagnostics: { items: [diagnostic({
   prompt_tokens: 80_000, request_body_bytes: 320_000,
+  session_preparation_reason: 'warm_reuse', browser_idle_timeout_s: 1800,
   timings_ms: { account_preparation_started: 200, account_ready: 7040,
     transport_dispatched: 7100, upstream_first_byte: 30600, first_body: 30601, first_thought: 0,
     browser_launch_started: 200, browser_ready: 900, SYNTHETIC_PRIVATE_TIMING: 123 },
   flags: ['continuation_skipped_budget', 'continuation_skipped_unsupported'],
-}), diagnostic({ request_id: 'synthetic-unknown-size', prompt_tokens: null })],
+}), diagnostic({ request_id: 'synthetic-unknown-size', prompt_tokens: null,
+  session_preparation_reason: 'SYNTHETIC_PRIVATE_REASON', browser_idle_timeout_s: 0 })],
 retention: { max_records: 100, minutes: 10 } } })
 await store.refresh()
 html = await render()
 for (const text of ['80,000', '312.5 KiB', '6.840 秒', '23.500 秒', '30.601 秒', '0.000 秒', '0.900 秒',
   '历史预算不足', '暂不支持回放', '输入 未知', '未记录']) assert(html.includes(text), text)
-assert.doesNotMatch(html, /SYNTHETIC_PRIVATE_TIMING/)
+for (const text of ['复用热会话', '1800 秒', '不自动回收']) assert(html.includes(text), text)
+assert.doesNotMatch(html, /SYNTHETIC_PRIVATE_TIMING|SYNTHETIC_PRIVATE_REASON/)
 checks.push('latency rows distinguish local preparation, upstream wait, absolute first content, zero and unknown without rendering unrecognized metadata')
 
 const { millisecondsUntilPacificMidnight } = load('utils/format.ts')

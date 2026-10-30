@@ -46,7 +46,10 @@ from aistudio_api.infrastructure.gateway.session_state import (
 from aistudio_api.infrastructure.gateway.transport import XHRStreamTransport
 from aistudio_api.infrastructure.gateway.wire_types import AistudioContent
 from aistudio_api.infrastructure.utils.logger import get_logger
-from aistudio_api.infrastructure.utils.response_diagnostics import note_timing
+from aistudio_api.infrastructure.utils.response_diagnostics import (
+    note_session_preparation,
+    note_timing,
+)
 
 log = get_logger("session")
 
@@ -196,6 +199,7 @@ class BrowserSession:
                     self.is_ready and self._gate.active_context is not None
                     and self._gate.active_context.auth_generation == get_auth_generation(self._auth_file)
                 ):
+                    note_session_preparation("warm_reuse", settings.browser_idle_timeout)
                     return self._gate.active_context
 
                 if self.state != SessionState.PREPARING:
@@ -283,7 +287,27 @@ class BrowserSession:
                 and self._gate.active_context.auth_file == auth_file
                 and self._gate.active_context.auth_generation == auth_generation
             ):
+                note_session_preparation("warm_reuse", settings.browser_idle_timeout)
                 return self._gate.active_context
+
+            current = self.active_context
+            if current is not None and current.auth_file != auth_file:
+                reason = "account_change"
+            elif current is not None and current.auth_generation != auth_generation:
+                reason = "credentials_change"
+            elif self._last_stop_reason == "idle":
+                reason = "idle_recycle"
+            elif self._last_stop_reason == "not_started" and self._proc is None:
+                reason = "service_start"
+            elif self._proc is None or not self._proc.is_alive():
+                reason = "browser_recovery"
+            elif force_refresh:
+                reason = "forced_refresh"
+            elif current is not None and current.page.is_closed():
+                reason = "page_recovery"
+            else:
+                reason = "session_not_ready"
+            note_session_preparation(reason, settings.browser_idle_timeout)
 
             # Keep at most an active and a preparing/retiring account page on 1 GB.
             for context in list(self._retiring_contexts):

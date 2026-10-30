@@ -36,6 +36,8 @@ export interface ResponseDiagnostic {
   request_body_bytes?: number | null
   prompt_tokens?: number | null
   thought_tokens?: number | null
+  session_preparation_reason?: string | null
+  browser_idle_timeout_s?: number | null
   timings_ms?: Record<string, number>
   upstream_calls: number
   retries: number

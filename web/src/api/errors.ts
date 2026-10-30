@@ -6,7 +6,7 @@ function isResponseDiagnostic(value: unknown): value is ResponseDiagnostic {
   const record = value as Record<string, unknown>
   const counters = ['duration_ms', 'upstream_calls', 'retries', 'body_chars', 'thought_chars',
     'thought_after_body', 'empty_thought_parts', 'marker_count']
-  const inputCounters = ['request_body_bytes', 'prompt_tokens', 'thought_tokens']
+  const inputCounters = ['request_body_bytes', 'prompt_tokens', 'thought_tokens', 'browser_idle_timeout_s']
   return typeof record.request_id === 'string' && typeof record.time === 'string'
     && Number.isFinite(Date.parse(record.time))
     && (record.model === null || typeof record.model === 'string')
@@ -15,6 +15,7 @@ function isResponseDiagnostic(value: unknown): value is ResponseDiagnostic {
     && (record.transport_status === null || (typeof record.transport_status === 'number' && Number.isFinite(record.transport_status)))
     && counters.every(key => typeof record[key] === 'number' && Number.isFinite(record[key]) && record[key] >= 0)
     && inputCounters.every(key => record[key] == null || (typeof record[key] === 'number' && Number.isSafeInteger(record[key]) && record[key] >= 0))
+    && (record.session_preparation_reason == null || typeof record.session_preparation_reason === 'string')
     && (record.timings_ms === undefined || (record.timings_ms !== null && typeof record.timings_ms === 'object'
       && !Array.isArray(record.timings_ms) && Object.values(record.timings_ms).every(value => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)))
     && Array.isArray(record.finish_reasons) && record.finish_reasons.every(reason => Number.isInteger(reason))

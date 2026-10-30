@@ -34,6 +34,10 @@ _FLAGS = frozenset({
     "continuation_skipped_budget", "continuation_skipped_unsupported",
 })
 _OUTCOMES = frozenset({"success", "recovered", "failed", "cancelled"})
+_SESSION_REASONS = frozenset({
+    "warm_reuse", "service_start", "idle_recycle", "account_change", "credentials_change",
+    "forced_refresh", "browser_recovery", "page_recovery", "session_not_ready",
+})
 _ERROR_KINDS = frozenset({
     "session_expired", "authentication", "rate_limit", "timeout", "browser",
     "network", "validation", "upstream", "internal", "cancelled",
@@ -101,6 +105,10 @@ def _normalize(raw: object) -> dict[str, Any] | None:
         if type(raw.get("thought_tokens")) is int and raw["thought_tokens"] >= 0 else None,
         "prompt_tokens": _count(raw.get("prompt_tokens"))
         if type(raw.get("prompt_tokens")) is int and raw["prompt_tokens"] >= 0 else None,
+        "session_preparation_reason": raw.get("session_preparation_reason")
+        if isinstance(raw.get("session_preparation_reason"), str) and raw["session_preparation_reason"] in _SESSION_REASONS else None,
+        "browser_idle_timeout_s": _count(raw.get("browser_idle_timeout_s"))
+        if type(raw.get("browser_idle_timeout_s")) is int and raw["browser_idle_timeout_s"] >= 0 else None,
         "outcome": raw.get("outcome")
         if isinstance(raw.get("outcome"), str) and raw["outcome"] in _OUTCOMES else "failed",
         "transport_status": raw.get("transport_status")
@@ -188,6 +196,8 @@ class _Accumulator:
     thought_parts: int = 0
     thought_tokens: int | None = None
     prompt_tokens: int | None = None
+    session_preparation_reason: str | None = None
+    browser_idle_timeout_s: int | None = None
     prompt_tokens_call: int | None = None
     request_body_bytes: int = 0
     thought_after_body: int = 0
@@ -311,6 +321,15 @@ def note_attempt(attempt: int) -> None:
             current.retries = max(current.retries, _count(attempt))
 
 
+def note_session_preparation(reason: str, idle_timeout_s: int) -> None:
+    """Keep the first actual preparation decision, not later same-request reuse."""
+    with contextlib.suppress(Exception):
+        current = _current()
+        if current is not None and current.session_preparation_reason is None and reason in _SESSION_REASONS:
+            current.session_preparation_reason = reason
+            current.browser_idle_timeout_s = _count(idle_timeout_s)
+
+
 def note_timing(name: str) -> None:
     """First observed milestone, measured from ingress; never keep its payload.
 
@@ -428,6 +447,8 @@ def finish_response_diagnostics(outcome: str, transport_status: int | None = Non
             "thinking_mode": current.thinking_mode, "thinking_level": current.thinking_level,
             "thought_tokens": current.thought_tokens,
             "prompt_tokens": current.prompt_tokens,
+            "session_preparation_reason": current.session_preparation_reason,
+            "browser_idle_timeout_s": current.browser_idle_timeout_s,
             "transport_status": transport_status, "error_kind": error_kind,
             "duration_ms": duration_ms, "timings_ms": current.timings_ms,
             **{key: getattr(current, key) for key in _COUNTERS if key != "duration_ms"},
