@@ -158,9 +158,18 @@ def discover_auth_file() -> str | None:
                         return str(auth_path)
             except (json.JSONDecodeError, KeyError):
                 pass
-        # 回退：扫描 data/ 目录下的 .json 文件
+        # Legacy exports may have arbitrary names. Runtime JSON is not a
+        # browser storage state and must never become the selected credential.
         for file in root.iterdir():
-            if file.suffix == ".json":
+            if not file.is_file() or file.suffix != ".json" or file.name in {
+                "stats.json", "rotator_state.json",
+            }:
+                continue
+            try:
+                state = json.loads(file.read_text(encoding="utf-8-sig"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            if isinstance(state, dict) and isinstance(state.get("cookies"), list):
                 return str(file)
     return None
 
