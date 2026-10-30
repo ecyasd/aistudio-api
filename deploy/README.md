@@ -195,6 +195,8 @@ WARNING，即使请求最后成功也能在 WARNING 日志级别追查。该阈�
 请求正文总字节数，只计长度，不复制或保存正文；后者采用首个提供 usage 的上游调用的
 最终输入 token 报告，不将重试或续写的重复历史相加。上游未报告时为 `null`，不靠正文
 内容估算，也不额外调用 token 计数或模型接口。它们是输入规模诊断，不代表完整计费统计。
+上游报告输入达到 64,000 token 的摘要标记 `large_input` 并使用 WARNING，即使首字低于
+10 秒也保留数字摘要，便于比较同等输入规模的快慢样本；该阈值不限制输入或改变推理。
 
 账号准备较慢时，还可对照 `browser_launch_started` / `browser_ready`、
 `browser_context_ready`、`browser_cookies_loaded`、`browser_navigation_ready`、
