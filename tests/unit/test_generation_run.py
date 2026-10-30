@@ -160,6 +160,53 @@ async def test_publication_blocks_replay_even_if_recovery_requests_it(execution)
 
 
 @pytest.mark.parametrize("stream", [False, True])
+async def test_completed_generation_survives_checkpoint_reaching_request_deadline(
+    execution, monkeypatch, stream,
+):
+    env = execution
+    checkpoint_closed = asyncio.Event()
+    recover = AsyncMock(return_value=False)
+    run = generation.GenerationRun(
+        env.client, env.request, auto_continue=True, recover=recover,
+    )
+
+    async def checkpoint(context):
+        assert context is env.account.get() is env.leases[0]
+        # The upstream response completed within its budget. Only the optional
+        # checkpoint crosses the remaining request deadline.
+        try:
+            await asyncio.Event().wait()
+        finally:
+            checkpoint_closed.set()
+
+    async def complete(*_args, **_kwargs):
+        run._deadline = asyncio.get_running_loop().time() + 0.01
+        return env.output
+
+    async def chunks(*_args, **_kwargs):
+        yield "parts", env.output.candidates[0].parts
+        yield "finish_reason", 1
+        run._deadline = asyncio.get_running_loop().time() + 0.01
+
+    env.client.session.persist_context_cookies = checkpoint
+    monkeypatch.setattr(generation.continuation, "generate_content", complete)
+    monkeypatch.setattr(generation.continuation, "stream_generate_content", chunks)
+    monkeypatch.setattr(generation, "COOKIE_CHECKPOINT_TIMEOUT_SECONDS", 0.05)
+    if stream:
+        result = await run.stream(AsyncMock(return_value=True))
+        assert result.finish_reason == 1
+    else:
+        assert await run.generate() is env.output
+
+    assert checkpoint_closed.is_set()
+    assert not env.leases and env.account.get() is None and env.limiter.active == 0
+    recover.assert_not_awaited()
+    env.record.assert_called_once_with(
+        "success", model="gemini-synthetic", account_id="synthetic-account", auth_generation=3,
+    )
+
+
+@pytest.mark.parametrize("stream", [False, True])
 async def test_diagnostics_track_actual_leases_across_retry(execution, monkeypatch, stream):
     from aistudio_api.infrastructure.utils import error_records
 

@@ -13,6 +13,7 @@ from aistudio_api.api import routes_errors, routes_system
 from aistudio_api.api.dependencies import require_web_auth
 from aistudio_api.config import settings
 from aistudio_api.infrastructure.gateway import model_defaults as rules
+from aistudio_api.infrastructure.gateway.wire_codec import AistudioWireCodec
 from aistudio_api.infrastructure.utils import (
     error_records as errors,
     response_diagnostics as diagnostics,
@@ -94,6 +95,48 @@ async def test_preview_uses_same_builtin_fallbacks_and_saved_rules(management):
         response = await client.post("/config/model-preview", json={"model": "gemini-test-image"})
         assert response.json()["source"] == "saved"
         assert "synthetic-private-key" not in response.text
+
+
+@pytest.mark.parametrize("extension,value", [
+    ("values", [None, None, None, 123, 0.9]),
+    ("enable_default_thinking", False),
+    ("_ensure_len", False),
+    ("to_wire", False),
+])
+async def test_preview_ignored_extensions_cannot_change_runtime_generation(
+    management, extension, value,
+):
+    app, path = management
+    generation = {"temperature": 0.4, extension: value}
+    draft = yaml.safe_dump({"model_defaults": {"profiles": [], "models": {
+        "gemini-test": {"generation_config_defaults": generation},
+    }}})
+    async with client_for(app) as client:
+        preview = await client.post("/config/model-preview", json={
+            "model": "gemini-test", "yaml_content": draft,
+        })
+        assert preview.status_code == 200
+        assert preview.json()["ignored_generation_keys"] == [extension]
+        assert preview.json()["effective"]["generation_config_defaults"] == {
+            "temperature": 0.4,
+        }
+        saved = await client.put("/config/yaml", json={"yaml_content": draft})
+        assert saved.status_code == 200
+
+    # Extensions remain stored for forward compatibility, but cannot overwrite
+    # the codec's backing list, methods, or helpers during a real wire rewrite.
+    stored = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert stored["model_defaults"]["models"]["gemini-test"][
+        "generation_config_defaults"
+    ][extension] == value
+    codec = AistudioWireCodec()
+    rewritten = codec.rewrite(
+        json.dumps(["models/gemini-test", []]), model="gemini-test",
+        prompt="synthetic request", sanitize_plain_text=False,
+    )
+    actual = codec.decode(rewritten).generation_config
+    assert actual.temperature == 0.4
+    assert actual.max_tokens is None
 
 
 @pytest.mark.parametrize("content", ["model_defaults: [oops]", "[", "- list", "model_defaults:\n  profiles:\n    - generation_config_defaults:\n        thinking_config: {level: SECRET_INVALID_ENUM}"])

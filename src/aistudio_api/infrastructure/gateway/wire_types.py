@@ -244,6 +244,12 @@ class AistudioGenerationConfig:
             self.values.append(None)
 
 
+SUPPORTED_GENERATION_CONFIG_FIELDS = frozenset(
+    name for name, descriptor in vars(AistudioGenerationConfig).items()
+    if isinstance(descriptor, property) and descriptor.fset is not None
+)
+
+
 @dataclass
 class AistudioPart:
     text: str | None = None

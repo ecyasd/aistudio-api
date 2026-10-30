@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from aistudio_api.domain.errors import BrowserTransportError
 from aistudio_api.infrastructure.browser.cdp_client import (
     CDPClient,
     CDPConnection,
@@ -295,7 +296,7 @@ async def test_transport_initialization_failure_releases_queue_and_js_state(canc
             "aistudio_api.infrastructure.gateway.transport._ensure_authorization_header",
             AsyncMock(return_value={}),
         ),
-        pytest.raises(type(error)),
+        pytest.raises(asyncio.CancelledError if cancelled else BrowserTransportError),
     ):
         async for _ in transport.send_streaming_request(
             page,

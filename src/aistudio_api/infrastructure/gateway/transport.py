@@ -501,6 +501,13 @@ class XHRStreamTransport:
                 raise TimeoutError("streaming request timeout: no response status")
             if not is_terminal:
                 raise TimeoutError("streaming response timed out before completion")
+        except (TimeoutError, BrowserTransportError):
+            raise
+        except Exception as exc:
+            # Once initialization may have called fetch, any delivery failure
+            # belongs to that request. Native ACK/page errors must not enter
+            # session preparation's broad recovery policy and replay it.
+            raise BrowserTransportError("Browser stream delivery failed") from exc
         finally:
             self._clear_buffer(rid)
             self._queues.pop(rid, None)

@@ -97,6 +97,60 @@ async def test_native_stream_recovery_failures_terminate_without_replay(
     assert not transport._cleanup_tasks and not transport._received_seq
 
 
+@pytest.mark.parametrize("failure_stage", ["status_ack", "done_ack", "page_closed"])
+async def test_native_stream_delivery_failure_terminates_without_replay(monkeypatch, failure_stage):
+    from fastapi import HTTPException
+
+    from aistudio_api.api import gemini
+
+    page, listeners = make_synthetic_page()
+    dispatched = []
+
+    async def evaluate(script, args=None, **_kwargs):
+        if script == STREAMING_INIT_JS:
+            dispatched.append(args["rid"])
+            listeners[0](json.dumps({
+                "rid": args["rid"], "type": "status", "status": 200, "seq": 1,
+            }))
+            return {"started": True}
+        if script == STREAM_ACK_JS:
+            if failure_stage == "status_ack" or args["seq"] == 2:
+                raise RuntimeError("CDP connection closed: synthetic-private-detail")
+            if failure_stage == "done_ack":
+                listeners[0](json.dumps({
+                    "rid": args["rid"], "type": "done", "seq": 2,
+                }))
+        return None
+
+    page.evaluate = AsyncMock(side_effect=evaluate)
+    transport = XHRStreamTransport()
+    stream = transport.send_streaming_request(
+        page, url="https://synthetic.invalid", headers={}, body="[]", timeout_ms=500,
+    )
+    assert await anext(stream) == ("status", 200)
+    if failure_stage == "page_closed":
+        page.is_closed.return_value = True
+    with pytest.raises(Exception) as caught:
+        await anext(stream)
+    assert len(dispatched) == 1
+    assert transport.in_flight_count == 0 and transport._buffered_bytes == 0
+    assert not transport._cleanup_tasks and not transport._received_seq
+    assert any(call.args[0] == STREAM_CLEANUP_JS for call in page.evaluate.await_args_list)
+
+    switch = AsyncMock(return_value=True)
+    monkeypatch.setattr(gemini, "try_switch_account", switch)
+    # A response can complete without emitting a client-visible Part. Neither
+    # its ACK failure nor a closed page permits replaying that generation.
+    with pytest.raises(HTTPException) as terminal:
+        await gemini._handle_attempt_exception(
+            caught.value, attempt=0, model_path="gemini-test", normalized_model="gemini-test",
+            client=MagicMock(), has_yielded_data=False,
+        )
+    assert terminal.value.status_code == 503
+    switch.assert_not_awaited()
+    assert isinstance(caught.value, BrowserTransportError)
+
+
 async def test_native_nonstream_browser_timeout_keeps_504_and_never_switches(monkeypatch):
     from fastapi import HTTPException
 
@@ -476,7 +530,7 @@ async def test_stream_overflow_aborts_while_consumer_paused_and_cannot_turn_into
     assert any(
         call.args == (STREAM_CLEANUP_JS, rid) for call in page.evaluate.call_args_list
     )
-    with pytest.raises(RuntimeError, match="stream buffer limit exceeded"):
+    with pytest.raises(BrowserTransportError, match="Browser stream delivery failed"):
         await anext(stream)
     assert transport.in_flight_count == 0
     assert transport._buffered_bytes == 0
@@ -628,7 +682,7 @@ async def test_stream_bounds_fail_explicitly_and_preserve_other_streams(
     else:
         text = "x" * (13 if limit == "single_chunk" else 9)
         listeners[0](json.dumps({"rid": second, "type": "chunk", "text": text}))
-    with pytest.raises(RuntimeError, match="stream buffer limit exceeded"):
+    with pytest.raises(BrowserTransportError, match="Browser stream delivery failed"):
         await anext(streams[1])
     assert transport.in_flight_count == 1
     assert transport._buffered_bytes == 4
@@ -648,7 +702,7 @@ async def test_browser_abort_is_failure_even_after_http_200():
                 listeners[0](json.dumps({"rid": args["rid"], **event}))
 
     page.evaluate = AsyncMock(side_effect=evaluate)
-    with pytest.raises(RuntimeError, match="cancelled"):
+    with pytest.raises(BrowserTransportError, match="Browser stream delivery failed"):
         async for _ in XHRStreamTransport().send_streaming_request(
             page,
             url="https://synthetic.invalid",
@@ -817,7 +871,7 @@ async def test_transport_abort_stream_by_rid():
     assert transport.abort_stream(rid1, "client_disconnected") is True
 
     with pytest.raises(
-        RuntimeError, match="streaming request failed: client_disconnected"
+        BrowserTransportError, match="Browser stream delivery failed"
     ):
         await task1
 
@@ -826,7 +880,7 @@ async def test_transport_abort_stream_by_rid():
     # Close transport interrupts remaining stream 2
     transport.close("transport_closed")
     with pytest.raises(
-        RuntimeError, match="streaming request failed: transport_closed"
+        BrowserTransportError, match="Browser stream delivery failed"
     ):
         await task2
 
