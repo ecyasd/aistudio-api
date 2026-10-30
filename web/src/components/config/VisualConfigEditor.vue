@@ -50,7 +50,7 @@ const filteredProfilesWithIndex = computed(() => {
     .map((profile, originalIndex) => ({ profile, originalIndex }))
     .filter(({ profile }) => {
       if (!kw) return true
-      const inName = profile.name.toLowerCase().includes(kw)
+      const inName = String(profile.name ?? '').toLowerCase().includes(kw)
       const inContains = profile.match?.contains?.some((c) => c.toLowerCase().includes(kw))
       const inPrefix = profile.match?.prefixes?.some((p) => p.toLowerCase().includes(kw))
       const inExact = profile.match?.exact?.some((e) => e.toLowerCase().includes(kw))
@@ -76,6 +76,40 @@ function serializeConfig(config: ParsedConfigYaml): string {
   return YAML.stringify(config, { indent: 2 })
 }
 
+function validateVisualShape(config: ParsedConfigYaml) {
+  const isMap = (value: unknown): value is Record<string, unknown> =>
+    value !== null && typeof value === 'object' && !Array.isArray(value)
+  const fail = () => { throw new Error('模型规则结构不适用于可视化编辑，请在 YAML 中检查或编辑') }
+  const checkRule = (rule: unknown) => {
+    if (!isMap(rule)) return fail()
+    if (rule.name != null && typeof rule.name !== 'string') fail()
+    for (const key of ['default_tools', 'clear_generation_config_indexes']) {
+      if (rule[key] != null && !Array.isArray(rule[key])) fail()
+    }
+    if (rule.match != null) {
+      if (!isMap(rule.match)) return fail()
+      for (const key of ['contains', 'prefixes', 'exact']) {
+        const values = rule.match[key]
+        if (values != null && (!Array.isArray(values) || values.some(v => typeof v !== 'string'))) fail()
+      }
+    }
+    for (const key of ['generation_config_defaults', 'safety_settings']) {
+      if (rule[key] != null && !isMap(rule[key])) fail()
+    }
+  }
+  const defaults = config.model_defaults
+  if (defaults == null) return
+  if (!isMap(defaults)) return fail()
+  if (defaults.profiles != null) {
+    if (!Array.isArray(defaults.profiles)) return fail()
+    defaults.profiles.forEach(checkRule)
+  }
+  if (defaults.models != null) {
+    if (!isMap(defaults.models)) return fail()
+    Object.values(defaults.models).forEach(checkRule)
+  }
+}
+
 const hasUnsavedChanges = computed(() => {
   try {
     const config = activeTab.value === 'visual'
@@ -91,12 +125,14 @@ function parseYamlToState(content: string): boolean {
   try {
     const editor = readEditorYaml(content)
     rawYaml.value = editor.yaml
+    validateVisualShape(editor.config)
     parsedConfig.value = editor.config
     yamlParseError.value = null
     return true
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'YAML 解析失败'
     yamlParseError.value = msg
+    activeTab.value = 'yaml'
     return false
   }
 }
@@ -164,6 +200,16 @@ watch(
     if (parseYamlToState(val)) {
       savedYaml.value = serializeConfig(parsedConfig.value)
       pendingLoggingRefresh = undefined
+    } else {
+      // Keep a malformed loaded draft editable, including valid legacy rules
+      // that the visual form cannot represent. Never replace it with {}.
+      try {
+        const editor = readEditorYaml(val)
+        rawYaml.value = editor.yaml
+        savedYaml.value = serializeConfig(editor.config)
+      } catch {
+        rawYaml.value = val
+      }
     }
   },
   { immediate: true }
@@ -332,14 +378,14 @@ async function handleSave() {
   if (activeTab.value === 'visual') {
     contentToSave = syncStateToYaml()
   } else {
-    // Check YAML validity
-    const ok = parseYamlToState(rawYaml.value)
-    if (!ok) {
-      toast.error('YAML 格式错误: ' + yamlParseError.value)
+    try {
+      contentToSave = readEditorYaml(rawYaml.value).yaml
+      rawYaml.value = contentToSave
+    } catch (err) {
+      toast.error('YAML 格式错误: ' + (err instanceof Error ? err.message : '解析失败'))
       saving.value = false
       return
     }
-    contentToSave = rawYaml.value
   }
 
   try {
@@ -355,7 +401,7 @@ async function handleSave() {
   }
 }
 function handleYamlKeydown(e: KeyboardEvent) {
-  if (e.key === 'Tab') {
+  if (e.key === ']' && (e.ctrlKey || e.metaKey) && !e.altKey) {
     e.preventDefault()
     const target = e.target as HTMLTextAreaElement
     const start = target.selectionStart
@@ -575,12 +621,16 @@ onBeforeRouteLeave((_to, _from, next) => {
       </div>
       <textarea
         v-model="rawYaml"
+        aria-label="模型规则 YAML"
         rows="22"
         spellcheck="false"
         placeholder="正在加载 config.yaml..."
         class="w-full p-4 font-mono text-xs bg-gray-900 text-gray-100 rounded-xl outline-none focus:ring-2 focus:ring-brand-500 leading-relaxed shadow-inner border border-gray-800"
         @keydown="handleYamlKeydown"
       />
+      <p class="text-xs text-gray-500">
+        Tab / Shift+Tab 切换焦点；Ctrl+]（Mac 为 Command+]）插入两个空格。
+      </p>
     </div>
 
     <!-- Schema Specification Dictionary Modal -->

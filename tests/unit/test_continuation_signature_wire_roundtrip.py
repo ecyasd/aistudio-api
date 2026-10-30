@@ -401,6 +401,8 @@ def test_explicit_zero_candidate_index_does_not_block_signed_text():
 def test_signed_nontext_or_unknown_part_payload_is_never_replayed_as_empty_text(slot):
     part = _response_part(None, "synthetic signature")
     part[slot] = ["synthetic payload"]
+    if slot == 2:
+        part[slot] = ["image/png", "c3ludGhldGlj"]
     candidate = parse_text_output(_wire_response([part], 2, "synthetic-id")).candidates[
         0
     ]

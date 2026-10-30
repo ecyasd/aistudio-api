@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -10,6 +11,10 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from aistudio_api.api.state import runtime_state
+from aistudio_api.application.account_rotator import (
+    AccountStats,
+    get_seconds_until_pacific_midnight,
+)
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 logger = get_logger("orchestrator")
@@ -236,6 +241,37 @@ async def try_switch_account(
         )
 
 
+def quota_unavailable_error(model: str | None = None) -> HTTPException:
+    """Describe current cooldowns without assuming all 429s last until midnight."""
+    delays: list[int] = []
+    service, rotator = runtime_state.account_service, runtime_state.rotator
+    if service is not None and rotator is not None:
+        for account in service.list_accounts():
+            current = rotator.get_account_stats(account.id)
+            if not isinstance(current, AccountStats) or current.session_expired:
+                continue
+            snapshot = deepcopy(current)
+            # Admission allows isolated auth recovery; this hint concerns quota.
+            snapshot.auth_cooldown = 0
+            if snapshot.is_available(model, ignore_auth_cooldown=True):
+                remaining = 0.0
+            elif snapshot.rate_limited_date_la:
+                remaining = get_seconds_until_pacific_midnight()
+            else:
+                remaining = snapshot.get_cooldown_remaining(model)
+            if math.isfinite(remaining):
+                delays.append(max(1, math.ceil(remaining)))
+    label = f"model '{model}'" if model else "the requested model"
+    return HTTPException(
+        429,
+        detail={
+            "message": f"All accounts are temporarily rate limited for {label}. Retry after the current cooldown.",
+            "type": "rate_limit_exceeded",
+        },
+        headers={"Retry-After": str(min(delays))} if delays else None,
+    )
+
+
 def validate_account_availability(model: str | None = None) -> None:
     """Check admission without starting a browser or changing daily counters."""
     account_service = runtime_state.account_service
@@ -262,13 +298,7 @@ def validate_account_availability(model: str | None = None) -> None:
                 "type": "upstream_auth_expired",
             },
         )
-    raise HTTPException(
-        429,
-        detail={
-            "message": f"No accounts are currently available for model '{model}'.",
-            "type": "rate_limit_exceeded",
-        },
-    )
+    raise quota_unavailable_error(model)
 
 
 async def ensure_active_account(attempt: int, model: str | None = None) -> None:

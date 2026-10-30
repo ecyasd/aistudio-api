@@ -48,6 +48,27 @@ def _client() -> httpx.AsyncClient:
     )
 
 
+@pytest.mark.parametrize("created_at", ["2026-10-30T12:34:56Z", "2026-10-30 12:34:56", ""])
+async def test_legacy_group_identity_matches_listing_and_deletion(setup_mock_account_service, monkeypatch, created_at):
+    from urllib.parse import quote
+
+    from aistudio_api.api.routes_accounts import to_account_response
+
+    account = AccountMeta(id="legacy", name="synthetic", email=None, created_at=created_at)
+    service = setup_mock_account_service
+    service.list_accounts.return_value = [account]
+    service.get_active_account.return_value = None
+    service.delete_account.return_value = True
+    monkeypatch.setattr(runtime_state, "rotator", None)
+    monkeypatch.setattr(runtime_state, "client", None)
+    cookie_id = to_account_response(account).cookie_id
+    async with _client() as client:
+        response = await client.delete("/api/accounts/group/" + quote(cookie_id, safe=""))
+    assert response.status_code == 200
+    assert response.json() == {"deleted": 1}
+    service.delete_account.assert_called_once_with("legacy")
+
+
 @pytest.mark.asyncio
 async def test_accounts_html_navigation_headers():
     """Verify that visiting /accounts as HTML returns the SPA HTML with cache isolation headers."""
@@ -226,3 +247,34 @@ async def test_import_bundle_keeps_inline_imports(
     assert response.status_code == 200
     assert response.json()["imported_count"] == 1
     service.save_account_from_cookies.assert_called_once()
+
+
+@pytest.mark.parametrize("bad_index", [1, 2])
+@pytest.mark.parametrize("field", ["accounts", "content"])
+async def test_bundle_preflights_every_cookie_before_saving(
+    setup_mock_account_service, monkeypatch, bad_index, field
+):
+    from aistudio_api.infrastructure.account import cookie_parser
+
+    service = setup_mock_account_service
+    monkeypatch.setattr(runtime_state, "rotator", None)
+    parsed = []
+
+    def parse(raw):
+        parsed.append(raw)
+        if raw == "invalid":
+            raise ValueError("synthetic private cookie detail")
+        return {"cookies": [{"name": "SAPISID", "value": "synthetic", "domain": ".google.com"}]}
+
+    monkeypatch.setattr(cookie_parser, "parse_cookie_string", parse)
+    items = [{"name": "synthetic", "cookies": "valid"} for _ in range(3)]
+    items[bad_index]["cookies"] = "invalid"
+    payload = {field: json.dumps(items) if field == "content" else items}
+    async with _client() as client:
+        response = await client.post("/api/accounts/import-bundle", json=payload)
+    assert response.status_code == 400
+    assert str(bad_index + 1) in response.json()["error"]["message"]
+    assert "private cookie" not in response.text
+    assert len(parsed) == bad_index + 1
+    service.save_account_from_cookies.assert_not_called()
+    service.set_active_account.assert_not_called()

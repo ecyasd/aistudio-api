@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
 from aistudio_api.application import api_service_gemini as api
@@ -52,7 +53,7 @@ def _chunk(kind="plain", *, candidate_index=None):
 
 
 UNSAFE_KINDS = [
-    "code", "code_result", "file", "invalid_image", "unknown_part", "grounding", "citation",
+    "code", "code_result", "file", "unknown_part", "grounding", "citation",
     "nonzero_index",
 ]
 
@@ -188,3 +189,33 @@ async def test_internal_wire_safety_marker_never_leaks_or_starts_continuation(
     assert not env.leases
     api.try_switch_account.assert_not_awaited()
     api.runtime_state.record.assert_called_once()
+
+
+@pytest.mark.parametrize("index", [3, 4, 10, 11])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_bad_function_slots_cannot_be_final_empty_success(wire_env, index, stream):
+    env = wire_env
+    part = _part(field=index, value=42)
+    raw = json.dumps([[[[[[part], "model"], 1]], None, None]])
+
+    async def generate(**kwargs):
+        return parse_text_output(raw)
+
+    client = SimpleNamespace(
+        generate_content=generate, stream_generate_content=lambda **kwargs: _source_for(env, raw),
+        clear_templates=MagicMock(), session=SimpleNamespace(request_scope=env.request_scope),
+    )
+    request = GeminiGenerateContentRequest.model_validate({"contents": [{"parts": [{"text": "synthetic"}]}]})
+    operation = api.handle_gemini_generate_content("gemini-offline", request, client, stream=stream)
+    if stream:
+        response = await operation
+        serialized = "".join([chunk async for chunk in response.body_iterator])
+        assert '"code": 502' in serialized
+        assert '"finishReason"' not in serialized
+        assert env.transport_closed == [True]
+    else:
+        with pytest.raises(HTTPException) as error:
+            await operation
+        assert error.value.status_code == 502
+    assert not env.leases and env.released == [19]
+    api.runtime_state.record.assert_not_called()

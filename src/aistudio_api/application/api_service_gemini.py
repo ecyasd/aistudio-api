@@ -7,7 +7,7 @@ import json
 import re
 import traceback
 from collections.abc import AsyncGenerator
-from contextlib import aclosing, suppress
+from contextlib import AsyncExitStack, aclosing, suppress
 from typing import TypedDict, cast
 
 from anyio import CancelScope
@@ -32,6 +32,7 @@ from aistudio_api.application.account_orchestrator import (
     account_generation_is_current,
     account_id_for_auth_file,
     ensure_active_account,
+    quota_unavailable_error,
     record_rotator_event,
     try_switch_account,
     validate_account_availability,
@@ -42,6 +43,7 @@ from aistudio_api.application.chat_service import (
 )
 from aistudio_api.application.inference_limits import inference_limiter
 from aistudio_api.application.model_selection import parse_model_selection
+from aistudio_api.config import settings
 from aistudio_api.domain.errors import (
     AccountIdentityMismatchError,
     AccountIdentityUnavailableError,
@@ -174,7 +176,7 @@ def classify_gemini_error_payload(exc: Exception) -> tuple[int, str, str]:
             status_map.get(status, "INTERNAL" if status >= 500 else "UNKNOWN"),
         )
     if isinstance(exc, RequestError):
-        status = exc.status if exc.status > 0 else 500
+        status = exc.status if 400 <= exc.status <= 599 else 502
         clean_msg = clean_upstream_error_message(str(exc))
         status_map = {
             400: "INVALID_ARGUMENT",
@@ -191,6 +193,8 @@ def classify_gemini_error_payload(exc: Exception) -> tuple[int, str, str]:
             clean_msg,
             status_map.get(status, "INTERNAL" if status >= 500 else "UNKNOWN"),
         )
+    if isinstance(exc, TimeoutError):
+        return 504, "Upstream preparation or generation timed out", "DEADLINE_EXCEEDED"
     if isinstance(exc, AistudioError):
         return 500, str(exc), "INTERNAL"
 
@@ -422,13 +426,7 @@ async def _handle_attempt_exception(
             )
             return True
         logger.warning("全部账号在模型 %s 上均处于冷却状态", target_model)
-        raise HTTPException(
-            429,
-            detail={
-                "message": f"All accounts reached daily quota for model '{target_model}'. Quota resets at 00:00 PST.",
-                "type": "rate_limit_exceeded",
-            },
-        ) from exc
+        raise quota_unavailable_error(target_model) from exc
 
     if (
         isinstance(exc, RequestError)
@@ -475,7 +473,7 @@ async def _handle_attempt_exception(
             return True
     if isinstance(exc, RequestError):
         clean_msg = clean_upstream_error_message(str(exc))
-        status_code = exc.status if exc.status > 0 else 500
+        status_code = exc.status if 400 <= exc.status <= 599 else 502
         error_type = (
             "bad_request"
             if status_code == 400
@@ -486,6 +484,11 @@ async def _handle_attempt_exception(
         logger.warning("Gemini 上游请求错误 (%d): %s", status_code, clean_msg)
         raise HTTPException(
             status_code, detail={"message": clean_msg, "type": error_type}
+        ) from exc
+
+    if isinstance(exc, TimeoutError):
+        raise HTTPException(
+            504, detail={"message": "Upstream preparation or generation timed out", "type": "upstream_timeout"}
         ) from exc
 
     if isinstance(exc, AistudioError):
@@ -536,8 +539,17 @@ async def handle_gemini_generate_content(
             client=client, req=req, model_path=model_path, prepared_request=normalized
         )
 
-    async with inference_limiter.slot():
-        return await _generate_non_streaming(model_path, req, client)
+    try:
+        # Continuation shares one total budget across admission, preparation
+        # and retries. Ordinary generation keeps its progress-based idle limit.
+        async with asyncio.timeout(settings.timeout_stream if req.autoContinue else None):
+            async with inference_limiter.slot():
+                return await _generate_non_streaming(model_path, req, client)
+    except TimeoutError as exc:
+        raise HTTPException(504, detail={
+            "message": "Automatic continuation exceeded the request time budget",
+            "type": "upstream_timeout",
+        }) from exc
 
 
 async def _generate_non_streaming(
@@ -634,13 +646,7 @@ async def _generate_non_streaming(
             raise
 
 
-    raise HTTPException(
-        429,
-        detail={
-            "message": f"All accounts reached daily quota for model '{model_path}'. Quota resets at 00:00 PST.",
-            "type": "rate_limit_exceeded",
-        },
-    ) from last_error
+    raise quota_unavailable_error(model_path) from last_error
 
 
 async def _persist_successful_cookies(client: AIStudioClient, context: object) -> None:
@@ -786,6 +792,7 @@ def gemini_error_type(exc: Exception) -> str | None:
 def format_sse_error(exc: Exception) -> str:
     """Format exception into standard Gemini SSE error chunk."""
     code, msg, status_str = classify_gemini_error_payload(exc)
+    error_type = gemini_error_type(exc)
     return (
         "data: "
         + json.dumps(
@@ -794,7 +801,7 @@ def format_sse_error(exc: Exception) -> str:
                     "code": code,
                     "message": msg,
                     "status": status_str,
-                    **({"type": gemini_error_type(exc)} if gemini_error_type(exc) else {}),
+                    **({"type": error_type} if error_type else {}),
                 }
             },
             ensure_ascii=False,
@@ -1021,10 +1028,32 @@ def _build_gemini_streaming_response(
 
 
     async def admitted_stream():
+        deadline = (
+            asyncio.get_running_loop().time() + settings.timeout_stream
+            if req.autoContinue else None
+        )
         try:
-            async with inference_limiter.slot(), aclosing(stream_response()) as chunks:
-                async for chunk in chunks:
+            async with AsyncExitStack() as resources:
+                async with asyncio.timeout_at(deadline):
+                    await resources.enter_async_context(inference_limiter.slot())
+                chunks = await resources.enter_async_context(aclosing(stream_response()))
+                while True:
+                    try:
+                        # One deadline covers every attempt, including account
+                        # switches. Never leave a timeout active across yield.
+                        async with asyncio.timeout_at(deadline):
+                            chunk = await anext(chunks)
+                    except StopAsyncIteration:
+                        break
                     yield chunk
+        except TimeoutError as exc:
+            failure = HTTPException(504, detail={
+                "message": "Automatic continuation exceeded the request time budget",
+                "type": "upstream_timeout",
+            })
+            record_failure(exc, source="gemini_stream", operation="stream_generate_content",
+                           http_status=504)
+            yield format_sse_error(failure)
         except HTTPException as exc:
             record_failure(exc, source="gemini_stream", operation="inference_admission",
                            http_status=exc.status_code)

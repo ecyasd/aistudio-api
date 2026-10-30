@@ -80,15 +80,16 @@ export const systemApi = {
   },
 
   deleteApiKey(keyValue: string): Promise<{ ok: boolean }> {
-    return request<{ ok: boolean }>(`/api-keys/${encodeURIComponent(keyValue)}`, {
+    return request<{ ok: boolean }>('/api-keys', {
       method: 'DELETE',
+      body: JSON.stringify({ key: keyValue }),
     })
   },
 
   updateApiKeyName(keyValue: string, req: UpdateApiKeyRequest): Promise<ApiKeyItem> {
-    return request<ApiKeyItem>(`/api-keys/${encodeURIComponent(keyValue)}`, {
+    return request<ApiKeyItem>('/api-keys', {
       method: 'PUT',
-      body: JSON.stringify(req),
+      body: JSON.stringify({ ...req, key: keyValue }),
     })
   },
 }

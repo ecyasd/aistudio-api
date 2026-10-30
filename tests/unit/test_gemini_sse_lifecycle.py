@@ -74,6 +74,116 @@ def _live_sse_tasks():
     ]
 
 
+@pytest.mark.parametrize("stream", [False, True])
+async def test_repeated_204_is_a_real_502_error(sse_env, request_body, stream):
+    from fastapi import HTTPException
+
+    from aistudio_api.domain.errors import RequestError
+
+    async def stream_call(**kwargs):
+        raise RequestError(204, "No generation content")
+        yield  # pragma: no cover
+
+    sse_env.client.stream_generate_content.side_effect = stream_call
+    sse_env.client.generate_content.side_effect = RequestError(204, "No generation content")
+    if stream:
+        response = await sse_env.service.handle_gemini_generate_content(
+            "gemini-test", request_body, sse_env.client, stream=True
+        )
+        result = "".join([chunk async for chunk in response.body_iterator])
+        assert '"code": 502' in result and '"code": 204' not in result
+        assert '"finishReason"' not in result
+        assert sse_env.client.stream_generate_content.call_count == 2
+    else:
+        with pytest.raises(HTTPException) as error:
+            await sse_env.service.handle_gemini_generate_content(
+                "gemini-test", request_body, sse_env.client, stream=False
+            )
+        assert error.value.status_code == 502
+        assert sse_env.client.generate_content.await_count == 2
+    assert not sse_env.leased
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_native_preparation_timeout_returns_nonempty_504(sse_env, request_body, stream):
+    from fastapi import HTTPException
+
+    sse_env.service.ensure_active_account.side_effect = TimeoutError()
+    operation = sse_env.service.handle_gemini_generate_content(
+        "gemini-test", request_body, sse_env.client, stream=stream
+    )
+    if stream:
+        response = await operation
+        result = "".join([chunk async for chunk in response.body_iterator])
+        assert '"code": 504' in result and "timed out" in result
+    else:
+        with pytest.raises(HTTPException) as error:
+            await operation
+        assert error.value.status_code == 504
+        assert "timed out" in error.value.detail["message"]
+    assert not sse_env.leased
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_continuation_retries_share_total_request_deadline(sse_env, request_body, monkeypatch, stream):
+    from fastapi import HTTPException
+
+    from aistudio_api.application.inference_limits import InferenceLimiter
+    from aistudio_api.domain.errors import RequestError
+
+    service = sse_env.service
+    monkeypatch.setattr(service, "settings", SimpleNamespace(timeout_stream=0.11))
+    limiter = InferenceLimiter(concurrency=1, wait_seconds=1)
+    monkeypatch.setattr(service, "inference_limiter", limiter)
+    calls, closed = [], []
+
+    async def upstream(**kwargs):
+        calls.append(True)
+        try:
+            await asyncio.sleep(0.045)
+            raise RequestError(404, "Ambiguous request for service '' and method '/GenerativeService.GenerateContent'")
+        finally:
+            closed.append(True)
+
+    async def streaming(**kwargs):
+        await upstream(**kwargs)
+        yield  # pragma: no cover
+
+    sse_env.client.generate_content.side_effect = upstream
+    sse_env.client.stream_generate_content.side_effect = streaming
+    body = request_body.model_copy(update={"autoContinue": True})
+    operation = service.handle_gemini_generate_content("gemini-test", body, sse_env.client, stream=stream)
+    if stream:
+        response = await operation
+        result = "".join([chunk async for chunk in response.body_iterator])
+        assert '"code": 504' in result and '"finishReason"' not in result
+    else:
+        with pytest.raises(HTTPException) as error:
+            await operation
+        assert error.value.status_code == 504
+    assert len(calls) < 5 and len(calls) == len(closed)
+    assert limiter.active == 0 and not sse_env.leased
+    service.runtime_state.record.assert_not_called()
+
+
+async def test_ordinary_progressing_stream_can_outlive_continuation_budget(sse_env, request_body, monkeypatch):
+    service = sse_env.service
+    monkeypatch.setattr(service, "settings", SimpleNamespace(timeout_stream=0.005))
+
+    async def upstream(**kwargs):
+        for _ in range(4):
+            await asyncio.sleep(0.005)
+            yield "body", "progress"
+        yield "finish_reason", 1
+        yield "done", None
+
+    sse_env.client.stream_generate_content.side_effect = upstream
+    response = await service.handle_gemini_generate_content("gemini-test", request_body, sse_env.client, stream=True)
+    result = "".join([chunk async for chunk in response.body_iterator])
+    assert result.count("progress") == 4 and '"finishReason": "STOP"' in result
+    assert '"error"' not in result and not sse_env.leased
+
+
 @pytest.mark.parametrize(
     ("condition", "expected"),
     [("invalid", 400), ("empty", 503), ("expired", 503), ("limited", 429)],
@@ -334,6 +444,73 @@ async def test_asgi_disconnect_cancels_producer_before_first_model_chunk(
     assert closed.is_set()
     assert not _live_sse_tasks()
     service.runtime_state.record.assert_not_called()
+
+
+@pytest.mark.parametrize("spec", ["2.0", "2.4"])
+@pytest.mark.parametrize("phase", ["before_output", "during_output"])
+async def test_repeated_interrupt_and_immediate_reroll_releases_only_old_request(
+    sse_env, request_body, monkeypatch, spec, phase
+):
+    from starlette.requests import ClientDisconnect
+
+    from aistudio_api.application.inference_limits import InferenceLimiter
+
+    service = sse_env.service
+    limiter = InferenceLimiter(concurrency=1, max_waiting=2, wait_seconds=1)
+    monkeypatch.setattr(service, "inference_limiter", limiter)
+    entered = asyncio.Event()
+    calls, closed = [], []
+
+    async def upstream(**kwargs):
+        call = len(calls)
+        calls.append(call)
+        try:
+            if call % 2 == 0:
+                entered.set()
+                if phase == "during_output":
+                    yield "body", "old partial output"
+                await asyncio.Event().wait()
+            else:
+                yield "body", "new roll completed"
+                yield "finish_reason", 1
+                yield "done", None
+        finally:
+            await asyncio.sleep(0.002)
+            closed.append(call)
+
+    sse_env.client.stream_generate_content.side_effect = upstream
+    for _ in range(5):
+        entered.clear()
+        disconnected = asyncio.Event()
+        old = service._build_gemini_streaming_response(client=sse_env.client, req=request_body, model_path="gemini-test")
+
+        async def receive(disconnected=disconnected):
+            await disconnected.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message, disconnected=disconnected):
+            if disconnected.is_set() and spec == "2.4":
+                raise OSError("synthetic client abort")
+
+        old_task = asyncio.create_task(old({"type": "http", "asgi": {"spec_version": spec}}, receive, send))
+        await asyncio.wait_for(entered.wait(), 1)
+        disconnected.set()
+        # Start the new roll while the old request is still cleaning up.
+        new = service._build_gemini_streaming_response(client=sse_env.client, req=request_body, model_path="gemini-test")
+
+        async def collect(new=new):
+            return "".join([chunk async for chunk in new.body_iterator])
+
+        new_task = asyncio.create_task(collect())
+        results = await asyncio.wait_for(asyncio.gather(old_task, new_task, return_exceptions=True), 1)
+        assert results[0] is None or isinstance(results[0], ClientDisconnect)
+        assert "new roll completed" in results[1] and '"finishReason": "STOP"' in results[1]
+        assert not sse_env.leased and limiter.active == 0 and limiter.waiting == 0
+        assert not _live_sse_tasks()
+    assert len(calls) == len(closed) == 10
+    assert service.runtime_state.record.call_count == 5
+    sse_env.client.clear_templates.assert_not_called()
+    service.try_switch_account.assert_not_awaited()
 
 
 async def test_heartbeat_does_not_prevent_retry_or_change_usage(sse_env, request_body):

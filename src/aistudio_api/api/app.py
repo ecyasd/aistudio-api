@@ -35,6 +35,7 @@ from .error_middleware import (
     record_http_failure,
     request_operation,
 )
+from .nonstream_disconnect import NonStreamingDisconnectMiddleware
 from .routes_accounts import router as accounts_router
 from .routes_errors import router as errors_router
 from .routes_gemini import router as gemini_router
@@ -128,6 +129,7 @@ app.include_router(models_router, dependencies=[Depends(require_api_key)])
 @app.exception_handler(HTTPException)
 async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONResponse:
     code, msg, status_str = classify_gemini_error_payload(exc)
+    error_type = gemini_error_type(exc)
     record_http_failure(exc, code)
     return JSONResponse(
         status_code=code,
@@ -136,7 +138,7 @@ async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONR
                 "code": code,
                 "message": msg,
                 "status": status_str,
-                **({"type": gemini_error_type(exc)} if gemini_error_type(exc) else {}),
+                **({"type": error_type} if error_type else {}),
             }
         },
         headers=getattr(exc, "headers", None),
@@ -347,6 +349,7 @@ async def root_index():
     return JSONResponse({"message": "AI Studio API Web UI"})
 
 
+app.add_middleware(NonStreamingDisconnectMiddleware)
 app.add_middleware(ErrorRecordsMiddleware)
 
 

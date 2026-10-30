@@ -20,6 +20,7 @@ from aistudio_api.application import account_orchestrator
 from aistudio_api.infrastructure.gateway.model_defaults import (
     _resolve_config_path,
     invalidate_config_cache,
+    validate_model_config,
 )
 from aistudio_api.infrastructure.utils.config_store import (
     ConfigConflictError,
@@ -330,6 +331,10 @@ async def update_config_yaml(req: ConfigYamlUpdateRequest) -> dict[str, object]:
     )
     if logging_changed:
         parsed = _parse_config_yaml(req.yaml_content)
+    try:
+        validate_model_config(parsed)
+    except (ValueError, TypeError, KeyError, OverflowError) as exc:
+        raise HTTPException(400, detail="模型规则的结构、枚举或数值无效，请检查配置") from exc
     config_yaml_path = _resolve_config_path(None)
     try:
         saved = save_model_config(config_yaml_path, parsed, baseline=baseline)
@@ -505,3 +510,21 @@ async def update_api_key_name(
 
     assert updated_item is not None
     return updated_item
+
+
+class ApiKeyReferenceRequest(BaseModel):
+    key: str
+
+
+class RenameApiKeyRequest(UpdateApiKeyRequest):
+    key: str
+
+
+@protected_router.delete("/api-keys")
+async def delete_api_key_by_body(req: ApiKeyReferenceRequest) -> dict[str, bool]:
+    return await delete_api_key(req.key)
+
+
+@protected_router.put("/api-keys", response_model=ApiKeyItemModel)
+async def rename_api_key_by_body(req: RenameApiKeyRequest) -> ApiKeyItemModel:
+    return await update_api_key_name(req.key, req)

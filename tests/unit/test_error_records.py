@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 from aistudio_api.api import routes_errors
 from aistudio_api.domain.errors import (
@@ -46,6 +46,20 @@ def test_default_window_is_bounded_memory_and_new_process_starts_empty():
     assert fresh_page["items"] == []
     assert "persistence" not in page
     assert "persisted" not in event
+
+
+async def test_asyncio_deadline_and_admission_timeout_are_not_client_cancellation():
+    try:
+        async with asyncio.timeout(0.001):
+            await asyncio.Event().wait()
+    except TimeoutError as exc:
+        timeout = exc
+    assert isinstance(timeout.__cause__, asyncio.CancelledError)
+    assert records.classify_failure(timeout)[:2] == (504, "timeout")
+    wrapped = HTTPException(503, "Admission queue timed out")
+    wrapped.__cause__ = timeout
+    assert records.classify_failure(wrapped, http_status=503)[:2] == (503, "timeout")
+    assert records.classify_failure(asyncio.CancelledError())[:2] == (499, "cancelled")
 
 
 def test_exception_messages_request_queries_and_unrecognized_metadata_are_excluded(store):

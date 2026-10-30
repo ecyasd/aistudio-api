@@ -522,55 +522,16 @@ class AccountRotator:
         is_session_expired: bool = False,
     ) -> AccountMeta | None:
         """获取下一个可用账号（排除失败账号，优先平滑故障转移至健康账号）。"""
-        async with self._lock:
-            available = self._get_available_accounts(model)
-            if not available:
-                # 保底：若所有账号都处于 auth_cooldown 中，允许 fallback 尝试恢复
-                available = self._get_available_accounts(
-                    model, ignore_auth_cooldown=True
-                )
-                if not available:
-                    return None
-
-            # 优先在排除失败账号的候选集中挑选
-            candidates = [
-                (a, s)
-                for a, s in available
-                if not (failed_account_id and a.id == failed_account_id)
-            ]
-            if candidates:
-                # 黏性策略：如果当前账号未失败且在候选列表中，继续复用
-                if current_account_id and not (
-                    failed_account_id and current_account_id == failed_account_id
-                ):
-                    for a, _ in candidates:
-                        if a.id == current_account_id:
-                            return a
-                # 故障转移：按最少 auth_errors、最少 errors、最久未用挑选
-                # 故障转移：优先用该模型与总使用次数少、非 drip_mode 的充沛额度健康账号
-                norm_m = normalize_model_key(model)
-                account, _ = min(
-                    candidates,
-                    key=lambda x: (
-                        1 if (norm_m and x[1].model_drip_mode.get(norm_m)) else 0,
-                        x[1].model_requests.get(norm_m, 0) if norm_m else 0,
-                        x[1].requests,
-                        x[1].auth_errors,
-                        x[1].errors,
-                        x[1].last_used,
-                    ),
-                )
-                if current_account_id and account.id != current_account_id:
-                    logger.info("账号故障转移切换: %s (model=%s)", account.name, model)
-                return account
-            if is_session_expired:
-                return None
-            if failed_account_id:
-                for a, _ in available:
-                    if a.id == failed_account_id:
-                        return a
-
-            return available[0][0]
+        selected = await self.get_next_account_with_stats(
+            model=model, current_account_id=current_account_id,
+            failed_account_id=failed_account_id, is_session_expired=is_session_expired,
+        )
+        if selected is None:
+            return None
+        account, _ = selected
+        if current_account_id and account.id != current_account_id:
+            logger.info("账号故障转移切换: %s (model=%s)", account.name, model)
+        return account
 
     async def get_next_account_with_stats(
         self,
