@@ -489,6 +489,15 @@ routeScope.stop()
 routeFixture.query = {}
 checks.push('account and request links preserve exact identities and request navigation clears the account restriction')
 
+store = freshStore()
+requestImpl = async () => response([], { diagnostics: { items: [diagnostic({
+  flags: ['terminal_body_replay_suppressed'],
+})], retention: { minutes: 10, max_records: 100 } } })
+await store.refresh()
+html = await render()
+assert.match(html, /已拦截末尾整篇正文重复/)
+checks.push('terminal full-body replay suppression is explained in response diagnostics')
+
 const contextParser = load('utils/diagnosticContext.ts').diagnosticContext
 assert.equal(contextParser({ account_id: ['acc_11111111'], request_id: 'unsafe-request' }).account, '')
 assert.equal(contextParser({ account_id: 'acc_11111111' }).account, 'acc_11111111')

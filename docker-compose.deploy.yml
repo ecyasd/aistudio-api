@@ -1,10 +1,11 @@
 services:
   aistudio-api:
-    image: ghcr.io/deconstructedcube/aistudio-api:latest
+    # Compatibility entry: build this maintained checkout, keeping its named volume.
+    build: .
     container_name: aistudio-api
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
       - aistudio-api-data:/app/data
     environment:

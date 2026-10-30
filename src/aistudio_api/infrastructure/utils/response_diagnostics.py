@@ -35,6 +35,7 @@ _FLAGS = frozenset({
     "slow_first_body",
     "large_input",
     "continuation_skipped_budget", "continuation_skipped_unsupported",
+    "terminal_body_replay_suppressed",
 })
 _OUTCOMES = frozenset({"success", "recovered", "failed", "cancelled"})
 _SESSION_REASONS = frozenset({
@@ -54,6 +55,7 @@ _COUNTERS = (
     "thought_parts", "thought_after_body", "empty_thought_parts", "marker_count",
     "request_body_bytes",
     "transport_probes", "transport_repair_attempts", "transport_wait_ms",
+    "body_parts", "terminal_body_chars", "terminal_body_replays", "suppressed_body_chars",
 )
 _TIMINGS = (
     "admitted", "account_preparation_started", "account_ready", "session_ready",
@@ -212,6 +214,10 @@ class _Accumulator:
     upstream_calls: int = 0
     retries: int = 0
     body_chars: int = 0
+    body_parts: int = 0
+    terminal_body_chars: int = 0
+    terminal_body_replays: int = 0
+    suppressed_body_chars: int = 0
     thought_chars: int = 0
     thought_parts: int = 0
     thought_tokens: int | None = None
@@ -404,6 +410,16 @@ def note_continuation() -> None:
             current.flags.add("auto_continued")
 
 
+def note_terminal_body_replay(chars: int) -> None:
+    """Record only the fixed reason and size; never store text or its digest."""
+    with contextlib.suppress(Exception):
+        current = _current()
+        if current is not None:
+            current.flags.add("terminal_body_replay_suppressed")
+            current.terminal_body_replays = _count(current.terminal_body_replays + 1)
+            current.suppressed_body_chars = _count(current.suppressed_body_chars + _count(chars))
+
+
 def observe_candidate(candidate: Candidate) -> None:
     with contextlib.suppress(Exception):
         current = _current()
@@ -434,12 +450,14 @@ def observe_candidate(candidate: Candidate) -> None:
                     current.phase("thought")
             elif text:
                 note_timing("first_body")
+                current.body_parts = _count(current.body_parts + 1)
                 current.body_chars = _count(current.body_chars + len(text))
                 current.body_seen = True
                 current.observe_body(text)
                 current.phase("body")
         reason = candidate.finish_reason
         if type(reason) is int and 0 < reason <= 255:
+            current.terminal_body_chars = _count(current.terminal_body_chars + len(candidate.text))
             if len(current.finish_reasons) < MAX_SEQUENCE:
                 current.finish_reasons.append(reason)
             else:
@@ -501,5 +519,6 @@ def finish_response_diagnostics(outcome: str, transport_status: int | None = Non
                 log = logger.warning if summary["outcome"] in {"failed", "cancelled"} or current.flags.intersection({
                     "marker_in_body", "thought_after_body", "content_after_finish", "slow_first_body", "large_input",
                     "continuation_skipped_budget", "continuation_skipped_unsupported",
+                    "terminal_body_replay_suppressed",
                 }) else logger.info
                 log("response_diagnostic %s", json.dumps(summary, separators=(",", ":")))

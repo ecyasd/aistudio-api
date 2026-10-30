@@ -19,6 +19,9 @@ from aistudio_api.infrastructure.gateway.session import BrowserSession
 from aistudio_api.infrastructure.gateway.stream_parser import (
     IncrementalJSONStreamParser,
 )
+from aistudio_api.infrastructure.gateway.terminal_body_replay import (
+    TerminalBodyReplayGuard,
+)
 from aistudio_api.infrastructure.gateway.wire_parser import (
     is_response_chunk,
     parse_chunk_usage,
@@ -93,6 +96,7 @@ class StreamingGateway:
         modified_body = captured.body
 
         parser = IncrementalJSONStreamParser()
+        replay_guard = TerminalBodyReplayGuard()
         latest_usage: dict[str, object] | None = None
         latest_finish_reason: int | None = None
         latest_response_id: str | None = None
@@ -155,7 +159,7 @@ class StreamingGateway:
                         ):
                             latest_response_id = parsed_chunk[7]
                             yield ("response_id", latest_response_id)
-                        candidate = parse_response_chunk(parsed_chunk)
+                        candidate = replay_guard.accept(parse_response_chunk(parsed_chunk))
                         if (
                             candidate.continuation_unsafe
                             or candidate.code_output

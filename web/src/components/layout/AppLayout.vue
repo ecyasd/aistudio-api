@@ -34,13 +34,17 @@ async function handleRefresh() {
       else toast.error('错误记录读取失败，请查看页面提示')
       return
     }
-    await Promise.allSettled([
+    const results = await Promise.allSettled([
       accountsStore.fetchAll(),
       systemStore.fetchStats(),
       systemStore.fetchRotation(),
       systemStore.checkHealth(),
     ])
-    toast.success('数据已刷新')
+    if (results.every(result => result.status === 'fulfilled' && result.value !== false)) {
+      toast.success('数据已刷新')
+    } else {
+      toast.error('部分数据刷新失败，已保留上次成功的数据，请稍后重试')
+    }
   } finally {
     refreshing.value = false
   }

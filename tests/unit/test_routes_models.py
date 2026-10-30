@@ -109,10 +109,9 @@ async def test_model_discovery_falls_back_to_auth_file_cookies(tmp_path, monkeyp
     )
 
     service = ModelDiscoveryService()
-    mock_session = MagicMock()
-    mock_session.page = None  # 页面尚未初始化
+    mock_session = BrowserSession(port=1)
     mock_session._auth_file = str(auth_file)
-    mock_session.get_current_auth_user = MagicMock(return_value="0")
+    mock_session._auth_user = "0"
 
     # Mock HTTP 探测返回
     fake_http_models = [

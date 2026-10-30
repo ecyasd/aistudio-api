@@ -34,6 +34,12 @@
 系统采用分层设计（Layered Architecture），划分为 **API 接入层**、**Application 应用服务层**、**Domain 领域层** 与 **Infrastructure 基础设施层**：
 
 生成调用的公共 HTTP 入口在 `api/gemini.py`，请求执行归属在 `application/generation.py`。
+`gateway/terminal_body_replay.py` 为流式和非流式共用的逐响应完成帧兼容器：
+只跳过与此前多个无签名纯正文分块整篇相同的长正文完成帧，保留完成原因及用量。
+签名、思考、工具或未知内容禁用该处理；不比较不同请求、重试或续写轮次。
+诊断的 `body_chars` 仍计收到的正文，`body_parts`、`terminal_body_chars`、
+`terminal_body_replays` 与 `suppressed_body_chars` 区分分块数、完成帧正文量和已拦截量；
+只保存计数及固定标记，不保存正文或比较摘要。
 `GenerationRun` 为流式与非流式提供同一套准入、重试、实际账号租约、可选 Cookie checkpoint 和成功记账。
 每次尝试使用独立的 `AttemptIdentity` 记录账号、context 和凭据代际；失败恢复接收该尝试的完整归属。
 默认失败恢复由 `application/generation_recovery.py` 拥有，HTTP 调用方不再提供恢复回调。
@@ -46,6 +52,10 @@ HTTP 层拥有 SSE 编码、心跳、单槽反压队列、发送超时和 ASGI �
 执行 `GenerationRun`，在同一任务中取得和释放租约、推进和关闭上游迭代器。
 续写的绝对期限围绕准入、准备和上游等待启用，不跨越交付回调或下游反压等待。
 运行统计与应用依赖位于 `application/runtime.py`，应用编排不再依赖 API 层的状态模块。
+
+模型目录读取仅通过 `existing_context_scope` 借用已经就绪的页面和该 context 的账号槽。
+该租约阻止查询期间的账号退休和空闲回收，成功、失败与取消均释放；它不启动、刷新或探测
+浏览器会话。没有就绪 context 或正在切换时，目录沿用既有 HTTP/缓存/保底路径。
 
 ```mermaid
 flowchart TD

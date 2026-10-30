@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import aclosing, asynccontextmanager, suppress
 from contextvars import ContextVar
 from hashlib import sha256
@@ -165,6 +165,31 @@ class BrowserSession:
         if self._gate.active_context is not None:
             return self._gate.active_context.auth_user
         return get_auth_user_from_meta(self._auth_file)
+
+    @asynccontextmanager
+    async def existing_context_scope(self) -> AsyncIterator[SessionContext | None]:
+        """Borrow a ready context without starting, refreshing or probing it."""
+        bound = self._request_context.get()
+        if bound is not None:
+            yield bound
+            return
+        # No await between checking readiness and registering the lease: a
+        # transition must not retire this page before it sees our in-flight work.
+        ctx = self.active_context if self.is_ready else None
+        if ctx is None:
+            yield None
+            return
+        self._in_flight += 1
+        self._last_activity_time = time.time()
+        ctx.incr_in_flight()
+        token = self._request_context.set(ctx)
+        try:
+            yield ctx
+        finally:
+            self._request_context.reset(token)
+            ctx.decr_in_flight()
+            self._in_flight = max(0, self._in_flight - 1)
+            self._last_activity_time = time.time()
 
     @asynccontextmanager
     async def request_scope(self):
