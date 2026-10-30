@@ -25,7 +25,7 @@ from aistudio_api.infrastructure.gateway.model_defaults import (
     validate_model_config,
 )
 from aistudio_api.infrastructure.gateway.wire_types import (
-    AistudioGenerationConfig,
+    SUPPORTED_GENERATION_CONFIG_FIELDS,
     AistudioImageOutputMode,
 )
 from aistudio_api.infrastructure.utils.config_store import (
@@ -285,8 +285,7 @@ async def preview_model_rules(req: ModelPreviewRequest, response: Response) -> d
     generation = defaults.generation_config_overrides()
     # Unknown extension attributes are ignored by the wire encoder. Make that
     # visible instead of presenting them as effective generation parameters.
-    supported = {key for key, value in vars(AistudioGenerationConfig).items()
-                 if isinstance(value, property)}
+    supported = SUPPORTED_GENERATION_CONFIG_FIELDS
     return {
         "model": selection.base_model,
         "auto_continue": selection.auto_continue,

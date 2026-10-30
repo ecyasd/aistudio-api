@@ -83,13 +83,20 @@ class _Attempt:
     usage: dict[str, object] | None = None
 
 
-async def _persist_successful_cookies(client: AIStudioClient, context: object) -> None:
+async def _persist_successful_cookies(
+    client: AIStudioClient, context: object, *, deadline: float | None = None,
+) -> None:
     """Keep optional checkpointing in its original task, lease and small budget."""
     persist = getattr(client.session, "persist_context_cookies", None)
     if persist is None:
         return
     try:
-        async with asyncio.timeout(COOKIE_CHECKPOINT_TIMEOUT_SECONDS):
+        checkpoint_deadline = (
+            asyncio.get_running_loop().time() + COOKIE_CHECKPOINT_TIMEOUT_SECONDS
+        )
+        if deadline is not None:
+            checkpoint_deadline = min(checkpoint_deadline, deadline)
+        async with asyncio.timeout_at(checkpoint_deadline):
             await persist(context)
     except Exception as exc:
         logger.warning("保存已验证会话 Cookie 失败: type=%s", type(exc).__name__)
@@ -159,7 +166,11 @@ class GenerationRun:
                         )
                         note_request_account(attempt.identity.account_id)
                         result = await operation(attempt)
-                        await self._wait(_persist_successful_cookies(self.client, context))
+                        # A completed upstream response remains successful if
+                        # optional persistence uses up the remaining budget.
+                        await _persist_successful_cookies(
+                            self.client, context, deadline=self._deadline,
+                        )
                     identity = attempt.identity
                     if identity.auth_generation is AUTH_GENERATION_UNTRACKED:
                         record_rotator_event("success", model=self.request.model,

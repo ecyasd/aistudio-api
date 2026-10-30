@@ -20,6 +20,7 @@ from .wire_parser import (
 )
 from .wire_spec import TopLevelIndex
 from .wire_types import (
+    SUPPORTED_GENERATION_CONFIG_FIELDS,
     AistudioContent,
     AistudioGenerationConfig,
     AistudioPart,
@@ -305,7 +306,8 @@ class AistudioWireCodec:
 
         defaults = model_defaults.generation_config_overrides()
         for attr, value in defaults.items():
-            setattr(request.generation_config, attr, value)
+            if attr in SUPPORTED_GENERATION_CONFIG_FIELDS:
+                setattr(request.generation_config, attr, value)
         if model_defaults.safety_settings is not None:
             request.safety_settings = model_defaults.safety_settings_overrides()
         if safety_settings is not None:
@@ -320,7 +322,7 @@ class AistudioWireCodec:
         if top_k is not None:
             request.generation_config.top_k = top_k
         for attr, value in (generation_config_overrides or {}).items():
-            if value is None or not hasattr(request.generation_config, attr):
+            if value is None or attr not in SUPPORTED_GENERATION_CONFIG_FIELDS:
                 continue
             setattr(request.generation_config, attr, value)
         request.generation_config.enable_default_thinking()

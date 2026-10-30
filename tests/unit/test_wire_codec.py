@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from aistudio_api.infrastructure.gateway.wire_codec import (
     AistudioWireCodec,
     build_image_generation_search_tool,
@@ -41,6 +43,24 @@ def test_modify_body_updates_generation_config_and_prompt():
     assert body[3][6] == 32
     assert body[3][16] == [1, None, None, 3]
     assert len(body[3]) <= 17 or body[3][17] is None
+
+
+@pytest.mark.parametrize(
+    "extension", ["values", "enable_default_thinking", "sanitize_for_plain_text", "_ensure_len"],
+)
+def test_generation_overrides_cannot_replace_codec_storage_or_methods(extension):
+    codec = AistudioWireCodec()
+    original = '["models/original",[[[[null,"synthetic"]],"user"]],null,[null,null,null,128],"!synthetic"]'
+    value = [None, None, None, 123] if extension == "values" else False
+    rewritten = codec.rewrite(
+        original, model="models/gemini-test",
+        sanitize_plain_text=extension == "sanitize_for_plain_text",
+        generation_config_overrides={extension: value, "temperature": 0.2},
+    )
+    actual = codec.decode(rewritten).generation_config
+    assert actual.max_tokens == 128
+    assert actual.temperature == 0.2
+    assert actual.thinking_config == AistudioThinkingConfig.default().to_wire()
 
 
 def test_build_image_generation_search_tool_variants():

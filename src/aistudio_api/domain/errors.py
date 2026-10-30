@@ -14,7 +14,7 @@ class AuthError(AistudioError):
 
 
 class BrowserTransportError(AistudioError):
-    """The browser stream event channel could not be restored safely."""
+    """The browser could not safely deliver the original streaming request."""
 
 
 class SessionExpiredError(AuthError):
