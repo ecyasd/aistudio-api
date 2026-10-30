@@ -159,6 +159,69 @@ async def test_publication_blocks_replay_even_if_recovery_requests_it(execution)
     env.record.assert_not_called()
 
 
+@pytest.mark.parametrize("replaced_credentials", [False, True])
+@pytest.mark.parametrize("failure", ["cdp_closed", "browser_cancelled"])
+async def test_dispatched_nonstream_failure_never_replays(
+    execution, monkeypatch, replaced_credentials, failure,
+):
+    from fastapi import HTTPException
+
+    from aistudio_api.api import gemini
+    from aistudio_api.api.schemas import GeminiGenerateContentRequest
+    from aistudio_api.infrastructure.browser.cdp_client import CDPPage
+    from aistudio_api.infrastructure.browser.scripts import (
+        HOOKED_CLEANUP_JS,
+        HOOKED_REQUEST_JS,
+    )
+    from aistudio_api.infrastructure.gateway.transport import XHRStreamTransport
+
+    env = execution
+    page = MagicMock(spec=CDPPage)
+    page.get_cookies = AsyncMock(return_value=[])
+    dispatched, cleaned = [], []
+
+    async def evaluate(script, args=None, **_kwargs):
+        if script == HOOKED_REQUEST_JS:
+            dispatched.append(args["rid"])
+            if failure == "cdp_closed":
+                raise RuntimeError("CDP connection closed: synthetic-private-detail")
+            return {"status": 0, "body": "cancelled"}
+        if script == HOOKED_CLEANUP_JS:
+            cleaned.append(args)
+        return None
+
+    page.evaluate = AsyncMock(side_effect=evaluate)
+    transport = XHRStreamTransport()
+
+    async def complete(**_kwargs):
+        await transport.send_hooked_request(
+            page, url="https://synthetic.invalid", headers={}, body="[]", timeout_ms=500,
+        )
+        raise AssertionError("Failed delivery cannot return a completed generation")
+
+    env.client.generate_content = complete
+    env.client.clear_templates = MagicMock()
+    switch = AsyncMock(return_value=True)
+    monkeypatch.setattr(gemini, "try_switch_account", switch)
+    monkeypatch.setattr(
+        gemini, "account_generation_is_current", lambda *_args: not replaced_credentials,
+    )
+    run = gemini._generation_run(
+        env.client, env.request, GeminiGenerateContentRequest(contents=[]), "gemini-synthetic",
+    )
+    with pytest.raises(HTTPException) as caught:
+        await run.generate()
+    assert len(dispatched) == 1 and cleaned == dispatched
+    assert caught.value.status_code == 503
+    assert caught.value.detail["type"] == "browser_transport_error"
+    assert "synthetic-private-detail" not in str(caught.value.detail)
+    switch.assert_not_awaited()
+    env.client.clear_templates.assert_not_called()
+    env.record.assert_not_called()
+    assert not env.leases and env.account.get() is None and env.limiter.active == 0
+    assert not transport._cleanup_tasks
+
+
 @pytest.mark.parametrize("stream", [False, True])
 async def test_completed_generation_survives_checkpoint_reaching_request_deadline(
     execution, monkeypatch, stream,

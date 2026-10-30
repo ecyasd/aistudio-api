@@ -193,7 +193,7 @@ def classify_gemini_error_payload(exc: Exception) -> tuple[int, str, str]:
             status_map.get(status, "INTERNAL" if status >= 500 else "UNKNOWN"),
         )
     if isinstance(exc, BrowserTransportError):
-        return 503, "Browser stream delivery failed", "UNAVAILABLE"
+        return 503, "Browser response delivery failed", "UNAVAILABLE"
     if isinstance(exc, TimeoutError):
         return 504, "Upstream preparation or generation timed out", "DEADLINE_EXCEEDED"
     if isinstance(exc, AistudioError):
@@ -466,7 +466,7 @@ async def _handle_attempt_exception(
 
     if isinstance(exc, BrowserTransportError):
         raise HTTPException(
-            503, detail={"message": "Browser stream delivery failed", "type": "browser_transport_error"}
+            503, detail={"message": "Browser response delivery failed", "type": "browser_transport_error"}
         ) from exc
 
     if is_browser_session_hang_error(exc):

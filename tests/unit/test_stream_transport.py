@@ -485,7 +485,7 @@ async def test_nonstream_read_failure_is_not_a_successful_empty_body():
     page.evaluate = AsyncMock(
         return_value={"status": 0, "body": "response read failed"}
     )
-    with pytest.raises(RuntimeError, match="response read failed"):
+    with pytest.raises(BrowserTransportError, match="Browser response delivery failed"):
         await XHRStreamTransport().send_hooked_request(
             page,
             url="https://synthetic.invalid",
