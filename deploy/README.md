@@ -196,6 +196,13 @@ WARNING，即使请求最后成功也能在 WARNING 日志级别追查。该阈�
 最终输入 token 报告，不将重试或续写的重复历史相加。上游未报告时为 `null`，不靠正文
 内容估算，也不额外调用 token 计数或模型接口。它们是输入规模诊断，不代表完整计费统计。
 
+账号准备较慢时，还可对照 `browser_launch_started` / `browser_ready`、
+`browser_context_ready`、`browser_cookies_loaded`、`browser_navigation_ready`、
+`botguard_hooks_ready` / `botguard_prompt_filled` / `botguard_run_dispatched` /
+`botguard_template_ready` 和 `session_checkpoint_done`。它们同样只记录入口后的首次毫秒数；
+复用已有会话时不会伪造初始化阶段。编辑器已经存在时跳过重复导航及其固定等待，
+有效模板到达时立即唤醒捕获，仍须确认服务 hook、完成模板校验并执行原有清理。
+
 摘要还包含原生思考 Part 数、已报告思考 token 数，以及请求是否显式提供思考配置。
 `thinking_mode` / `thinking_level` 只记录规范化覆盖配置中的已知枚举；`null` 表示未观测到
 该覆盖值，不推断最终 wire 默认值。`thought_tokens` 使用每次上游调用最后报告的累计值

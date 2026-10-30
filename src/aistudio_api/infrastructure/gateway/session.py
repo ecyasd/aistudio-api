@@ -46,6 +46,7 @@ from aistudio_api.infrastructure.gateway.session_state import (
 from aistudio_api.infrastructure.gateway.transport import XHRStreamTransport
 from aistudio_api.infrastructure.gateway.wire_types import AistudioContent
 from aistudio_api.infrastructure.utils.logger import get_logger
+from aistudio_api.infrastructure.utils.response_diagnostics import note_timing
 
 log = get_logger("session")
 
@@ -324,26 +325,31 @@ class BrowserSession:
 
                 # Real browser mode
                 if self._proc is None or not self._proc.is_alive():
+                    note_timing("browser_launch_started")
                     await self._close_internal()
                     old_context = None
                     self._gate.set_preparing()
                     self._profile_dir = derive_profile_dir(auth_file)
                     await self._ensure_browser_cdp()
+                    note_timing("browser_ready")
 
                 assert self._cdp_client is not None
 
                 new_page = await self._cdp_client.create_new_page(block_assets=True)
+                note_timing("browser_context_ready")
                 new_page.set_liveness_checker(
                     lambda: self._proc is None or self._proc.is_alive()
                 )
 
                 if auth_file and not await load_cookies_to_page(new_page, auth_file):
                     raise RuntimeError("Could not load target account cookies")
+                note_timing("browser_cookies_loaded")
                 await navigate_to_aistudio(
                     new_page,
                     auth_user=target_auth_user,
                     auth_file=auth_file,
                 )
+                note_timing("browser_navigation_ready")
 
                 async def _reload_cb(page: CDPPage) -> bool:
                     return await load_cookies_to_page(page, auth_file)
@@ -366,6 +372,7 @@ class BrowserSession:
                     auth_generation=auth_generation,
                 )
                 await self.persist_context_cookies(new_context)
+                note_timing("session_checkpoint_done")
 
                 if get_auth_generation(auth_file) != auth_generation:
                     raise RuntimeError("Account credentials changed during session preparation")

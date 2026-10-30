@@ -45,6 +45,10 @@ _TIMINGS = (
     "capture_started", "template_ready", "snapshot_ready", "upstream_started",
     "transport_dispatched", "upstream_headers", "upstream_first_byte",
     "first_thought", "first_body", "response_started", "first_data_sent",
+    "browser_launch_started", "browser_ready", "browser_context_ready",
+    "browser_cookies_loaded", "browser_navigation_ready", "botguard_hooks_ready",
+    "botguard_prompt_filled", "botguard_run_dispatched", "botguard_template_ready",
+    "session_checkpoint_done",
 )
 logger = get_logger("response_diagnostics")
 _store: ResponseDiagnosticStore | None = None
