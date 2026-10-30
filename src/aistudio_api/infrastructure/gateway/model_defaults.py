@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import math
 import os
+from collections import OrderedDict
 from dataclasses import dataclass, field
-from functools import lru_cache
 from pathlib import Path
 
 import yaml
 
-from aistudio_api.config import resolve_config_file
+from aistudio_api.config import get_config_file_path, resolve_config_file
 from aistudio_api.infrastructure.utils.config_store import api_key_items, mutate_config
 
 from .wire_types import (
@@ -384,6 +384,9 @@ def validate_model_config(config: dict[str, object]) -> None:
 ConfigStamp = tuple[int, int, int, int] | None
 _CONFIG_CACHE: dict[str, tuple[ConfigStamp, dict[str, object]]] = {}
 _API_KEYS_CACHE: dict[str, tuple[ConfigStamp, frozenset[str], list[dict[str, str]]]] = {}
+_COMPILED_RULES_CACHE: OrderedDict[
+    str, tuple[dict[str, object], tuple[ModelProfile, ...], dict[str, ModelDefaults]]
+] = OrderedDict()
 
 
 def _config_stamp(path: Path) -> ConfigStamp:
@@ -398,8 +401,16 @@ def invalidate_config_cache() -> None:
     """Clear in-memory configuration and API keys cache."""
     _CONFIG_CACHE.clear()
     _API_KEYS_CACHE.clear()
-    _compiled_profiles.cache_clear()
-    _compiled_model_overrides.cache_clear()
+    _COMPILED_RULES_CACHE.clear()
+
+
+def _read_yaml_config(config_path: Path) -> dict[str, object]:
+    """Pure file read for both runtime snapshots and uncached previews."""
+    try:
+        loaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except FileNotFoundError:
+        return _default_config()
+    return _with_builtin_defaults(loaded if isinstance(loaded, dict) else {})
 
 
 def _load_yaml_config(config_path: Path) -> dict[str, object]:
@@ -413,10 +424,7 @@ def _load_yaml_config(config_path: Path) -> dict[str, object]:
     if cached is not None and cached[0] == mtime:
         return cached[1]
 
-    loaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    if not isinstance(loaded, dict):
-        loaded = {}
-    merged = _with_builtin_defaults(loaded)
+    merged = _read_yaml_config(config_path)
     _CONFIG_CACHE[path_key] = (mtime, merged)
     return merged
 
@@ -449,14 +457,21 @@ def _overrides(config: dict[str, object]) -> dict[str, ModelDefaults]:
     } if isinstance(raw_models, dict) else {}
 
 
-@lru_cache(maxsize=8)
-def _compiled_profiles(config_path: str) -> tuple[ModelProfile, ...]:
-    return _profiles(_load_yaml_config(Path(config_path)))
-
-
-@lru_cache(maxsize=8)
-def _compiled_model_overrides(config_path: str) -> dict[str, ModelDefaults]:
-    return _overrides(_load_yaml_config(Path(config_path)))
+def _compiled_rules(
+    config_path: str, config: dict[str, object],
+) -> tuple[tuple[ModelProfile, ...], dict[str, ModelDefaults]]:
+    cached = _COMPILED_RULES_CACHE.get(config_path)
+    if cached is not None and cached[0] is config:
+        _COMPILED_RULES_CACHE.move_to_end(config_path)
+        return cached[1], cached[2]
+    # Compile both collections from the exact document already read by the
+    # caller. A file replacement between these steps cannot mix generations.
+    profiles, overrides = _profiles(config), _overrides(config)
+    _COMPILED_RULES_CACHE[config_path] = config, profiles, overrides
+    _COMPILED_RULES_CACHE.move_to_end(config_path)
+    if len(_COMPILED_RULES_CACHE) > 8:
+        _COMPILED_RULES_CACHE.popitem(last=False)
+    return profiles, overrides
 
 
 def resolve_model_defaults(
@@ -464,15 +479,15 @@ def resolve_model_defaults(
 ) -> ModelDefaults:
     resolved_path = str(_resolve_config_path(config_path))
     config = _load_yaml_config(Path(resolved_path))
-    return _resolve_rules(model, config, _compiled_profiles(resolved_path),
-                          _compiled_model_overrides(resolved_path))[0]
+    profiles, overrides = _compiled_rules(resolved_path, config)
+    return _resolve_rules(model, config, profiles, overrides)[0]
 
 
 def preview_model_defaults(
     model: str, *, config: dict[str, object] | None = None,
 ) -> tuple[ModelDefaults, list[dict[str, object]]]:
     """Resolve a draft without writing files or changing the runtime cache."""
-    document = (_load_yaml_config(_resolve_config_path(None)) if config is None
+    document = (_read_yaml_config(get_config_file_path()) if config is None
                 else _with_builtin_defaults(config))
     validate_model_config(document)
     return _resolve_rules(model, document, _profiles(document), _overrides(document))

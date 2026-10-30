@@ -27,6 +27,7 @@ sealed class Screen {
 
 class MainActivity : ComponentActivity() {
     private lateinit var profileManager: ProfileManager
+    private var profilesState by mutableStateOf<List<ProfileItem>>(emptyList())
     private var pendingExportJson: String = ""
 
     // SAF 文件保存（导出 JSON）
@@ -58,6 +59,7 @@ class MainActivity : ComponentActivity() {
                             ins.reader(Charsets.UTF_8).readText()
                         } ?: ""
                     val count = profileManager.importBundleJson(jsonStr)
+                    refreshProfiles()
                     if (count > 0) {
                         Toast.makeText(this, "已导入 $count 个账号", Toast.LENGTH_SHORT).show()
                     } else {
@@ -69,20 +71,20 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+    private fun refreshProfiles() {
+        profilesState = profileManager.getProfiles()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         profileManager = ProfileManager(this)
+        refreshProfiles()
 
         setContent {
             AIStudioExtractorTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     var currentScreen by remember { mutableStateOf<Screen>(Screen.Main) }
-                    var profilesState by remember { mutableStateOf(profileManager.getProfiles()) }
                     var exportDialogOpen by remember { mutableStateOf(false) }
-
-                    fun refreshProfiles() {
-                        profilesState = profileManager.getProfiles()
-                    }
 
                     when (val screen = currentScreen) {
                         is Screen.Main -> {

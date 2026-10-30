@@ -23,6 +23,7 @@ export const useAccountsStore = defineStore('accounts', () => {
   const activatingId = ref<string | null>(null)
   const importing = ref(false)
   let refreshRequest = 0
+  let activationRequest = 0
 
   const activeId = computed(() => activeAccount.value?.id || '')
 
@@ -68,18 +69,22 @@ export const useAccountsStore = defineStore('accounts', () => {
 
   async function activateAccount(id: string) {
     const toast = useToastStore()
+    const request = ++activationRequest
+    ++refreshRequest
     activatingId.value = id
     try {
       const updated = await accountsApi.activate(id)
+      if (request !== activationRequest) return
       activeAccount.value = updated
       toast.success(`已成功激活账号: ${updated.name || updated.email || updated.id}`)
       await fetchAll()
     } catch (err: unknown) {
+      if (request !== activationRequest) return
       const msg = err instanceof Error ? err.message : '激活失败'
       toast.error(msg)
       await fetchAll()
     } finally {
-      activatingId.value = null
+      if (request === activationRequest) activatingId.value = null
     }
   }
 

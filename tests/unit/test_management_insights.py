@@ -23,6 +23,7 @@ from aistudio_api.infrastructure.utils import (
 def management(tmp_path, monkeypatch):
     config = tmp_path / "config.yaml"
     config.write_text("api_keys: [synthetic-private-key]\nmodel_defaults:\n  profiles: []\n", encoding="utf-8")
+    monkeypatch.setenv("AISTUDIO_CONFIG_FILE", str(config))
     monkeypatch.setattr(settings, "web_password", "synthetic-manager")
     monkeypatch.setattr(rules, "_resolve_config_path", lambda _path: config)
     monkeypatch.setattr(routes_system, "_resolve_config_path", lambda _path: config)

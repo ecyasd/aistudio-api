@@ -74,16 +74,17 @@ _TEMPLATE_CONFIG_PATHS = (
 )
 
 
-def resolve_config_file(config_path: str | os.PathLike[str] | None = None) -> Path:
-    """解析配置文件路径（优先使用 AISTUDIO_CONFIG_FILE 环境变量）。
-
-    若目标路径配置文件不存在，则自动从内置配置模板初始化复制，绝不覆盖已有配置文件。
-    """
+def get_config_file_path(config_path: str | os.PathLike[str] | None = None) -> Path:
+    """Return the configured path without initializing or modifying any file."""
     if config_path is not None:
-        target = Path(config_path)
-    else:
-        override = os.getenv("AISTUDIO_CONFIG_FILE")
-        target = Path(override) if override else _DEFAULT_CONFIG_PATH
+        return Path(config_path)
+    override = os.getenv("AISTUDIO_CONFIG_FILE")
+    return Path(override) if override else _DEFAULT_CONFIG_PATH
+
+
+def resolve_config_file(config_path: str | os.PathLike[str] | None = None) -> Path:
+    """Resolve a runtime config, initializing a missing file from its template."""
+    target = get_config_file_path(config_path)
 
     if not target.exists():
         for template in _TEMPLATE_CONFIG_PATHS:

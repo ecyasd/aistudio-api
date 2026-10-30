@@ -153,6 +153,35 @@ checks.push('cooldown reset and forced rotation retain the refreshed state after
 }
 checks.push('account refreshes ignore old snapshots and never invent an active account on lookup failure')
 
+for (const order of ['newer first', 'older success first', 'older failure first']) {
+  const pending = new Map()
+  const records = [{ id: 'acc_11111111', name: 'A' }, { id: 'acc_22222222', name: 'B' }]
+  const store = load('stores/accounts.ts', {
+    '@/api/accounts.ts': { accountsApi: {
+      activate(id) { const item = deferred(); pending.set(id, item); return item.promise },
+      async list() { return records },
+      async getActive() { throw new Error('synthetic status refresh failure') },
+    } },
+    './system.ts': { useSystemStore: () => ({ async fetchRotation() {}, rotation: null }) },
+  }).useAccountsStore()
+  const older = store.activateAccount(records[0].id)
+  const newer = store.activateAccount(records[1].id)
+  if (order === 'newer first') {
+    pending.get(records[1].id).resolve(records[1]); await newer
+    pending.get(records[0].id).resolve(records[0]); await older
+  } else {
+    if (order === 'older failure first') pending.get(records[0].id).reject(new Error('synthetic old activation failure'))
+    else pending.get(records[0].id).resolve(records[0])
+    await older
+    assert.equal(store.activatingId.value, records[1].id, 'older completion must not clear the pending current operation')
+    assert.equal(store.activeId.value, '', 'superseded activation must not publish its account')
+    pending.get(records[1].id).resolve(records[1]); await newer
+  }
+  assert.equal(store.activeId.value, records[1].id, 'latest activation survives old responses and a failed refresh')
+  assert.equal(store.activatingId.value, null)
+}
+checks.push('overlapping account activations keep the latest selection and pending state across stale success and failure')
+
 for (const [method, stateKey] of [['loadConfig', 'config'], ['loadBrowserStatus', 'browser']]) {
   const pending = []
   const h = setup('views/SettingsView.vue', {

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from aistudio_api.application.account_rotator import AccountRotator
 from aistudio_api.application.runtime import RuntimeState
@@ -93,10 +96,14 @@ def test_account_rotator_state_persistence(tmp_path, monkeypatch):
 def test_resolve_config_file_initializes_from_template_when_missing(
     tmp_path, monkeypatch
 ):
+    from aistudio_api import config
     from aistudio_api.config import resolve_config_file
 
     target_config = tmp_path / "data" / "config.yaml"
     assert not target_config.exists()
+    template = tmp_path / "synthetic-template.yaml"
+    template.write_text("api_keys: []\nmodel_defaults: {}\n", encoding="utf-8")
+    monkeypatch.setattr(config, "_TEMPLATE_CONFIG_PATHS", (template,))
 
     monkeypatch.setenv("AISTUDIO_CONFIG_FILE", str(target_config))
     resolved = resolve_config_file()
@@ -119,3 +126,87 @@ def test_resolve_config_file_never_overwrites_existing(tmp_path, monkeypatch):
 
     assert resolved == target_config
     assert target_config.read_text(encoding="utf-8") == "custom_key: preserved_value\n"
+
+
+@pytest.mark.parametrize("body_failure", [False, True])
+@pytest.mark.parametrize("close_failure", [False, True])
+async def test_lifespan_flushes_pending_statistics_before_discarding_state(
+    tmp_path, monkeypatch, body_failure, close_failure
+):
+    from aistudio_api.api import app as application
+    from aistudio_api.application import account_rotator
+    from aistudio_api.config import settings
+    from aistudio_api.infrastructure.account import account_store
+    from aistudio_api.infrastructure.browser import browser_engine
+
+    stats_path, rotator_path = tmp_path / "stats.json", tmp_path / "rotation.json"
+    monkeypatch.setenv("AISTUDIO_STATS_FILE", str(stats_path))
+    monkeypatch.setenv("AISTUDIO_ROTATOR_STATE_FILE", str(rotator_path))
+    monkeypatch.setattr(settings, "persist_stats", True)
+    monkeypatch.setattr(settings, "persist_rotator", True)
+    monkeypatch.setattr(settings, "browser_idle_timeout", 0)
+    state = RuntimeState()
+    store = MagicMock(spec=AccountStore)
+    store.list_accounts.return_value = [SimpleNamespace(id="acc_12345678")]
+    rotator = AccountRotator(store)
+    client = SimpleNamespace(close=AsyncMock(
+        side_effect=RuntimeError("synthetic close failure") if close_failure else None,
+    ))
+    monkeypatch.setattr(application, "runtime_state", state)
+    monkeypatch.setattr(application, "AIStudioClient", lambda **_kwargs: client)
+    monkeypatch.setattr(account_store, "AccountStore", lambda: store)
+    monkeypatch.setattr(account_rotator, "init_rotator", lambda _store: rotator)
+    monkeypatch.setattr(browser_engine, "install_process_cleanup_handlers", lambda: None)
+    pending = []
+    try:
+        async with application.lifespan(application.app):
+            state.record("gemini-synthetic", "success", {"total_tokens": 1})
+            state.record("gemini-synthetic", "success", {"total_tokens": 2})
+            rotator.record_success("acc_12345678", "gemini-synthetic")
+            rotator.record_success("acc_12345678", "gemini-synthetic")
+            pending = [state._save_task, rotator._save_task]
+            assert all(task is not None and not task.done() for task in pending)
+            if body_failure:
+                raise RuntimeError("synthetic lifespan body failure")
+    except RuntimeError as exc:
+        assert body_failure and str(exc) == "synthetic lifespan body failure"
+    try:
+        assert all(task.done() for task in pending)
+        assert state._save_task is rotator._save_task is None
+        assert state.client is None and state.rotator is None
+        saved = json.loads(stats_path.read_text())
+        assert saved["gemini-synthetic"]["requests"] == 2
+        assert saved["gemini-synthetic"]["total_tokens"] == 3
+        assert json.loads(rotator_path.read_text())["acc_12345678"]["requests"] == 2
+    finally:
+        # Even a red run must not leave timers modifying another test's files.
+        for task in pending:
+            if task is not None and not task.done():
+                task.cancel()
+        import asyncio
+
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
+async def test_shutdown_attempts_both_saves_and_releases_references_if_one_fails(monkeypatch):
+    from aistudio_api.api import app as application
+    from aistudio_api.application import account_rotator
+    from aistudio_api.config import settings
+    from aistudio_api.infrastructure.account import account_store
+    from aistudio_api.infrastructure.browser import browser_engine
+
+    state = SimpleNamespace(browser_port=19222, flush_stats=AsyncMock(side_effect=OSError("synthetic disk failure")))
+    rotator = SimpleNamespace(flush_state=AsyncMock())
+    client = SimpleNamespace(close=AsyncMock())
+    monkeypatch.setattr(application, "runtime_state", state)
+    monkeypatch.setattr(application, "AIStudioClient", lambda **_kwargs: client)
+    monkeypatch.setattr(account_store, "AccountStore", lambda: SimpleNamespace(list_accounts=list))
+    monkeypatch.setattr(account_rotator, "init_rotator", lambda _store: rotator)
+    monkeypatch.setattr(browser_engine, "install_process_cleanup_handlers", lambda: None)
+    monkeypatch.setattr(settings, "browser_idle_timeout", 0)
+    with pytest.raises(OSError, match="synthetic disk failure"):
+        async with application.lifespan(application.app):
+            pass
+    client.close.assert_awaited_once()
+    rotator.flush_state.assert_awaited_once()
+    assert state.client is state.account_service is state.rotator is None
