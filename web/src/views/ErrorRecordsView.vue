@@ -102,6 +102,12 @@ const preparationMilestones = [
   ['botguard_template_ready', '模板已捕获'], ['session_checkpoint_done', '会话检查点完成'],
 ] as const
 
+const preparationReasons: Record<string, string> = {
+  warm_reuse: '复用热会话', service_start: '服务启动后的首次准备', idle_recycle: '空闲回收后重新准备',
+  account_change: '切换账号', credentials_change: '账号凭据已更新', forced_refresh: '主动刷新会话',
+  browser_recovery: '浏览器重新准备', page_recovery: '账号页面重新准备', session_not_ready: '会话尚未就绪',
+}
+
 function recordedPreparation(record: ResponseDiagnostic) {
   return preparationMilestones.filter(([key]) => record.timings_ms?.[key] != null)
 }
@@ -280,6 +286,15 @@ onUnmounted(errorsStore.cancel)
               <dd class="mt-1 text-gray-700">
                 {{ stage(record, 'account_preparation_started', 'account_ready') }} /
                 {{ stage(record, 'transport_dispatched', 'upstream_first_byte') }}
+              </dd>
+            </div>
+            <div>
+              <dt class="text-gray-400">
+                会话准备原因 / 空闲回收阈值
+              </dt>
+              <dd class="mt-1 text-gray-700">
+                {{ preparationReasons[record.session_preparation_reason ?? ''] ?? '未记录' }} /
+                {{ record.browser_idle_timeout_s == null ? '未记录' : record.browser_idle_timeout_s === 0 ? '不自动回收' : `${record.browser_idle_timeout_s} 秒` }}
               </dd>
             </div>
             <div>

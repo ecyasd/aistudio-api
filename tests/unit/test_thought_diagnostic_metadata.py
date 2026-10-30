@@ -176,6 +176,22 @@ def test_continuation_skip_reasons_are_bounded_visible_metadata(diagnostic_store
     diagnostics.logger.warning.assert_called_once()
 
 
+def test_session_preparation_keeps_first_decision_and_rejects_private_reason(diagnostic_store):
+    with trace():
+        diagnostics.note_session_preparation("SYNTHETIC_PRIVATE_REASON", 5)
+        diagnostics.note_session_preparation("service_start", 1800)
+        diagnostics.note_session_preparation("warm_reuse", 5)
+        diagnostics.finish_response_diagnostics("success", 200)
+    item = diagnostic_store.list_records()["items"][0]
+    assert item["session_preparation_reason"] == "service_start"
+    assert item["browser_idle_timeout_s"] == 1800
+    assert "SYNTHETIC_PRIVATE_REASON" not in json.dumps(item)
+    filtered = diagnostics._normalize({**item, "session_preparation_reason": "SYNTHETIC_PRIVATE_REASON",
+                                       "browser_idle_timeout_s": True})
+    assert filtered["session_preparation_reason"] is None
+    assert filtered["browser_idle_timeout_s"] is None
+
+
 @pytest.mark.parametrize("tokens,expected", [(None, None), (True, None), (-1, None), (0, 0), (80_000, 80_000)])
 def test_prompt_usage_keeps_unknown_distinct_from_zero(diagnostic_store, tokens, expected):
     with trace():

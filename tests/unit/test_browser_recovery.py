@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -21,6 +22,7 @@ from aistudio_api.infrastructure.gateway.session_state import (
     SessionContext,
     SessionState,
 )
+from aistudio_api.infrastructure.utils import error_records, response_diagnostics
 
 
 def context(target_id: str = "synthetic", auth_file: str | None = None):
@@ -35,6 +37,67 @@ def session(monkeypatch):
     monkeypatch.setattr(settings, "auth_file", None)
     monkeypatch.setattr(settings, "browser_idle_timeout", 5)
     return BrowserSession(19222)
+
+
+@contextmanager
+def request_diagnostics(monkeypatch):
+    store = response_diagnostics.ResponseDiagnosticStore()
+    monkeypatch.setattr(response_diagnostics, "get_response_diagnostic_store", lambda: store)
+    token = error_records.bind_request_context()
+    response_diagnostics.initialize_response_diagnostics(stream=True)
+    response_diagnostics.configure_generation(model="gemini-synthetic", auto_continue=False)
+    try:
+        yield store
+    finally:
+        response_diagnostics.finish_response_diagnostics("success", 200)
+        error_records.reset_request_context(token)
+
+
+async def test_consecutive_requests_reuse_ready_context_without_transition(session, monkeypatch):
+    current = context()
+    session.set_ready_context(current)
+    session.transition_to_account = AsyncMock(side_effect=AssertionError("must reuse"))
+    with request_diagnostics(monkeypatch) as store:
+        assert await session.ensure_ready() is current
+        async with session.request_scope() as acquired:
+            assert acquired is current
+        assert await session.ensure_ready() is current
+    session.transition_to_account.assert_not_awaited()
+    assert current.in_flight == 0
+    item = store.list_records()["items"][0]
+    assert item["session_preparation_reason"] == "warm_reuse"
+    assert item["browser_idle_timeout_s"] == 5
+
+
+async def test_idle_recycle_waits_for_threshold_and_preserves_reason_after_preparation(session, monkeypatch):
+    from aistudio_api.infrastructure.gateway import session as module
+
+    clock = [104.0]
+    monkeypatch.setattr(module.time, "time", lambda: clock[0])
+    session._last_activity_time = 100.0
+    session._proc = MagicMock()
+    assert await session.check_idle_timeout() is False
+    clock[0] = 106.0
+    assert await session.check_idle_timeout() is True
+    assert session._last_stop_reason == "idle"
+
+    page = context().page
+    client = SimpleNamespace(create_new_page=AsyncMock(return_value=page))
+
+    async def launch():
+        session._proc = MagicMock()
+        session._cdp_client = client
+
+    monkeypatch.setattr(session, "_ensure_browser_cdp", launch)
+    monkeypatch.setattr(session, "persist_context_cookies", AsyncMock())
+    monkeypatch.setattr(module, "navigate_to_aistudio", AsyncMock())
+    monkeypatch.setattr(module, "bootstrap_botguard_and_template", AsyncMock(return_value=("synthetic-key", {"body": "[]"})))
+    with request_diagnostics(monkeypatch) as store:
+        prepared = await session.transition_to_account(None)
+        assert await session.ensure_ready() is prepared
+    item = store.list_records()["items"][0]
+    assert item["session_preparation_reason"] == "idle_recycle"
+    assert item["browser_idle_timeout_s"] == 5
 
 
 @pytest.mark.asyncio
