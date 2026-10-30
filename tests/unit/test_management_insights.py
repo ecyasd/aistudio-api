@@ -23,6 +23,7 @@ from aistudio_api.infrastructure.utils import (
 def management(tmp_path, monkeypatch):
     config = tmp_path / "config.yaml"
     config.write_text("api_keys: [synthetic-private-key]\nmodel_defaults:\n  profiles: []\n", encoding="utf-8")
+    monkeypatch.setenv("AISTUDIO_CONFIG_FILE", str(config))
     monkeypatch.setattr(settings, "web_password", "synthetic-manager")
     monkeypatch.setattr(rules, "_resolve_config_path", lambda _path: config)
     monkeypatch.setattr(routes_system, "_resolve_config_path", lambda _path: config)
@@ -111,6 +112,45 @@ async def test_preview_requires_management_auth(management):
     async with client_for(app, authenticated=False) as client:
         response = await client.post("/config/model-preview", json={"model": "gemini-test", "yaml_content": "{}"})
     assert response.status_code == 401
+
+
+@pytest.mark.parametrize("missing", [False, True])
+@pytest.mark.parametrize("trailing_slash", [False, True])
+async def test_preview_through_main_http_stack_stays_read_only(
+    tmp_path, monkeypatch, missing, trailing_slash
+):
+    from aistudio_api import config as configuration
+    from aistudio_api.api import app as application
+    from aistudio_api.infrastructure.utils import logger
+
+    path = tmp_path / "preview" / "config.yaml"
+    template = tmp_path / "synthetic-template.yaml"
+    contents = "api_keys: [synthetic-private-key]\nmodel_defaults:\n  profiles: []\n"
+    template.write_text(contents, encoding="utf-8")
+    if not missing:
+        path.parent.mkdir()
+        path.write_text(contents, encoding="utf-8")
+    monkeypatch.setenv("AISTUDIO_CONFIG_FILE", str(path))
+    monkeypatch.setattr(configuration, "_TEMPLATE_CONFIG_PATHS", (template,))
+    monkeypatch.setattr(settings, "web_password", "synthetic-manager")
+    monkeypatch.setattr(settings, "dump_requests", False)
+    monkeypatch.setattr(logger, "_dump_requests_override", None)
+    monkeypatch.setattr(logger, "is_debug_env_active", lambda: False)
+    rules.invalidate_config_cache()
+    try:
+        async with client_for(application.app) as client:
+            response = await client.post(
+                "/config/model-preview" + ("/" if trailing_slash else ""),
+                json={"model": "gemini-synthetic"}, follow_redirects=True,
+            )
+        assert response.status_code == 200
+        assert "synthetic-private-key" not in response.text
+        assert path.exists() is not missing
+        if not missing:
+            assert path.read_text(encoding="utf-8") == contents
+        assert not rules._CONFIG_CACHE and not rules._API_KEYS_CACHE
+    finally:
+        rules.invalidate_config_cache()
 
 
 async def test_context_filters_run_before_pagination_and_include_cross_account_request(management, monkeypatch):

@@ -972,3 +972,71 @@ async def test_nonstream_invalid_request_does_not_bootstrap(sse_env, request_bod
     generation_execution.ensure_active_account.assert_not_awaited()
     sse_env.client.generate_content.assert_not_awaited()
     sse_env.service.runtime_state.record.assert_not_called()
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_internal_generation_failure_is_generic_for_both_modes(
+    sse_env, request_body, caplog, stream
+):
+    from fastapi import HTTPException
+
+    failure = RuntimeError("SYNTHETIC_PRIVATE_EXCEPTION")
+    sse_env.client.generate_content.side_effect = failure
+
+    async def upstream(**_kwargs):
+        raise failure
+        yield  # pragma: no cover
+
+    sse_env.client.stream_generate_content.side_effect = upstream
+    if stream:
+        response = await sse_env.service.handle_gemini_generate_content(
+            "gemini-test", request_body, sse_env.client, stream=True,
+        )
+        chunks = [chunk async for chunk in response.body_iterator]
+        payload = json.loads(chunks[-1][6:])["error"]
+    else:
+        with pytest.raises(HTTPException) as caught:
+            await sse_env.service.handle_gemini_generate_content(
+                "gemini-test", request_body, sse_env.client, stream=False,
+            )
+        code, message, status = sse_env.service.classify_gemini_error_payload(caught.value)
+        payload = {"code": code, "message": message, "status": status}
+    assert payload == {"code": 500, "message": "Internal server error", "status": "INTERNAL"}
+    assert "SYNTHETIC_PRIVATE_EXCEPTION" not in caplog.text
+    assert not sse_env.leased and not _live_sse_tasks()
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("kind, status", [("transport", 503), ("timeout", 504)])
+async def test_terminal_failure_never_replays_after_credentials_change(
+    sse_env, request_body, stream, kind, status
+):
+    from fastapi import HTTPException
+
+    from aistudio_api.domain.errors import BrowserTransportError
+
+    sse_env.accounts[0].auth_generation = "replacement-generation"
+    error = BrowserTransportError("synthetic lost channel") if kind == "transport" else TimeoutError()
+    sse_env.client.generate_content.side_effect = error
+
+    async def upstream(**_kwargs):
+        raise error
+        yield  # pragma: no cover
+
+    sse_env.client.stream_generate_content.side_effect = upstream
+    if stream:
+        response = await sse_env.service.handle_gemini_generate_content(
+            "gemini-test", request_body, sse_env.client, stream=True,
+        )
+        chunks = [chunk async for chunk in response.body_iterator]
+        assert json.loads(chunks[-1][6:])["error"]["code"] == status
+        assert sse_env.client.stream_generate_content.call_count == 1
+    else:
+        with pytest.raises(HTTPException) as caught:
+            await sse_env.service.handle_gemini_generate_content(
+                "gemini-test", request_body, sse_env.client, stream=False,
+            )
+        assert caught.value.status_code == status
+        assert sse_env.client.generate_content.await_count == 1
+    sse_env.service.try_switch_account.assert_not_awaited()
+    assert not sse_env.leased

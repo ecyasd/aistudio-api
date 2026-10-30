@@ -51,14 +51,16 @@ async def test_public_health_and_login_discovery_with_missing_password(monkeypat
 async def test_default_lifespan_never_starts_browser_warmup(monkeypatch):
     application = importlib.import_module("aistudio_api.api.app")
     client = SimpleNamespace(warmup=AsyncMock(), close=AsyncMock())
+    rotator = SimpleNamespace(flush_state=AsyncMock())
     store = SimpleNamespace(list_accounts=list)
     monkeypatch.setattr(application, "AIStudioClient", lambda **kwargs: client)
     monkeypatch.setattr("aistudio_api.infrastructure.account.account_store.AccountStore", lambda: store)
     monkeypatch.setattr("aistudio_api.application.account_service.AccountService", MagicMock())
-    monkeypatch.setattr("aistudio_api.application.account_rotator.init_rotator", lambda value: None)
+    monkeypatch.setattr("aistudio_api.application.account_rotator.init_rotator", lambda value: rotator)
     monkeypatch.setattr("aistudio_api.infrastructure.browser.browser_engine.install_process_cleanup_handlers", lambda: None)
     monkeypatch.setattr(settings, "browser_idle_timeout", 0)
     async with application.lifespan(app):
         await asyncio.sleep(0)
     client.warmup.assert_not_awaited()
     client.close.assert_awaited_once()
+    rotator.flush_state.assert_awaited_once()

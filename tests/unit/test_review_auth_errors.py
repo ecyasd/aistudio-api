@@ -18,7 +18,7 @@ from aistudio_api.infrastructure.utils.common import atomic_write_json
     (SessionExpiredError("synthetic-upstream-secret"), "upstream_auth_expired"),
     (AuthError("synthetic-upstream-secret"), "upstream_auth_failed"),
 ])
-async def test_upstream_auth_is_503_for_http_and_sse(monkeypatch, error, category):
+async def test_upstream_auth_is_503_for_http_and_sse(monkeypatch, caplog, error, category):
     monkeypatch.setattr(service, "record_rotator_event", MagicMock())
     monkeypatch.setattr(generation_execution, "record_rotator_event", service.record_rotator_event)
     with pytest.raises(HTTPException) as caught:
@@ -33,6 +33,7 @@ async def test_upstream_auth_is_503_for_http_and_sse(monkeypatch, error, categor
     assert payload["type"] == category
     assert "keep your API key" in payload["message"]
     assert "synthetic-upstream-secret" not in payload["message"]
+    assert "synthetic-upstream-secret" not in caplog.text
 
 
 def test_caller_auth_error_stays_401():

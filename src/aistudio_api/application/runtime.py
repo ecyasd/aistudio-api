@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections import defaultdict
+from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
@@ -53,7 +55,7 @@ class RuntimeState:
         default_factory=lambda: defaultdict(ModelStatsItem)
     )
     _last_saved_time: float = field(default=0.0, repr=False)
-    _save_task: object | None = field(default=None, repr=False)
+    _save_task: asyncio.Task[None] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self.load_stats()
@@ -126,6 +128,17 @@ class RuntimeState:
             self.save_stats()
 
         self._save_task = loop.create_task(_delayed())
+
+    async def flush_stats(self) -> None:
+        """Retire the pending timer, then persist the final complete snapshot."""
+        task, self._save_task = self._save_task, None
+        try:
+            if task is not None:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+        finally:
+            self.save_stats()
 
     def record(
         self,

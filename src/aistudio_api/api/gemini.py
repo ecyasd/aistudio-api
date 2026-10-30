@@ -197,9 +197,9 @@ def classify_gemini_error_payload(exc: Exception) -> tuple[int, str, str]:
     if isinstance(exc, TimeoutError):
         return 504, "Upstream preparation or generation timed out", "DEADLINE_EXCEEDED"
     if isinstance(exc, AistudioError):
-        return 500, str(exc), "INTERNAL"
+        return 500, "Internal server error", "INTERNAL"
 
-    return 500, str(exc), "INTERNAL"
+    return 500, "Internal server error", "INTERNAL"
 
 
 async def handle_attempt_exception(
@@ -229,7 +229,11 @@ async def handle_attempt_exception(
         # The owner replaced these credentials while this request held its old
         # lease. Retrying before output may use the new generation; failures
         # after output still terminate, without quarantining the replacement.
-        if not has_yielded_data and attempt < MAX_RETRIES - 1:
+        if (
+            not has_yielded_data
+            and attempt < MAX_RETRIES - 1
+            and not isinstance(exc, (TimeoutError, BrowserTransportError))
+        ):
             record_failure(exc, source="gemini", operation=operation,
                            model=normalized_model or model_path, account_id=account_id,
                            attempt=attempt + 1, retrying=True)
@@ -369,7 +373,7 @@ async def _handle_attempt_exception(
         ) from exc
 
     if isinstance(exc, SessionExpiredError):
-        logger.warning("账号会话失效，已被重定向到登录页: %s", exc)
+        logger.warning("账号会话失效，已被重定向到登录页: type=%s", type(exc).__name__)
         client.clear_templates()
         record_rotator_event("session_expired", model=target_model, account_id=account_id)
         if can_retry and await try_switch_account(
@@ -393,7 +397,7 @@ async def _handle_attempt_exception(
         ) from exc
 
     if isinstance(exc, AuthError):
-        logger.warning("账号 403 权限拒绝: %s", exc)
+        logger.warning("账号 403 权限拒绝: type=%s", type(exc).__name__)
         client.clear_templates()
         if can_retry:
             # The switch lock must decide whether this 403 belongs to an older
@@ -443,10 +447,10 @@ async def _handle_attempt_exception(
     # 此报错为上游端点偶发抖动，在未产生输出时当场立即重试（严禁切号以防浪费配额，其他 404 严格按原样报错抛出）
     if is_transient_rpc_error(exc) and can_retry:
         logger.warning(
-            "检测到 Google 上游偶发 404 (Ambiguous RPC method)，当场立即重试 (%d/%d): %s",
+            "检测到 Google 上游偶发 404 (Ambiguous RPC method)，当场立即重试 (%d/%d): type=%s",
             attempt + 1,
             MAX_RETRIES,
-            clean_upstream_error_message(str(exc)),
+            type(exc).__name__,
         )
         client.clear_templates()
         return True
@@ -467,10 +471,10 @@ async def _handle_attempt_exception(
 
     if is_browser_session_hang_error(exc):
         logger.warning(
-            "模板或 BotGuard 捕获超时 (%d/%d): %s，切换账号重试",
+            "模板或 BotGuard 捕获超时 (%d/%d): type=%s，切换账号重试",
             attempt + 1,
             MAX_RETRIES,
-            exc,
+            type(exc).__name__,
         )
         client.clear_templates()
         if can_retry and await try_switch_account(
@@ -496,7 +500,7 @@ async def _handle_attempt_exception(
             if status_code == 404
             else "upstream_error"
         )
-        logger.warning("Gemini 上游请求错误 (%d): %s", status_code, clean_msg)
+        logger.warning("Gemini 上游请求错误 (%d): type=%s", status_code, type(exc).__name__)
         raise HTTPException(
             status_code, detail={"message": clean_msg, "type": error_type}
         ) from exc
@@ -504,9 +508,9 @@ async def _handle_attempt_exception(
     if isinstance(exc, AistudioError):
         runtime_state.record(target_model, "errors")
         record_rotator_event("error", model=target_model, account_id=account_id)
-        logger.warning("Gemini 服务端异常: %s", exc)
+        logger.warning("Gemini 服务端异常: type=%s", type(exc).__name__)
         raise HTTPException(
-            500, detail={"message": str(exc), "type": "server_error"}
+            500, detail={"message": "Internal server error", "type": "server_error"}
         ) from exc
 
     runtime_state.record(target_model, "errors")
@@ -520,7 +524,7 @@ async def _handle_attempt_exception(
     ]
     logger.error("Gemini 服务器异常: type=%s frames=%s", type(exc).__name__, frames)
     raise HTTPException(
-        500, detail={"message": str(exc), "type": "server_error"}
+        500, detail={"message": "Internal server error", "type": "server_error"}
     ) from exc
 
 

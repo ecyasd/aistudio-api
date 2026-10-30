@@ -273,6 +273,13 @@ class XHRStreamTransport:
                 raise BrowserTransportError("CDP stream event delivery stalled") from None
             phase = "page_unresponsive"
             raise BrowserTransportError("CDP stream state probe timed out") from None
+        except BrowserTransportError:
+            raise
+        except Exception as exc:
+            # A probe/registration/resend failure belongs to the already
+            # dispatched stream. Do not let native CDP errors enter the broad
+            # session-hang policy and dispatch a new model request.
+            raise BrowserTransportError("CDP stream recovery failed") from exc
         finally:
             note_transport_wait(phase, int(idle_s * 1000), repair_attempted=repaired)
 
@@ -325,6 +332,8 @@ class XHRStreamTransport:
                     }
                     else "invalid browser response"
                 )
+                if safe_reason == "timeout":
+                    raise TimeoutError("replay failed: timeout")
                 raise RuntimeError(f"replay failed: {safe_reason}")
             raw_body = raw_text.encode("utf-8")
             if len(raw_body) > MAX_RESPONSE_BYTES:

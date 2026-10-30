@@ -34,6 +34,95 @@ def make_synthetic_page():
     return page, listeners
 
 
+@pytest.mark.parametrize("stage", ["probe", "binding", "resend"])
+@pytest.mark.parametrize("after_body", [False, True])
+async def test_native_stream_recovery_failures_terminate_without_replay(
+    monkeypatch, stage, after_body
+):
+    from fastapi import HTTPException
+
+    from aistudio_api.api import gemini
+    from aistudio_api.infrastructure.gateway import transport as module
+
+    monkeypatch.setattr(module, "STREAM_PROBE_INTERVAL_S", 0.005)
+    page, listeners = make_synthetic_page()
+    dispatched = []
+    error = RuntimeError("CDP connection closed: synthetic-private-detail")
+
+    async def add_binding(name):
+        if name == module.STREAM_RECOVERY_BINDING and stage == "binding":
+            raise error
+
+    async def evaluate(script, args=None, **_kwargs):
+        if script == STREAMING_INIT_JS:
+            dispatched.append(args["rid"])
+            if after_body:
+                for event in (
+                    {"type": "status", "status": 200, "seq": 1},
+                    {"type": "chunk", "text": "published", "seq": 2},
+                ):
+                    listeners[0](json.dumps({"rid": args["rid"], **event}))
+            return {"started": True}
+        if script == STREAM_STATE_JS:
+            if stage == "probe":
+                raise error
+            return {"phase": "awaiting_ack", "seq": 3 if after_body else 1}
+        if script == STREAM_RESEND_JS:
+            raise error
+        return None
+
+    page.add_binding.side_effect = add_binding
+    page.evaluate = AsyncMock(side_effect=evaluate)
+    transport = XHRStreamTransport()
+    stream = transport.send_streaming_request(
+        page, url="https://synthetic.invalid", headers={}, body="[]", timeout_ms=500
+    )
+    if after_body:
+        assert await anext(stream) == ("status", 200)
+        assert await anext(stream) == ("chunk", b"published")
+    with pytest.raises(BrowserTransportError) as caught:
+        await anext(stream)
+    client = MagicMock()
+    switch = AsyncMock(return_value=True)
+    monkeypatch.setattr(gemini, "try_switch_account", switch)
+    with pytest.raises(HTTPException) as terminal:
+        await gemini._handle_attempt_exception(
+            caught.value, attempt=0, model_path="gemini-test", normalized_model="gemini-test",
+            client=client, has_yielded_data=after_body,
+        )
+    assert terminal.value.status_code == 503
+    switch.assert_not_awaited()
+    assert len(dispatched) == 1
+    assert transport.in_flight_count == 0 and transport._buffered_bytes == 0
+    assert not transport._cleanup_tasks and not transport._received_seq
+
+
+async def test_native_nonstream_browser_timeout_keeps_504_and_never_switches(monkeypatch):
+    from fastapi import HTTPException
+
+    from aistudio_api.api import gemini
+
+    page, _ = make_synthetic_page()
+    page.evaluate = AsyncMock(return_value={"status": 0, "body": "timeout"})
+    transport = XHRStreamTransport()
+    with pytest.raises(TimeoutError) as caught:
+        await transport.send_hooked_request(
+            page, url="https://synthetic.invalid", headers={}, body="[]", timeout_ms=500
+        )
+    switch = AsyncMock(return_value=True)
+    monkeypatch.setattr(gemini, "try_switch_account", switch)
+    with pytest.raises(HTTPException) as terminal:
+        await gemini._handle_attempt_exception(
+            caught.value, attempt=0, model_path="gemini-test", normalized_model="gemini-test",
+            client=MagicMock(),
+        )
+    assert terminal.value.status_code == 504
+    switch.assert_not_awaited()
+    assert sum(call.args[0] == HOOKED_REQUEST_JS for call in page.evaluate.await_args_list) == 1
+    assert any(call.args[0] == HOOKED_CLEANUP_JS for call in page.evaluate.await_args_list)
+    assert not transport._cleanup_tasks
+
+
 async def test_stream_binding_registration_failure_never_dispatches_fetch():
     page, _ = make_synthetic_page()
     page.add_binding.side_effect = RuntimeError("CDP binding registration failed")

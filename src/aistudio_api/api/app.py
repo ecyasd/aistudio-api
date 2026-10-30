@@ -6,7 +6,7 @@ import argparse
 import asyncio
 import secrets
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -102,18 +102,28 @@ async def lifespan(_app: FastAPI):
 
         idle_task = asyncio.create_task(_idle_monitor())
 
-    yield
-    logger.info("服务正在关闭")
-    if idle_task and not idle_task.done():
-        idle_task.cancel()
-    if client:
+    try:
+        yield
+    finally:
+        logger.info("服务正在关闭")
+        if idle_task:
+            idle_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await idle_task
         try:
             await client.close()
         except Exception as e:
-            logger.debug("关闭客户端失败: %s", e)
-    runtime_state.client = None
-    runtime_state.account_service = None
-    runtime_state.rotator = None
+            logger.debug("关闭客户端失败: type=%s", type(e).__name__)
+        finally:
+            try:
+                await runtime_state.flush_stats()
+            finally:
+                try:
+                    await rotator.flush_state()
+                finally:
+                    runtime_state.client = None
+                    runtime_state.account_service = None
+                    runtime_state.rotator = None
 
 
 app = FastAPI(title="AI Studio API", lifespan=lifespan)
@@ -172,7 +182,11 @@ async def logging_and_dump_middleware(request, call_next):
     operation = request_operation(request.scope) or "http_request"
 
     is_static = path.startswith(("/static", "/assets")) or path in ("/favicon.ico",)
-    dump_enabled = is_dump_requests_enabled() and not is_static
+    # A preview must not initialize/read through the runtime cache just to
+    # decide whether to dump it. Keep unsaved configuration drafts out of
+    # payload dumps as well, including the trailing-slash redirect request.
+    is_model_preview = path.rstrip("/") == "/config/model-preview"
+    dump_enabled = not is_model_preview and is_dump_requests_enabled() and not is_static
 
     req_id = ""
     body_text = None

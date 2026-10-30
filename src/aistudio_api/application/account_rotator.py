@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -374,7 +375,7 @@ class AccountRotator:
         self._stats: dict[str, AccountStats] = {}
         self._lock = asyncio.Lock()
         self._last_saved_time: float = 0.0
-        self._save_task: asyncio.Task | None = None
+        self._save_task: asyncio.Task[None] | None = None
         self.load_state()
         self.cleanup_ghost_accounts()
         for account in self._store.list_accounts():
@@ -437,6 +438,17 @@ class AccountRotator:
             self.save_state()
 
         self._save_task = loop.create_task(_delayed())
+
+    async def flush_state(self) -> None:
+        """Retire the pending timer before saving final account counters."""
+        task, self._save_task = self._save_task, None
+        try:
+            if task is not None:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+        finally:
+            self.save_state()
 
     def get_all_stats(self) -> dict[str, dict[str, object]]:
         """获取所有账号的运行与配额状态。"""
