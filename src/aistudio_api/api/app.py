@@ -182,7 +182,11 @@ async def logging_and_dump_middleware(request, call_next):
     operation = request_operation(request.scope) or "http_request"
 
     is_static = path.startswith(("/static", "/assets")) or path in ("/favicon.ico",)
-    dump_enabled = is_dump_requests_enabled() and not is_static
+    # A preview must not initialize/read through the runtime cache just to
+    # decide whether to dump it. Keep unsaved configuration drafts out of
+    # payload dumps as well, including the trailing-slash redirect request.
+    is_model_preview = path.rstrip("/") == "/config/model-preview"
+    dump_enabled = not is_model_preview and is_dump_requests_enabled() and not is_static
 
     req_id = ""
     body_text = None
