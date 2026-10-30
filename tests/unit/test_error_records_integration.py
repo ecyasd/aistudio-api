@@ -18,7 +18,11 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
 
 from aistudio_api.api.error_middleware import ErrorRecordsMiddleware, request_operation
-from aistudio_api.application import generation as generation_execution
+from aistudio_api.application import (
+    generation as generation_execution,
+    generation_recovery as recovery,
+)
+from aistudio_api.application.generation_errors import GenerationFailure
 from aistudio_api.infrastructure.utils import error_records as records
 
 
@@ -49,6 +53,7 @@ def _application():
 
     app = FastAPI()
     app.add_exception_handler(HTTPException, http_exception_handler)
+    app.add_exception_handler(GenerationFailure, http_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.add_middleware(ErrorRecordsMiddleware)
     return app
@@ -182,11 +187,11 @@ def synthetic_generation(monkeypatch):
         stream_generate_content=MagicMock(side_effect=AssertionError("No real model calls")),
     )
     monkeypatch.setattr(generation_execution, "ensure_active_account", AsyncMock())
-    monkeypatch.setattr(service, "try_switch_account", AsyncMock(return_value=False))
+    monkeypatch.setattr(recovery, "try_switch_account", AsyncMock(return_value=False))
     monkeypatch.setattr(generation_execution, "account_id_for_auth_file", lambda value: "acc_1234abcd")
-    monkeypatch.setattr(service, "record_rotator_event", MagicMock())
-    monkeypatch.setattr(generation_execution, "record_rotator_event", service.record_rotator_event)
-    monkeypatch.setattr(service.runtime_state, "record", MagicMock())
+    monkeypatch.setattr(recovery, "record_rotator_event", MagicMock())
+    monkeypatch.setattr(generation_execution, "record_rotator_event", recovery.record_rotator_event)
+    monkeypatch.setattr(recovery.runtime_state, "record", MagicMock())
     request = GeminiGenerateContentRequest.model_validate(
         {"contents": [{"role": "user", "parts": [{"text": "synthetic input"}]}]}
     )
@@ -266,12 +271,12 @@ async def test_retry_recovered_response_updates_the_original_attempt(
         InvalidRequestTemplateError,
     )
 
-    service, client, _ = synthetic_generation
+    _service, client, _ = synthetic_generation
     app = _application()
 
     @app.post("/v1beta/models/gemini-test:generateContent")
     async def endpoint():
-        retry = await service.handle_attempt_exception(
+        retry = await recovery._recover_failure(
             InvalidRequestTemplateError("SYNTHETIC_TEMPLATE_SECRET"),
             attempt=0, model_path="gemini-test", normalized_model="gemini-test",
             client=client, account_id="acc_1234abcd",
@@ -296,12 +301,12 @@ async def test_cold_start_failure_keeps_the_account_that_failed_preparation(
     from aistudio_api.application.account_orchestrator import AccountPreparationError
     from aistudio_api.domain.errors import SessionExpiredError
 
-    service, client, _ = synthetic_generation
+    _service, client, _ = synthetic_generation
     app = _application()
 
     @app.post("/v1beta/models/gemini-test:generateContent")
     async def endpoint():
-        await service.handle_attempt_exception(
+        await recovery._recover_failure(
             AccountPreparationError("acc_abcd1234", SessionExpiredError("SYNTHETIC_COOKIE_SECRET")),
             attempt=0, model_path="gemini-test", normalized_model="gemini-test",
             client=client, account_id="acc_1234abcd",
@@ -329,12 +334,12 @@ async def test_identity_preparation_failure_keeps_target_account_and_one_typed_r
     )
 
     error_type = AccountIdentityUnavailableError if unavailable else AccountIdentityMismatchError
-    service, client, _ = synthetic_generation
+    _service, client, _ = synthetic_generation
     app = _application()
 
     @app.post("/v1beta/gemini-test:generateContent")
     async def endpoint():
-        await service.handle_attempt_exception(
+        await recovery._recover_failure(
             AccountPreparationError("acc_abcd1234", error_type("SYNTHETIC_IDENTITY_SECRET")),
             attempt=0, model_path="gemini-test", normalized_model="gemini-test",
             client=client, account_id="acc_1234abcd",

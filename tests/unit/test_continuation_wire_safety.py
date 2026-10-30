@@ -12,7 +12,10 @@ from fastapi import HTTPException
 
 from aistudio_api.api import gemini as api
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
-from aistudio_api.application import generation as generation_execution
+from aistudio_api.application import (
+    generation as generation_execution,
+    generation_recovery as recovery,
+)
 from aistudio_api.infrastructure.gateway.capture import CapturedRequest
 from aistudio_api.infrastructure.gateway.streaming import StreamingGateway
 from aistudio_api.infrastructure.gateway.wire_parser import (
@@ -99,15 +102,15 @@ def wire_env(monkeypatch):
             released.append(context.context_id)
 
     monkeypatch.setattr(generation_execution, "ensure_active_account", AsyncMock())
-    monkeypatch.setattr(api, "try_switch_account", AsyncMock(return_value=False))
-    monkeypatch.setattr(api, "record_rotator_event", MagicMock())
-    monkeypatch.setattr(generation_execution, "record_rotator_event", api.record_rotator_event)
-    monkeypatch.setattr(api.runtime_state, "record", MagicMock())
-    monkeypatch.setattr(api.runtime_state, "account_service", SimpleNamespace(
+    monkeypatch.setattr(recovery, "try_switch_account", AsyncMock(return_value=False))
+    monkeypatch.setattr(recovery, "record_rotator_event", MagicMock())
+    monkeypatch.setattr(generation_execution, "record_rotator_event", recovery.record_rotator_event)
+    monkeypatch.setattr(recovery.runtime_state, "record", MagicMock())
+    monkeypatch.setattr(recovery.runtime_state, "account_service", SimpleNamespace(
         list_accounts=lambda: [account], get_active_account=lambda: account,
         get_account_auth_path=lambda _: context.auth_file,
     ))
-    monkeypatch.setattr(api.runtime_state, "rotator", SimpleNamespace(
+    monkeypatch.setattr(recovery.runtime_state, "rotator", SimpleNamespace(
         get_account_stats=lambda _: None,
     ))
     return SimpleNamespace(
@@ -189,8 +192,8 @@ async def test_internal_wire_safety_marker_never_leaks_or_starts_continuation(
     assert len(env.calls) == 1
     assert env.released == [19]
     assert not env.leases
-    api.try_switch_account.assert_not_awaited()
-    api.runtime_state.record.assert_called_once()
+    recovery.try_switch_account.assert_not_awaited()
+    recovery.runtime_state.record.assert_called_once()
 
 
 @pytest.mark.parametrize("index", [3, 4, 10, 11])
@@ -220,4 +223,4 @@ async def test_bad_function_slots_cannot_be_final_empty_success(wire_env, index,
             await operation
         assert error.value.status_code == 502
     assert not env.leases and env.released == [19]
-    api.runtime_state.record.assert_not_called()
+    recovery.runtime_state.record.assert_not_called()

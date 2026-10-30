@@ -10,7 +10,7 @@ import pytest
 
 from aistudio_api.api import gemini
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
-from aistudio_api.application import generation
+from aistudio_api.application import generation, generation_recovery as recovery
 from aistudio_api.application.inference_limits import InferenceLimiter
 from aistudio_api.infrastructure.browser.cdp_client import CDPPage
 from aistudio_api.infrastructure.browser.scripts import (
@@ -92,8 +92,8 @@ async def test_late_original_push_preserves_recovery_for_next_loss(monkeypatch, 
     monkeypatch.setattr(generation, "inference_limiter", limiter)
     monkeypatch.setattr(generation, "ensure_active_account", AsyncMock())
     monkeypatch.setattr(generation, "record_rotator_event", record)
-    monkeypatch.setattr(gemini, "try_switch_account", switch)
-    monkeypatch.setattr(gemini.runtime_state, "record", MagicMock())
+    monkeypatch.setattr(recovery, "try_switch_account", switch)
+    monkeypatch.setattr(recovery.runtime_state, "record", MagicMock())
     request = GeminiGenerateContentRequest.model_validate({
         "contents": [{"parts": [{"text": "synthetic prompt"}]}],
     })

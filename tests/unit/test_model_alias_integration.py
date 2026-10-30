@@ -14,7 +14,10 @@ import pytest
 from aistudio_api.api import gemini as api
 from aistudio_api.api.app import app
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
-from aistudio_api.application import generation as generation_execution
+from aistudio_api.application import (
+    generation as generation_execution,
+    generation_recovery as recovery,
+)
 from aistudio_api.application.account_rotator import AccountStats
 from aistudio_api.application.chat_service import normalize_gemini_request
 from aistudio_api.application.runtime import runtime_state
@@ -120,7 +123,7 @@ def alias_env(monkeypatch, tmp_path):
     ))
     monkeypatch.setattr(runtime_state, "rotator", rotator)
     monkeypatch.setattr(runtime_state, "record", MagicMock())
-    monkeypatch.setattr(api, "try_switch_account", AsyncMock(return_value=False))
+    monkeypatch.setattr(recovery, "try_switch_account", AsyncMock(return_value=False))
     original_ensure = generation_execution.ensure_active_account
     ensure = AsyncMock(wraps=original_ensure)
     monkeypatch.setattr(generation_execution, "ensure_active_account", ensure)

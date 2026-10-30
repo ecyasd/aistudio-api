@@ -8,12 +8,11 @@ import time
 from copy import deepcopy
 from pathlib import Path
 
-from fastapi import HTTPException
-
 from aistudio_api.application.account_rotator import (
     AccountStats,
     get_seconds_until_pacific_midnight,
 )
+from aistudio_api.application.generation_errors import GenerationFailure
 from aistudio_api.application.runtime import runtime_state
 from aistudio_api.infrastructure.utils.logger import get_logger
 
@@ -241,7 +240,7 @@ async def try_switch_account(
         )
 
 
-def quota_unavailable_error(model: str | None = None) -> HTTPException:
+def quota_unavailable_error(model: str | None = None) -> GenerationFailure:
     """Describe current cooldowns without assuming all 429s last until midnight."""
     delays: list[int] = []
     service, rotator = runtime_state.account_service, runtime_state.rotator
@@ -262,14 +261,7 @@ def quota_unavailable_error(model: str | None = None) -> HTTPException:
             if math.isfinite(remaining):
                 delays.append(max(1, math.ceil(remaining)))
     label = f"model '{model}'" if model else "the requested model"
-    return HTTPException(
-        429,
-        detail={
-            "message": f"All accounts are temporarily rate limited for {label}. Retry after the current cooldown.",
-            "type": "rate_limit_exceeded",
-        },
-        headers={"Retry-After": str(min(delays))} if delays else None,
-    )
+    return GenerationFailure(429, reason="rate_limit_exceeded", message=f"All accounts are temporarily rate limited for {label}. Retry after the current cooldown.", retry_after_seconds=min(delays) if delays else None)
 
 
 def validate_account_availability(model: str | None = None) -> None:
@@ -277,10 +269,10 @@ def validate_account_availability(model: str | None = None) -> None:
     account_service = runtime_state.account_service
     rotator = runtime_state.rotator
     if account_service is None or rotator is None:
-        raise HTTPException(503, detail="Account service is not ready")
+        raise GenerationFailure(503, reason="account_not_ready", message="Account service is not ready")
     accounts = account_service.list_accounts()
     if not accounts:
-        raise HTTPException(503, detail="No accounts configured. Please import an account.")
+        raise GenerationFailure(503, reason="no_accounts", message="No accounts configured. Please import an account.")
     stats = [rotator.get_account_stats(account.id) for account in accounts]
     # A temporary auth failure may still use the existing isolated refresh
     # path. Expired credentials and model cooldowns must never bypass admission.
@@ -291,13 +283,7 @@ def validate_account_availability(model: str | None = None) -> None:
     ):
         return
     if all(item is not None and item.session_expired for item in stats):
-        raise HTTPException(
-            503,
-            detail={
-                "message": "The API key is valid, but all upstream Google sessions have expired. Visit the management page to import fresh cookies; keep the current API key.",
-                "type": "upstream_auth_expired",
-            },
-        )
+        raise GenerationFailure(503, reason="upstream_auth_expired", message="The API key is valid, but all upstream Google sessions have expired. Visit the management page to import fresh cookies; keep the current API key.")
     raise quota_unavailable_error(model)
 
 
@@ -311,13 +297,13 @@ async def ensure_active_account(attempt: int, model: str | None = None) -> None:
     if not current:
         switched = await try_switch_account(model=model)
         if not switched:
-            raise HTTPException(503, detail="Could not prepare an available account")
+            raise GenerationFailure(503, reason="account_not_ready", message="Could not prepare an available account")
     elif rotator and not rotator.is_account_available(current.id, model=model):
         # 当前账号对该模型已限流，提前切号
         switched = await try_switch_account(model=model, failed_account_id=current.id)
         if not switched:
             validate_account_availability(model)
-            raise HTTPException(503, detail="Could not prepare an available account")
+            raise GenerationFailure(503, reason="account_not_ready", message="Could not prepare an available account")
 
     # Registry selection and browser initialization are separate. Resolve the
     # active path lazily so accounts imported after process startup also work.
@@ -327,10 +313,10 @@ async def ensure_active_account(attempt: int, model: str | None = None) -> None:
         rotator = runtime_state.rotator
         current = account_svc.get_active_account() if account_svc else None
         if account_svc is None or client is None or current is None or rotator is None:
-            raise HTTPException(503, detail="Account service is not ready")
+            raise GenerationFailure(503, reason="account_not_ready", message="Account service is not ready")
         if not rotator.is_account_available(current.id, model=model):
             validate_account_availability(model)
-            raise HTTPException(503, detail="Selected account is no longer available")
+            raise GenerationFailure(503, reason="account_not_ready", message="Selected account is no longer available")
         session = client.session
         auth_path = account_svc.get_account_auth_path(current.id)
         if auth_path is None:
@@ -357,7 +343,7 @@ async def ensure_active_account(attempt: int, model: str | None = None) -> None:
         # can quarantine this account while its context is being prepared.
         if not rotator.is_account_available(current.id, model=model):
             validate_account_availability(model)
-            raise HTTPException(503, detail="Selected account is no longer available")
+            raise GenerationFailure(503, reason="account_not_ready", message="Selected account is no longer available")
 
 
 def account_id_for_auth_file(auth_file: str | None) -> str | None:

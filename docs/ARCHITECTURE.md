@@ -36,6 +36,9 @@
 生成调用的公共 HTTP 入口在 `api/gemini.py`，请求执行归属在 `application/generation.py`。
 `GenerationRun` 为流式与非流式提供同一套准入、重试、实际账号租约、可选 Cookie checkpoint 和成功记账。
 每次尝试使用独立的 `AttemptIdentity` 记录账号、context 和凭据代际；失败恢复接收该尝试的完整归属。
+默认失败恢复由 `application/generation_recovery.py` 拥有，HTTP 调用方不再提供恢复回调。
+恢复返回明确的重试或终态结果；准入及恢复终态使用不依赖 FastAPI 的 `GenerationFailure`。
+`api/gemini_errors.py` 为 JSON 和 SSE 共享错误投影，保留既有状态、认证分类和 Retry-After。
 流式输出交给 HTTP 层编码，只有已接受的内容才标记为发布；发布后失败不能重放原请求。
 非流式保留原重放传输，流式保留原增量网关，不用一种上游传输模拟另一种。
 
@@ -137,6 +140,8 @@ flowchart TD
 | `account_orchestrator.py` | 提供全局防雪崩互斥锁（`_switch_lock`），在并发 429 与 403 异常时实现安全有序故障转移切号与单账号在位自愈 |
 | `account_service.py` | 账号领域用例（Cookie 保存、批量探活导入、凭据激活）封装，杜绝路由层穿透访问存储私有属性 |
 | `generation.py` | `GenerationRun` 统一两种响应模式的准入、准备、重试、租约、checkpoint 和完成记账；交付与 HTTP 编码分离 |
+| `generation_recovery.py` | 内部固定的尝试恢复、实际账号失败归属、切号/清模板与失败统计；原流传输重送仍在网关 |
+| `generation_errors.py` | 应用终态描述、原异常归属与共享受控消息，不依赖 FastAPI |
 | `runtime.py` | 应用客户端、账号服务、调度器与模型统计的运行状态；保留原持久化格式 |
 | `model_selection.py` | 将 `抗截断/<base>` 选择器映射为原模型，保持账号准入、冷却、模板与统计共用原模型身份 |
 | `continuation.py` | 仅在真实 `MAX_TOKENS` 完成后执行有界续写；保留每轮 Part、签名和对话边界，累计用量 |

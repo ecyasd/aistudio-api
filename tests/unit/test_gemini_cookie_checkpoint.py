@@ -12,7 +12,10 @@ import pytest
 
 from aistudio_api.api import gemini as service
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
-from aistudio_api.application import generation as generation_execution
+from aistudio_api.application import (
+    generation as generation_execution,
+    generation_recovery as recovery,
+)
 from aistudio_api.domain.models import Candidate, ContentPart, ModelOutput
 
 
@@ -158,9 +161,9 @@ async def test_completed_response_releases_lease_after_checkpoint_budget(
     monkeypatch.setattr(generation_execution, "ensure_active_account", AsyncMock())
     monkeypatch.setattr(service, "validate_account_availability", lambda _model: None)
     monkeypatch.setattr(generation_execution, "account_id_for_auth_file", lambda _path: "account-1")
-    monkeypatch.setattr(service, "record_rotator_event", MagicMock())
-    monkeypatch.setattr(generation_execution, "record_rotator_event", service.record_rotator_event)
-    monkeypatch.setattr(service.runtime_state, "record", MagicMock())
+    monkeypatch.setattr(recovery, "record_rotator_event", MagicMock())
+    monkeypatch.setattr(generation_execution, "record_rotator_event", recovery.record_rotator_event)
+    monkeypatch.setattr(recovery.runtime_state, "record", MagicMock())
     req = GeminiGenerateContentRequest.model_validate(
         {"contents": [{"role": "user", "parts": [{"text": "synthetic question"}]}]}
     )
@@ -182,7 +185,7 @@ async def test_completed_response_releases_lease_after_checkpoint_budget(
 
     assert checkpoint_closed.is_set()
     assert leases == []
-    service.record_rotator_event.assert_called_once_with(
+    recovery.record_rotator_event.assert_called_once_with(
         "success", model="models/gemini-test", account_id="account-1"
     )
     assert not [

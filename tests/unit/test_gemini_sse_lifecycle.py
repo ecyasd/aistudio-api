@@ -12,7 +12,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from aistudio_api.application import generation as generation_execution
+from aistudio_api.api import gemini_errors
+from aistudio_api.application import (
+    generation as generation_execution,
+    generation_recovery as recovery,
+)
 
 
 @pytest.fixture
@@ -46,13 +50,13 @@ def sse_env(monkeypatch):
         get_account_auth_path=lambda account_id: f"offline/{account_id}",
     )
     rotator = SimpleNamespace(get_account_stats=lambda account_id: stats.get(account_id))
-    monkeypatch.setattr(service.runtime_state, "account_service", account_service)
-    monkeypatch.setattr(service.runtime_state, "rotator", rotator)
-    monkeypatch.setattr(service.runtime_state, "record", MagicMock())
-    monkeypatch.setattr(service, "record_rotator_event", MagicMock())
-    monkeypatch.setattr(generation_execution, "record_rotator_event", service.record_rotator_event)
+    monkeypatch.setattr(recovery.runtime_state, "account_service", account_service)
+    monkeypatch.setattr(recovery.runtime_state, "rotator", rotator)
+    monkeypatch.setattr(recovery.runtime_state, "record", MagicMock())
+    monkeypatch.setattr(recovery, "record_rotator_event", MagicMock())
+    monkeypatch.setattr(generation_execution, "record_rotator_event", recovery.record_rotator_event)
     monkeypatch.setattr(generation_execution, "ensure_active_account", AsyncMock())
-    monkeypatch.setattr(service, "try_switch_account", AsyncMock(return_value=False))
+    monkeypatch.setattr(recovery, "try_switch_account", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "SSE_HEARTBEAT_INTERVAL_SECONDS", 0.01)
     return SimpleNamespace(
         service=service, accounts=accounts, stats=stats, client=client,
@@ -142,7 +146,7 @@ async def test_disconnect_through_http_middleware_never_reports_retry_success(
     assert diagnostics.list_records()["items"][0]["outcome"] == "cancelled"
     events = errors.list_records()["items"]
     assert events and all(event["outcome"] == "cancelled" for event in events)
-    sse_env.service.runtime_state.record.assert_not_called()
+    recovery.runtime_state.record.assert_not_called()
     assert not sse_env.leased and not _live_sse_tasks()
 
 
@@ -164,8 +168,8 @@ async def test_browser_delivery_failure_after_body_is_a_503_without_replaying_mo
     assert '"code": 503' in chunks and '"status": "UNAVAILABLE"' in chunks
     assert '"finishReason"' not in chunks
     assert sse_env.client.stream_generate_content.call_count == 1
-    sse_env.service.try_switch_account.assert_not_awaited()
-    sse_env.service.runtime_state.record.assert_not_called()
+    recovery.try_switch_account.assert_not_awaited()
+    recovery.runtime_state.record.assert_not_called()
     assert not sse_env.leased and not _live_sse_tasks()
 
 
@@ -258,7 +262,7 @@ async def test_continuation_retries_share_total_request_deadline(sse_env, reques
         assert error.value.status_code == 504
     assert len(calls) < 5 and len(calls) == len(closed)
     assert limiter.active == 0 and not sse_env.leased
-    service.runtime_state.record.assert_not_called()
+    recovery.runtime_state.record.assert_not_called()
 
 
 async def test_ordinary_progressing_stream_can_outlive_continuation_budget(sse_env, request_body, monkeypatch):
@@ -321,8 +325,8 @@ async def test_preflight_returns_real_http_error_without_starting_browser(
     assert "text/event-stream" not in response.headers["content-type"]
     sse_env.client.stream_generate_content.assert_not_called()
     generation_execution.ensure_active_account.assert_not_awaited()
-    service.try_switch_account.assert_not_awaited()
-    service.runtime_state.record.assert_not_called()
+    recovery.try_switch_account.assert_not_awaited()
+    recovery.runtime_state.record.assert_not_called()
 
 
 async def test_preflight_does_not_mutate_daily_stats_or_preselect_account(
@@ -343,7 +347,7 @@ async def test_preflight_does_not_mutate_daily_stats_or_preselect_account(
     assert response.status_code == 200
     assert stats.to_dict() == before
     generation_execution.ensure_active_account.assert_not_awaited()
-    service.try_switch_account.assert_not_awaited()
+    recovery.try_switch_account.assert_not_awaited()
     sse_env.client.stream_generate_content.assert_not_called()
     await response.body_iterator.aclose()
 
@@ -446,7 +450,7 @@ async def test_cancel_during_account_initialization_closes_waiting_task(
         await pending
     assert closed.is_set()
     assert not _live_sse_tasks()
-    service.runtime_state.record.assert_not_called()
+    recovery.runtime_state.record.assert_not_called()
 
 
 async def test_disconnect_on_send_closes_upstream_in_its_original_context(
@@ -478,7 +482,7 @@ async def test_disconnect_on_send_closes_upstream_in_its_original_context(
         await response.stream_response(send)
     assert closed.is_set()
     assert not _live_sse_tasks()
-    service.runtime_state.record.assert_not_called()
+    recovery.runtime_state.record.assert_not_called()
 
 
 async def test_slow_client_send_timeout_releases_upstream_and_lease(sse_env, request_body, monkeypatch):
@@ -546,7 +550,7 @@ async def test_asgi_disconnect_cancels_producer_before_first_model_chunk(
     )
     assert closed.is_set()
     assert not _live_sse_tasks()
-    service.runtime_state.record.assert_not_called()
+    recovery.runtime_state.record.assert_not_called()
 
 
 @pytest.mark.parametrize("spec", ["2.0", "2.4"])
@@ -611,9 +615,9 @@ async def test_repeated_interrupt_and_immediate_reroll_releases_only_old_request
         assert not sse_env.leased and limiter.active == 0 and limiter.waiting == 0
         assert not _live_sse_tasks()
     assert len(calls) == len(closed) == 10
-    assert service.runtime_state.record.call_count == 5
+    assert recovery.runtime_state.record.call_count == 5
     sse_env.client.clear_templates.assert_not_called()
-    service.try_switch_account.assert_not_awaited()
+    recovery.try_switch_account.assert_not_awaited()
 
 
 async def test_heartbeat_does_not_prevent_retry_or_change_usage(sse_env, request_body):
@@ -652,7 +656,7 @@ async def test_heartbeat_does_not_prevent_retry_or_change_usage(sse_env, request
     assert payloads[0]["candidates"][0]["content"]["parts"][0]["text"] == "completed after retry"
     assert "thoughtSignature" not in payloads[0]["candidates"][0]["content"]["parts"][0]
     assert payloads[-1]["usageMetadata"]["totalTokenCount"] == 13
-    service.runtime_state.record.assert_called_once_with(
+    recovery.runtime_state.record.assert_called_once_with(
         "models/gemini-test", "success", usage
     )
     assert not _live_sse_tasks()
@@ -681,7 +685,7 @@ async def test_error_after_text_stays_in_band_without_retry(sse_env, request_bod
     error = json.loads(chunks[-1][6:])["error"]
     assert error["code"] == 429
     assert error["status"] == "RESOURCE_EXHAUSTED"
-    service.try_switch_account.assert_not_awaited()
+    recovery.try_switch_account.assert_not_awaited()
     assert sse_env.client.stream_generate_content.call_count == 1
     assert closed.is_set()
     assert not _live_sse_tasks()
@@ -690,13 +694,15 @@ async def test_error_after_text_stays_in_band_without_retry(sse_env, request_bod
 async def test_state_change_after_preflight_is_still_an_in_band_error(
     sse_env, request_body
 ):
-    from fastapi import HTTPException
+    from aistudio_api.application.generation_errors import GenerationFailure
 
     service = sse_env.service
     response = await service.handle_gemini_generate_content(
         "gemini-test", request_body, sse_env.client, stream=True
     )
-    generation_execution.ensure_active_account.side_effect = HTTPException(503, "account removed")
+    generation_execution.ensure_active_account.side_effect = GenerationFailure(
+        503, reason="account_not_ready", message="account removed",
+    )
     chunks = [chunk async for chunk in response.body_iterator]
     assert response.status_code == 200
     assert json.loads(chunks[-1][6:])["error"]["code"] == 503
@@ -755,14 +761,14 @@ async def test_in_flight_result_is_attributed_to_its_leased_account_after_switch
         if kwargs.get("is_auth_error") and not kwargs.get("is_session_expired"):
             # Retryable 403 recording is intentionally serialized by the real
             # orchestrator so stale failures cannot re-lock a refreshed context.
-            service.record_rotator_event(
+            recovery.record_rotator_event(
                 "auth_error", model="models/gemini-test", account_id="test-account"
             )
         return False
 
     sse_env.client.generate_content.side_effect = generate
     sse_env.client.stream_generate_content.side_effect = generate_stream
-    service.try_switch_account.side_effect = failover
+    recovery.try_switch_account.side_effect = failover
     if stream:
         response = await service.handle_gemini_generate_content(
             "gemini-test", request_body, sse_env.client, stream=True
@@ -781,17 +787,17 @@ async def test_in_flight_result_is_attributed_to_its_leased_account_after_switch
             )
         assert caught.value.status_code == status
 
-    service.record_rotator_event.assert_called_once_with(
+    recovery.record_rotator_event.assert_called_once_with(
         event, model="models/gemini-test", account_id="test-account",
         **({"auth_generation": None} if outcome == "success" else {}),
     )
     assert sse_env.accounts[0] is account_b
     assert not sse_env.leased
     if outcome == "expired":
-        assert service.try_switch_account.await_args.kwargs["failure_recorded"] is True
+        assert recovery.try_switch_account.await_args.kwargs["failure_recorded"] is True
     elif outcome == "auth":
-        assert service.try_switch_account.await_args.kwargs["failed_context_id"] == 1
-        assert not service.try_switch_account.await_args.kwargs.get("failure_recorded")
+        assert recovery.try_switch_account.await_args.kwargs["failed_context_id"] == 1
+        assert not recovery.try_switch_account.await_args.kwargs.get("failure_recorded")
     assert not _live_sse_tasks()
 
 
@@ -811,10 +817,10 @@ async def test_expired_session_after_body_is_recorded_without_switching(
     )
     chunks = [chunk async for chunk in response.body_iterator]
     assert json.loads(chunks[-1][6:])["error"]["code"] == 503
-    sse_env.service.record_rotator_event.assert_called_once_with(
+    recovery.record_rotator_event.assert_called_once_with(
         "session_expired", model="models/gemini-test", account_id="test-account"
     )
-    sse_env.service.try_switch_account.assert_not_awaited()
+    recovery.try_switch_account.assert_not_awaited()
     assert not sse_env.leased
     assert not _live_sse_tasks()
 
@@ -822,9 +828,9 @@ async def test_expired_session_after_body_is_recorded_without_switching(
 async def test_last_attempt_failure_does_not_become_success(sse_env, request_body, monkeypatch):
     from aistudio_api.domain.errors import UsageLimitExceeded
 
-    monkeypatch.setattr(sse_env.service, "MAX_RETRIES", 1)
-    monkeypatch.setattr(generation_execution, "MAX_RETRIES", sse_env.service.MAX_RETRIES)
-    sse_env.service.try_switch_account.return_value = True
+    monkeypatch.setattr(recovery, "MAX_RETRIES", 1)
+    monkeypatch.setattr(generation_execution, "MAX_RETRIES", recovery.MAX_RETRIES)
+    recovery.try_switch_account.return_value = True
 
     async def upstream(**kwargs):
         raise UsageLimitExceeded("offline quota")
@@ -836,8 +842,8 @@ async def test_last_attempt_failure_does_not_become_success(sse_env, request_bod
     )
     chunks = [chunk async for chunk in response.body_iterator]
     assert json.loads(chunks[-1][6:])["error"]["code"] == 429
-    sse_env.service.try_switch_account.assert_not_awaited()
-    assert all(call.args[1] != "success" for call in sse_env.service.runtime_state.record.call_args_list)
+    recovery.try_switch_account.assert_not_awaited()
+    assert all(call.args[1] != "success" for call in recovery.runtime_state.record.call_args_list)
     assert not sse_env.leased
 
 
@@ -901,10 +907,10 @@ async def test_bootstrap_failure_keeps_the_attempted_account_when_active_changed
                 "gemini-test", request_body, sse_env.client, stream=False
             )
         assert caught.value.status_code == 503
-    service.record_rotator_event.assert_called_once_with(
+    recovery.record_rotator_event.assert_called_once_with(
         "session_expired", model="models/gemini-test", account_id="test-account"
     )
-    assert service.try_switch_account.await_args.kwargs["failed_account_id"] == "test-account"
+    assert recovery.try_switch_account.await_args.kwargs["failed_account_id"] == "test-account"
     sse_env.client.generate_content.assert_not_awaited()
     sse_env.client.stream_generate_content.assert_not_called()
     assert not sse_env.leased
@@ -938,7 +944,7 @@ async def test_failure_while_preparing_failover_target_ends_without_recursive_sw
 
     sse_env.client.generate_content.side_effect = generate
     sse_env.client.stream_generate_content.side_effect = generate_stream
-    service.try_switch_account.side_effect = switch
+    recovery.try_switch_account.side_effect = switch
     if stream:
         response = await service.handle_gemini_generate_content(
             "gemini-test", request_body, sse_env.client, stream=True
@@ -951,8 +957,8 @@ async def test_failure_while_preparing_failover_target_ends_without_recursive_sw
                 "gemini-test", request_body, sse_env.client, stream=False
             )
         assert caught.value.status_code == 503
-    assert service.try_switch_account.await_count == 1
-    events = service.record_rotator_event.call_args_list
+    assert recovery.try_switch_account.await_count == 1
+    events = recovery.record_rotator_event.call_args_list
     assert [(call.args[0], call.kwargs["account_id"]) for call in events] == [
         ("rate_limited", "test-account"), ("session_expired", "other-account")
     ]
@@ -971,7 +977,7 @@ async def test_nonstream_invalid_request_does_not_bootstrap(sse_env, request_bod
     assert caught.value.status_code == 400
     generation_execution.ensure_active_account.assert_not_awaited()
     sse_env.client.generate_content.assert_not_awaited()
-    sse_env.service.runtime_state.record.assert_not_called()
+    recovery.runtime_state.record.assert_not_called()
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -999,7 +1005,7 @@ async def test_internal_generation_failure_is_generic_for_both_modes(
             await sse_env.service.handle_gemini_generate_content(
                 "gemini-test", request_body, sse_env.client, stream=False,
             )
-        code, message, status = sse_env.service.classify_gemini_error_payload(caught.value)
+        code, message, status = gemini_errors.classify_gemini_error_payload(caught.value)
         payload = {"code": code, "message": message, "status": status}
     assert payload == {"code": 500, "message": "Internal server error", "status": "INTERNAL"}
     assert "SYNTHETIC_PRIVATE_EXCEPTION" not in caplog.text
@@ -1038,5 +1044,5 @@ async def test_terminal_failure_never_replays_after_credentials_change(
             )
         assert caught.value.status_code == status
         assert sse_env.client.generate_content.await_count == 1
-    sse_env.service.try_switch_account.assert_not_awaited()
+    recovery.try_switch_account.assert_not_awaited()
     assert not sse_env.leased

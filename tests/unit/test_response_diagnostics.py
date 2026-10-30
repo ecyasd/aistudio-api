@@ -17,7 +17,11 @@ from aistudio_api.api import gemini as api, routes_errors
 from aistudio_api.api.dependencies import require_web_auth
 from aistudio_api.api.error_middleware import ErrorRecordsMiddleware
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
-from aistudio_api.application import continuation, generation as generation_execution
+from aistudio_api.application import (
+    continuation,
+    generation as generation_execution,
+    generation_recovery as recovery,
+)
 from aistudio_api.application.chat_service import normalize_gemini_request
 from aistudio_api.config import settings
 from aistudio_api.domain.errors import RequestError
@@ -309,9 +313,9 @@ async def test_api_retry_and_continuation_counters_share_one_inbound_context(dia
     monkeypatch.setattr(generation_execution, "ensure_active_account", AsyncMock())
     monkeypatch.setattr(api, "validate_account_availability", MagicMock())
     monkeypatch.setattr(generation_execution, "account_id_for_auth_file", lambda _: "synthetic-account")
-    monkeypatch.setattr(api, "record_rotator_event", MagicMock())
-    monkeypatch.setattr(generation_execution, "record_rotator_event", api.record_rotator_event)
-    monkeypatch.setattr(api.runtime_state, "record", MagicMock())
+    monkeypatch.setattr(recovery, "record_rotator_event", MagicMock())
+    monkeypatch.setattr(generation_execution, "record_rotator_event", recovery.record_rotator_event)
+    monkeypatch.setattr(recovery.runtime_state, "record", MagicMock())
     req = GeminiGenerateContentRequest.model_validate({
         "contents": [{"role": "user", "parts": [{"text": "offline synthetic prompt"}]}],
         "tools": [], "autoContinue": True,

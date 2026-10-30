@@ -5,25 +5,27 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
 from starlette.requests import Request
 
 from aistudio_api.api import gemini as service
 from aistudio_api.api.app import http_exception_handler
+from aistudio_api.api.gemini_errors import project_gemini_error
 from aistudio_api.application import (
     account_orchestrator as orchestration,
     account_rotator as rotation,
     generation as generation_execution,
+    generation_recovery as recovery,
 )
 from aistudio_api.application.account_rotator import AccountStats
+from aistudio_api.application.generation_errors import GenerationFailure
 from aistudio_api.domain.errors import UsageLimitExceeded
 
 
 def setup_accounts(monkeypatch, stats):
-    monkeypatch.setattr(service.runtime_state, "account_service", SimpleNamespace(
+    monkeypatch.setattr(recovery.runtime_state, "account_service", SimpleNamespace(
         list_accounts=lambda: [SimpleNamespace(id=key) for key in stats],
     ))
-    monkeypatch.setattr(service.runtime_state, "rotator", SimpleNamespace(
+    monkeypatch.setattr(recovery.runtime_state, "rotator", SimpleNamespace(
         get_account_stats=stats.get,
     ))
 
@@ -37,19 +39,19 @@ async def test_terminal_temporary_429_never_claims_midnight_reset(monkeypatch):
         assert event == "rate_limited"
         stats.record_rate_limited(model)
 
-    monkeypatch.setattr(service, "record_rotator_event", record)
-    monkeypatch.setattr(generation_execution, "record_rotator_event", service.record_rotator_event)
-    monkeypatch.setattr(service.runtime_state, "record", lambda *_args, **_kwargs: None)
-    with pytest.raises(HTTPException) as caught:
-        await service.handle_attempt_exception(
+    monkeypatch.setattr(recovery, "record_rotator_event", record)
+    monkeypatch.setattr(generation_execution, "record_rotator_event", recovery.record_rotator_event)
+    monkeypatch.setattr(recovery.runtime_state, "record", lambda *_args, **_kwargs: None)
+    with pytest.raises(GenerationFailure) as caught:
+        await recovery._recover_failure(
             UsageLimitExceeded("synthetic temporary limit"),
-            attempt=service.MAX_RETRIES - 1, model_path="gemini-synthetic",
+            attempt=recovery.MAX_RETRIES - 1, model_path="gemini-synthetic",
             normalized_model="gemini-synthetic", client=SimpleNamespace(),
             account_id=stats.account_id,
         )
     error = caught.value
-    assert error.status_code == 429
-    assert error.headers == {"Retry-After": "60"}
+    assert error.description.status == 429
+    assert project_gemini_error(error).headers == {"Retry-After": "60"}
     payload = json.loads(service.format_sse_error(error)[6:])
     assert payload["error"]["code"] == 429
     assert "temporarily" in payload["error"]["message"]
@@ -68,9 +70,9 @@ async def test_retry_after_uses_earliest_eligible_model_cooldown_and_preserves_s
     }
     before = {key: item.to_dict() for key, item in stats.items()}
     setup_accounts(monkeypatch, stats)
-    with pytest.raises(HTTPException) as caught:
+    with pytest.raises(GenerationFailure) as caught:
         orchestration.validate_account_availability("gemini-synthetic")
-    assert caught.value.headers == {"Retry-After": "38"}
+    assert project_gemini_error(caught.value).headers == {"Retry-After": "38"}
     response = await http_exception_handler(Request({"type": "http", "path": "/synthetic"}), caught.value)
     assert response.status_code == 429 and response.headers["retry-after"] == "38"
     assert {key: item.to_dict() for key, item in stats.items()} == before
@@ -84,4 +86,4 @@ def test_legacy_daily_limit_hint_ignores_shorter_auth_or_model_timers(monkeypatc
         auth_cooldown=10001, model_cooldowns={"gemini-synthetic": 10020},
     )
     setup_accounts(monkeypatch, {stats.account_id: stats})
-    assert orchestration.quota_unavailable_error("gemini-synthetic").headers == {"Retry-After": "36000"}
+    assert project_gemini_error(orchestration.quota_unavailable_error("gemini-synthetic")).headers == {"Retry-After": "36000"}

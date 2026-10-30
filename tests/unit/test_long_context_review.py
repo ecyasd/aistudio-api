@@ -15,6 +15,7 @@ from aistudio_api.api import routes_accounts, routes_system
 from aistudio_api.application import (
     account_orchestrator,
     generation as generation_execution,
+    generation_recovery as recovery,
 )
 from aistudio_api.infrastructure.account.account_store import AccountMeta
 from aistudio_api.infrastructure.browser.cdp_client import CDPConnection, CDPPage
@@ -105,12 +106,12 @@ async def test_nonstream_retries_reuse_the_normalized_long_request(monkeypatch):
 
     monkeypatch.setattr(service, "normalize_gemini_request", normalize)
     monkeypatch.setattr(generation_execution, "ensure_active_account", AsyncMock())
-    monkeypatch.setattr(service, "handle_attempt_exception", AsyncMock(return_value=True))
+    monkeypatch.setattr(recovery, "_recover_failure", AsyncMock(return_value=True))
     monkeypatch.setattr(generation_execution, "_persist_successful_cookies", AsyncMock())
     monkeypatch.setattr(generation_execution, "account_id_for_auth_file", lambda _path: None)
-    monkeypatch.setattr(service, "record_rotator_event", MagicMock())
-    monkeypatch.setattr(generation_execution, "record_rotator_event", service.record_rotator_event)
-    monkeypatch.setattr(service.runtime_state, "record", MagicMock())
+    monkeypatch.setattr(recovery, "record_rotator_event", MagicMock())
+    monkeypatch.setattr(generation_execution, "record_rotator_event", recovery.record_rotator_event)
+    monkeypatch.setattr(recovery.runtime_state, "record", MagicMock())
     monkeypatch.setattr(generation_execution.continuation, "generate_content", generate)
     request = SimpleNamespace(contents=["synthetic long input"], autoContinue=False)
     await service._generate_non_streaming("models/synthetic", request,
