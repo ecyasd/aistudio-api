@@ -130,6 +130,7 @@ function readerHarness() {
   h.readers[1].finish('{"accounts":[{"id":"current-fixture"}]}')
   await h.state.handleSubmit()
   assert.equal(h.imports[0].content, '{"accounts":[{"id":"current-fixture"}]}')
+  assert.deepEqual(Object.keys(h.imports[0]), ['content'], 'file import submits browser-read JSON only')
   h.stop()
 }
 checks.push('selecting a new bundle never imports the previous file while its replacement is loading')

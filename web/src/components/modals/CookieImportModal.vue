@@ -3,7 +3,7 @@ import { ref, watch, onUnmounted } from 'vue'
 import { useAccountsStore } from '@/stores/accounts.ts'
 import Modal from '@/components/ui/Modal.vue'
 import Button from '@/components/ui/Button.vue'
-import { Sparkles, FileText, Upload, FolderOpen, CheckCircle2 } from 'lucide-vue-next'
+import { Sparkles, FileText, Upload, CheckCircle2 } from 'lucide-vue-next'
 const props = defineProps<{
   modelValue: boolean
 }>()
@@ -27,7 +27,6 @@ const fileInputRef = ref<HTMLInputElement | null>(null)
 const selectedFileName = ref('')
 const selectedFileSize = ref('')
 const selectedFileContent = ref('')
-const localFilePath = ref('')
 const detectedCount = ref<number | null>(null)
 const readingFile = ref(false)
 const fileReadError = ref('')
@@ -107,18 +106,15 @@ async function handleSubmit() {
   const revision = modalRevision
   if (activeTab.value === 'file') {
     const content = selectedFileContent.value.trim()
-    const path = localFilePath.value.trim()
     const sequence = fileReadSequence
-    if (!content && !path) return
+    if (!content) return
 
     const ok = await accountsStore.importBundle({
-      content: content || undefined,
-      file_path: path || undefined,
+      content,
     })
     if (ok && activeTab.value === 'file' && modalRevision === revision && fileReadSequence === sequence &&
-        selectedFileContent.value.trim() === content && localFilePath.value.trim() === path) {
+        selectedFileContent.value.trim() === content) {
       clearSelectedFile()
-      localFilePath.value = ''
       emit('update:modelValue', false)
     }
     return
@@ -259,39 +255,6 @@ async function handleSubmit() {
         >
           {{ fileReadError }}
         </p>
-
-        <!-- Alternative: Local File Path on Server -->
-        <div class="space-y-1.5">
-          <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wider flex items-center justify-between">
-            <span class="flex items-center gap-1">
-              <FolderOpen class="w-3.5 h-3.5 text-gray-500" />
-              <span>直接填入本地文件绝对路径</span>
-            </span>
-          </label>
-          <input
-            v-model="localFilePath"
-            type="text"
-            placeholder="/sdcard/Download/aistudio_accounts.json"
-            class="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs font-mono outline-none focus:bg-white focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 transition-all"
-          >
-          <div class="flex items-center gap-1.5 flex-wrap pt-0.5 text-[11px] font-mono">
-            <span class="text-gray-400 font-sans">快捷路径:</span>
-            <button
-              type="button"
-              class="px-2 py-0.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-md transition-colors cursor-pointer"
-              @click="localFilePath = '/sdcard/Download/aistudio_accounts.json'"
-            >
-              /sdcard/Download/aistudio_accounts.json
-            </button>
-            <button
-              type="button"
-              class="px-2 py-0.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-md transition-colors cursor-pointer"
-              @click="localFilePath = 'data/aistudio_accounts.json'"
-            >
-              data/aistudio_accounts.json
-            </button>
-          </div>
-        </div>
       </div>
 
       <!-- Mode: Text Paste -->
@@ -375,7 +338,7 @@ async function handleSubmit() {
         variant="primary"
         size="sm"
         :loading="accountsStore.importing"
-        :disabled="readingFile || (activeTab === 'file' ? (!selectedFileContent && !localFilePath.trim()) : !cookieInput.trim())"
+        :disabled="readingFile || (activeTab === 'file' ? !selectedFileContent.trim() : !cookieInput.trim())"
         @click="handleSubmit"
       >
         <template #default>

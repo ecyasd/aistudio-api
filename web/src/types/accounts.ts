@@ -49,7 +49,6 @@ export interface BundleAccountItem {
 }
 
 export interface ImportBundleRequest {
-  file_path?: string
   content?: string
   accounts?: BundleAccountItem[]
 }

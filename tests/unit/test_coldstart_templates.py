@@ -162,11 +162,29 @@ async def test_ready_editor_and_captured_template_skip_fixed_navigation_and_poll
     assert not any("mat-card" in source for source in sources)
 
 
-async def test_absent_editor_retains_navigation_fallback_and_readiness_gate(monkeypatch):
+async def test_absent_editor_uses_readiness_gate_without_fixed_navigation_wait(monkeypatch):
     page = SyntheticCapturePage()
     _stub_capture(monkeypatch, page, ['["models/synthetic",[]]'])
     await botguard_bootstrap.bootstrap_botguard_and_template(page, max_wait_seconds=2)
-    page.wait_for_timeout.assert_any_await(800)
+    assert 800 not in [call.args[0] for call in page.wait_for_timeout.await_args_list]
+    page.wait_for_selector.assert_awaited_once_with("textarea", timeout_s=15.0)
+
+
+async def test_ready_run_control_skips_input_settle_wait_but_keeps_template_gate(monkeypatch):
+    page = SyntheticCapturePage()
+    _stub_capture(monkeypatch, page, ['["models/synthetic",[]]'])
+    original_evaluate = page.evaluate
+
+    async def evaluate(source):
+        if botguard_bootstrap.BOOTSTRAP_RUN_READY_JS in source:
+            return True
+        return await original_evaluate(source)
+
+    page.evaluate = evaluate
+    _, captured = await botguard_bootstrap.bootstrap_botguard_and_template(page, max_wait_seconds=2)
+    assert captured["body"] == '["models/synthetic",[]]'
+    assert 600 not in [call.args[0] for call in page.wait_for_timeout.await_args_list]
+    assert page.unsubscribed
     page.wait_for_selector.assert_awaited_once_with("textarea", timeout_s=15.0)
 
 
@@ -239,7 +257,8 @@ async def test_preparation_milestones_retain_only_allowlisted_times(monkeypatch)
         error_records.reset_request_context(context)
     item = store.list_records()["items"][0]
     assert set(item["timings_ms"]) == {"botguard_hooks_ready", "botguard_prompt_filled",
-                                      "botguard_run_dispatched", "botguard_template_ready"}
+                                      "botguard_run_dispatched", "botguard_template_ready",
+                                      "botguard_editor_ready", "temporary_chat_ready"}
     assert all(type(value) is int and value >= 0 for value in item["timings_ms"].values())
     encoded = json.dumps(item)
     assert "synthetic-key" not in encoded and "example.invalid" not in encoded

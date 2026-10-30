@@ -11,6 +11,7 @@ from aistudio_api.api.dependencies import (
     get_account_service,
     get_runtime_state,
 )
+from aistudio_api.application import account_orchestrator
 from aistudio_api.infrastructure.account.account_store import AccountMeta
 from aistudio_api.infrastructure.account.cookie_parser import parse_cookie_string
 from aistudio_api.infrastructure.utils.common import mask_email
@@ -130,18 +131,20 @@ async def activate_account(
     runtime_state: RuntimeState = Depends(get_runtime_state),
 ) -> AccountResponse:
     """切换到指定账号。"""
-    browser_session = runtime_state.client._session if runtime_state.client else None
+    async with account_orchestrator.account_change_lock():
+        browser_session = runtime_state.client._session if runtime_state.client else None
 
-    if browser_session is None:
-        raise HTTPException(status_code=503, detail="服务未就绪")
+        if browser_session is None:
+            raise HTTPException(status_code=503, detail="服务未就绪")
 
-    account = await account_service.activate_account(account_id, browser_session)
-    if account is None:
-        raise HTTPException(status_code=404, detail="账号不存在或切换失败")
-    if runtime_state.rotator:
-        runtime_state.rotator.clear_auth_lockout(account.id)
-    log.info("手动激活账号: %s (%s)", account.id, account.name)
-    return to_account_response(account)
+        account = await account_service.activate_account(account_id, browser_session)
+        if account is None:
+            raise HTTPException(status_code=404, detail="账号不存在或切换失败")
+        if runtime_state.rotator:
+            runtime_state.rotator.clear_auth_lockout(account.id)
+        account_orchestrator.note_account_changed()
+        log.info("手动激活账号: %s (%s)", account.id, account.name)
+        return to_account_response(account)
 
 
 @router.post("/{account_id}/detect-email", response_model=AccountResponse)
@@ -179,34 +182,36 @@ async def delete_account(
     runtime_state: RuntimeState = Depends(get_runtime_state),
 ) -> dict[str, bool]:
     """删除账号。"""
-    active_account = account_service.get_active_account()
-    is_active = active_account is not None and active_account.id == account_id
+    async with account_orchestrator.account_change_lock():
+        active_account = account_service.get_active_account()
+        is_active = active_account is not None and active_account.id == account_id
 
-    success = account_service.delete_account(account_id)
-    if not success:
-        raise HTTPException(status_code=404, detail="账号不存在")
+        success = account_service.delete_account(account_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="账号不存在")
 
-    if runtime_state.rotator:
-        runtime_state.rotator.remove_account(account_id)
-    if is_active:
-        remaining_accounts = account_service.list_accounts()
-        new_active = remaining_accounts[0] if remaining_accounts else None
-        browser_session = (
-            runtime_state.client._session if runtime_state.client else None
-        )
-        if new_active is not None:
-            account_service.set_active_account(new_active.id)
-            if browser_session is not None:
-                new_auth_path = account_service.get_account_auth_path(new_active.id)
-                await browser_session.switch_auth(
-                    str(new_auth_path) if new_auth_path else None
-                )
-        else:
-            if browser_session is not None:
-                await browser_session.clear_account()
+        if runtime_state.rotator:
+            runtime_state.rotator.remove_account(account_id)
+        if is_active:
+            remaining_accounts = account_service.list_accounts()
+            new_active = remaining_accounts[0] if remaining_accounts else None
+            browser_session = (
+                runtime_state.client._session if runtime_state.client else None
+            )
+            if new_active is not None:
+                account_service.set_active_account(new_active.id)
+                if browser_session is not None:
+                    new_auth_path = account_service.get_account_auth_path(new_active.id)
+                    await browser_session.switch_auth(
+                        str(new_auth_path) if new_auth_path else None
+                    )
+            else:
+                if browser_session is not None:
+                    await browser_session.clear_account()
+            account_orchestrator.note_account_changed()
 
-    log.info("已删除账号: %s", account_id)
-    return {"ok": True}
+        log.info("已删除账号: %s", account_id)
+        return {"ok": True}
 
 
 @router.delete("/group/{cookie_id}")
@@ -216,42 +221,44 @@ async def delete_cookie_group(
     runtime_state: RuntimeState = Depends(get_runtime_state),
 ) -> dict[str, int]:
     """按 Cookie 组批量删除该 Cookie 下的所有子账号。"""
-    active_account = account_service.get_active_account()
-    active_id = active_account.id if active_account is not None else None
-    active_deleted = False
+    async with account_orchestrator.account_change_lock():
+        active_account = account_service.get_active_account()
+        active_id = active_account.id if active_account is not None else None
+        active_deleted = False
 
-    accounts = account_service.list_accounts()
-    deleted_count = 0
-    rotator = runtime_state.rotator
-    for a in accounts:
-        acc_cid = getattr(a, "cookie_id", None) or f"cookie_{a.created_at[:16]}"
-        if acc_cid == cookie_id:
-            if a.id == active_id:
-                active_deleted = True
-            if account_service.delete_account(a.id):
-                deleted_count += 1
-                if rotator:
-                    rotator.remove_account(a.id)
-                log.info("已删除组 %s 下的子账号 %s", cookie_id, a.id)
+        accounts = account_service.list_accounts()
+        deleted_count = 0
+        rotator = runtime_state.rotator
+        for a in accounts:
+            acc_cid = getattr(a, "cookie_id", None) or f"cookie_{a.created_at[:16]}"
+            if acc_cid == cookie_id:
+                if a.id == active_id:
+                    active_deleted = True
+                if account_service.delete_account(a.id):
+                    deleted_count += 1
+                    if rotator:
+                        rotator.remove_account(a.id)
+                    log.info("已删除组 %s 下的子账号 %s", cookie_id, a.id)
 
-    if active_deleted:
-        remaining_accounts = account_service.list_accounts()
-        new_active = remaining_accounts[0] if remaining_accounts else None
-        browser_session = (
-            runtime_state.client._session if runtime_state.client else None
-        )
-        if new_active is not None:
-            account_service.set_active_account(new_active.id)
-            if browser_session is not None:
-                new_auth_path = account_service.get_account_auth_path(new_active.id)
-                await browser_session.switch_auth(
-                    str(new_auth_path) if new_auth_path else None
-                )
-        else:
-            if browser_session is not None:
-                await browser_session.clear_account()
+        if active_deleted:
+            remaining_accounts = account_service.list_accounts()
+            new_active = remaining_accounts[0] if remaining_accounts else None
+            browser_session = (
+                runtime_state.client._session if runtime_state.client else None
+            )
+            if new_active is not None:
+                account_service.set_active_account(new_active.id)
+                if browser_session is not None:
+                    new_auth_path = account_service.get_account_auth_path(new_active.id)
+                    await browser_session.switch_auth(
+                        str(new_auth_path) if new_auth_path else None
+                    )
+            else:
+                if browser_session is not None:
+                    await browser_session.clear_account()
+            account_orchestrator.note_account_changed()
 
-    return {"deleted": deleted_count}
+        return {"deleted": deleted_count}
 
 
 @router.put("/{account_id}", response_model=AccountResponse)

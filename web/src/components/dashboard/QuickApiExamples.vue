@@ -7,6 +7,19 @@ const apiBaseUrl = typeof window === 'undefined' ? 'http://localhost:8080' : win
 
 const codeSnippets = [
   {
+    title: 'SillyTavern（酒馆）',
+    lang: 'text',
+    code: `API：聊天补全 → Google AI Studio
+反向代理 URL：${apiBaseUrl}
+代理密码：填写密钥管理中的 API 调用密钥
+模型：从连接后的模型列表选择
+可选续写：选择「抗截断/原模型名」
+流式传输：开启
+
+反向代理 URL 填站点根地址，无需添加 /v1beta。
+长上下文等待：在「实时错误 → 响应探测」查看准备与上游首包耗时。`,
+  },
+  {
     title: 'cURL',
     lang: 'bash',
     code: `curl ${apiBaseUrl}/v1beta/models/gemini-3.8-flash:generateContent \\

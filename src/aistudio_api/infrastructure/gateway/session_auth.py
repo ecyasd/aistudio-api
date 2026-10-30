@@ -8,6 +8,7 @@ import json
 import re
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 from urllib.parse import parse_qs, urlsplit
@@ -75,10 +76,7 @@ def get_auth_user_from_meta(auth_file: str | None) -> str:
     """Read auth_user index from meta.json adjacent to auth_file."""
     if auth_file:
         try:
-            meta_path = Path(auth_file).parent / "meta.json"
-            if meta_path.exists():
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                return str(meta.get("auth_user") or "0")
+            return _auth_meta(auth_file)[0]
         except Exception:
             pass
     return "0"
@@ -89,11 +87,25 @@ def get_auth_generation(auth_file: str | None) -> str | None:
     if not auth_file:
         return None
     try:
-        meta = json.loads((Path(auth_file).parent / "meta.json").read_text(encoding="utf-8"))
+        return _auth_meta(auth_file)[1]
     except FileNotFoundError:
         return None
+
+
+def _auth_meta(auth_file: str) -> tuple[str, str | None]:
+    path = (Path(auth_file).parent / "meta.json").resolve()
+    info = path.stat()
+    return _read_auth_meta(path, (info.st_mtime_ns, info.st_ctime_ns, info.st_size, info.st_ino))
+
+
+@lru_cache(maxsize=128)
+def _read_auth_meta(path: Path, _version: tuple[int, int, int, int]) -> tuple[str, str | None]:
+    """Cache only slot/generation, invalidating on metadata replacement/change."""
+    meta = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(meta, dict):
+        return "0", None
     generation = meta.get("auth_generation") if isinstance(meta, dict) else None
-    return generation if isinstance(generation, str) else None
+    return str(meta.get("auth_user") or "0"), generation if isinstance(generation, str) else None
 
 
 def get_aistudio_urls(
@@ -284,6 +296,13 @@ async def save_browser_cookies(
             return False
         data = {"cookies": current_cookies, "origins": existing.get("origins", [])}
         with locked_file(auth_path):
+            if existing == data:
+                # Retain live identity and full-jar checks; only avoid rewriting
+                # unchanged bytes after checking the owner/import version.
+                return (
+                    vars(page).get("_auth_generation") == get_auth_generation(auth_file)
+                    and get_auth_file_version(auth_file) == version
+                )
             if (
                 vars(page).get("_auth_generation") != get_auth_generation(auth_file)
                 or not atomic_write_json(auth_path, data, expected_version=version)

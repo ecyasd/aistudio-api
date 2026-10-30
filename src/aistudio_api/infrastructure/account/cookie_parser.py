@@ -10,6 +10,7 @@ import time
 import uuid
 from collections.abc import Iterable
 from typing import cast
+from urllib.parse import urlsplit
 
 from aistudio_api.infrastructure.utils.logger import get_logger
 
@@ -382,6 +383,45 @@ def _normalize_export_cookie(item: dict[str, object]) -> dict[str, object] | Non
         }
     return cookie
 
+def select_signing_cookies(
+    cookies: list[dict[str, object]], *, page_url: str = DEFAULT_ORIGIN + "/"
+) -> dict[str, str]:
+    """Select the Cookie values applicable to this page's AI Studio origin."""
+    origin_host = "aistudio.google.com"
+    page_path = urlsplit(page_url).path or "/"
+    candidates: dict[str, tuple[tuple[int, int], str]] = {}
+    for cookie in cookies:
+        if not isinstance(cookie, dict) or not cookie.get("name"):
+            continue
+        domain = str(cookie.get("domain") or "")
+        if not domain and cookie.get("url"):
+            domain = urlsplit(str(cookie["url"])).hostname or ""
+        bare_domain = domain.lower().lstrip(".")
+        if not bare_domain or not (
+            origin_host == bare_domain
+            or (domain.startswith(".") and origin_host.endswith("." + bare_domain))
+        ):
+            continue
+        path = str(cookie.get("path") or "/")
+        if not (
+            page_path == path
+            or page_path.startswith(path if path.endswith("/") else path + "/")
+        ):
+            continue
+        expiry = cookie.get("expires")
+        if expiry is not None and not cookie.get("session"):
+            try:
+                if 0 < float(cast("str | float", expiry)) <= time.time():
+                    continue
+            except (TypeError, ValueError):
+                continue
+        name = str(cookie["name"])
+        rank = (len(path), len(bare_domain))
+        if name not in candidates or rank > candidates[name][0]:
+            candidates[name] = (rank, str(cookie.get("value") or ""))
+    return {name: value for name, (_, value) in candidates.items()}
+
+
 async def probe_google_accounts_infinite(
     raw_or_dict: object,
     *,
@@ -395,7 +435,11 @@ async def probe_google_accounts_infinite(
     """
     if not 1 <= max_accounts <= 256 or max_fails_in_a_row < 1:
         raise ValueError("账号探测范围无效")
-    cookie_dict = parse_raw_cookies(raw_or_dict)
+    storage = parse_cookie_string(raw_or_dict, discard_transient=False)
+    items = storage.get("cookies")
+    cookie_dict = select_signing_cookies(
+        [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+    )
     if not cookie_dict:
         return []
 
@@ -432,9 +476,9 @@ async def probe_google_accounts_infinite(
             url = "https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/ListModels"
             try:
                 resp = await client.post(url, headers=headers, content="[]")
-                # 200 (OK), 400 (Bad Request on param but authed), 403 (Forbidden/Permission/Quota) 均表示此账号 Session 存在
-                # 401 表示该 auth_user 未登录或 Session 无效
-                if resp.status_code in (200, 400, 403):
+                # Only a successful RPC array proves this slot. Generic 400/403
+                # responses may apply to every index and must not create accounts.
+                if resp.status_code == 200 and isinstance(resp.json(), list):
                     consecutive_failures = 0
                     valid_accounts.append(
                         {

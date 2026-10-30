@@ -33,6 +33,10 @@ export interface ResponseDiagnostic {
   outcome: 'success' | 'recovered' | 'failed' | 'cancelled'
   transport_status: number | null
   duration_ms: number
+  request_body_bytes?: number | null
+  prompt_tokens?: number | null
+  thought_tokens?: number | null
+  timings_ms?: Record<string, number>
   upstream_calls: number
   retries: number
   finish_reasons: number[]

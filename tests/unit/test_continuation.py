@@ -601,6 +601,18 @@ async def test_oversized_original_history_skips_continuation_without_copying(
     assert client.calls[0]["contents"] is normalized.contents
 
 
+async def test_long_chinese_signed_history_above_one_mib_can_continue():
+    normalized = request(contents=[AistudioContent("user", [AistudioPart(
+        text="合成上下文" * 80_000, thought_signature="synthetic-signature",
+    )])])
+    client = FakeClient([output("first", finish=2), output("second", finish=1)])
+    result = await continuation.generate_content(client, normalized, auto_continue=True)
+    assert len(client.calls) == 2
+    assert result.text == "firstsecond"
+    assert client.calls[1]["contents"][0].parts[0] == normalized.contents[0].parts[0]
+    assert len(normalized.contents) == 1
+
+
 async def test_total_nonstream_deadline_includes_all_rounds(monkeypatch):
     monkeypatch.setattr(continuation, "settings", SimpleNamespace(timeout_stream=60))
     second_started = asyncio.Event()

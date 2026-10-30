@@ -78,7 +78,32 @@ function diagnosticSignals(record: ResponseDiagnostic) {
   if (record.empty_thought_parts) signals.push(`空思考 / 签名片段 ${record.empty_thought_parts} 个`)
   if (record.flags.includes('content_after_finish')) signals.push('结束信号后仍有内容')
   if (record.flags.includes('sequence_limited')) signals.push('顺序记录已达上限')
+  if (record.flags.includes('continuation_skipped_budget')) signals.push('抗截断未追加：历史预算不足')
+  if (record.flags.includes('continuation_skipped_unsupported')) signals.push('抗截断未追加：包含暂不支持回放的内容')
   return signals
+}
+
+function elapsed(value: number | undefined) {
+  return value == null ? '未记录' : `${(value / 1000).toFixed(3)} 秒`
+}
+
+function stage(record: ResponseDiagnostic, start: string, end: string) {
+  const from = record.timings_ms?.[start]
+  const to = record.timings_ms?.[end]
+  return from == null || to == null || to < from ? '未记录' : elapsed(to - from)
+}
+
+const preparationMilestones = [
+  ['browser_launch_started', '开始启动浏览器'], ['browser_ready', '浏览器已就绪'],
+  ['browser_context_ready', '账号页面已创建'], ['browser_cookies_loaded', '账号凭据已载入'],
+  ['browser_navigation_ready', '页面与身份已就绪'], ['botguard_hooks_ready', '捕获钩子已就绪'],
+  ['botguard_editor_ready', '编辑器已就绪'], ['temporary_chat_ready', '临时聊天检查完成'],
+  ['botguard_prompt_filled', '准备输入已填入'], ['botguard_run_dispatched', '模板捕获已触发'],
+  ['botguard_template_ready', '模板已捕获'], ['session_checkpoint_done', '会话检查点完成'],
+] as const
+
+function recordedPreparation(record: ResponseDiagnostic) {
+  return preparationMilestones.filter(([key]) => record.timings_ms?.[key] != null)
 }
 
 function categoryLabel(category: string) {
@@ -237,6 +262,48 @@ onUnmounted(errorsStore.cancel)
               </dt>
               <dd class="mt-1 text-gray-700">
                 {{ (record.duration_ms / 1000).toFixed(1) }} 秒 · {{ record.transport_status == null ? '未发送响应' : `HTTP ${record.transport_status}` }}
+              </dd>
+            </div>
+            <div>
+              <dt class="text-gray-400">
+                输入规模
+              </dt>
+              <dd class="mt-1 text-gray-700">
+                输入 {{ record.prompt_tokens == null ? '未知' : record.prompt_tokens.toLocaleString('en-US') }} token ·
+                请求体 {{ record.request_body_bytes == null ? '未记录' : `${(record.request_body_bytes / 1024).toFixed(1)} KiB` }}
+              </dd>
+            </div>
+            <div>
+              <dt class="text-gray-400">
+                准备 / 发送至上游首包
+              </dt>
+              <dd class="mt-1 text-gray-700">
+                {{ stage(record, 'account_preparation_started', 'account_ready') }} /
+                {{ stage(record, 'transport_dispatched', 'upstream_first_byte') }}
+              </dd>
+            </div>
+            <div>
+              <dt class="text-gray-400">
+                首段思考 / 首段正文（自请求进入）
+              </dt>
+              <dd class="mt-1 text-gray-700">
+                {{ elapsed(record.timings_ms?.first_thought) }} / {{ elapsed(record.timings_ms?.first_body) }}
+              </dd>
+            </div>
+            <div
+              v-if="recordedPreparation(record).length"
+              class="sm:col-span-2"
+            >
+              <dt class="text-gray-400">
+                准备里程碑（自请求进入）
+              </dt>
+              <dd class="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-gray-700">
+                <span
+                  v-for="[key, label] in recordedPreparation(record)"
+                  :key="key"
+                >
+                  {{ label }}：{{ elapsed(record.timings_ms?.[key]) }}
+                </span>
               </dd>
             </div>
             <div>

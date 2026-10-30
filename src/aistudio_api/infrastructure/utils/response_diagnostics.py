@@ -31,6 +31,7 @@ _FLAGS = frozenset({
     "multiple_upstream_calls", "retried", "auto_continued", "sequence_limited",
     "slow_first_body",
     "large_input",
+    "continuation_skipped_budget", "continuation_skipped_unsupported",
 })
 _OUTCOMES = frozenset({"success", "recovered", "failed", "cancelled"})
 _ERROR_KINDS = frozenset({
@@ -50,7 +51,7 @@ _TIMINGS = (
     "browser_launch_started", "browser_ready", "browser_context_ready",
     "browser_cookies_loaded", "browser_navigation_ready", "botguard_hooks_ready",
     "botguard_prompt_filled", "botguard_run_dispatched", "botguard_template_ready",
-    "session_checkpoint_done",
+    "session_checkpoint_done", "botguard_editor_ready", "temporary_chat_ready",
 )
 logger = get_logger("response_diagnostics")
 _store: ResponseDiagnosticStore | None = None
@@ -334,6 +335,14 @@ def begin_upstream_call() -> None:
             current.last_phase = None
 
 
+def note_flag(name: str) -> None:
+    """Only fixed diagnostic reasons may enter a request summary."""
+    with contextlib.suppress(Exception):
+        current = _current()
+        if current is not None and name in _FLAGS:
+            current.flags.add(name)
+
+
 def note_continuation() -> None:
     with contextlib.suppress(Exception):
         current = _current()
@@ -433,5 +442,6 @@ def finish_response_diagnostics(outcome: str, transport_status: int | None = Non
             with contextlib.suppress(Exception):
                 log = logger.warning if summary["outcome"] in {"failed", "cancelled"} or current.flags.intersection({
                     "marker_in_body", "thought_after_body", "content_after_finish", "slow_first_body", "large_input",
+                    "continuation_skipped_budget", "continuation_skipped_unsupported",
                 }) else logger.info
                 log("response_diagnostic %s", json.dumps(summary, separators=(",", ":")))

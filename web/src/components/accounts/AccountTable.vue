@@ -5,6 +5,8 @@ import { useAccountsStore } from '@/stores/accounts.ts'
 import { useSystemStore } from '@/stores/system.ts'
 import { useToastStore } from '@/stores/toast.ts'
 import { systemApi } from '@/api/system.ts'
+import { usePolling } from '@/composables/usePolling.ts'
+import { millisecondsUntilPacificMidnight } from '@/utils/format.ts'
 import { useCookieGroups, type CookieGroup } from './useCookieGroups.ts'
 import CookieGroupBlock from './CookieGroupBlock.vue'
 import AccountRow from './AccountRow.vue'
@@ -116,16 +118,13 @@ function toggleAllModels() {
   forceExpandAllModels.value = !forceExpandAllModels.value
 }
 
-// 美西午夜刷新倒计时计算
+const quotaClock = ref(Date.now())
+usePolling(async () => { quotaClock.value = Date.now() }, 60_000)
+
+// Use the actual Pacific offset at the next midnight, including DST changes.
 const hoursUntilPacificMidnight = computed(() => {
-  const now = new Date()
-  // 计算基于 UTC-8（美西冬令时/夏令时标准区间）
-  const utcNow = now.getTime() + now.getTimezoneOffset() * 60000
-  const pacificOffsetHours = -8
-  const pacificNow = new Date(utcNow + 3600000 * pacificOffsetHours)
-  const hoursLeft = 23 - pacificNow.getHours()
-  const minutesLeft = 59 - pacificNow.getMinutes()
-  return `${hoursLeft} 小时 ${minutesLeft} 分`
+  const minutes = Math.ceil(millisecondsUntilPacificMidnight(new Date(quotaClock.value)) / 60_000)
+  return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`
 })
 
 // 清理幽灵残留状态
@@ -286,7 +285,7 @@ async function handleClearModelCooldown(accountId: string, model: string) {
         <!-- Quota Reset Functional Info -->
         <div class="flex items-center gap-1.5 text-xs text-gray-500 font-mono shrink-0">
           <Clock class="w-3.5 h-3.5 text-gray-400" />
-          <span>每日配额刷新 (00:00 PST): 还剩 {{ hoursUntilPacificMidnight }}</span>
+          <span>每日配额刷新（太平洋时间 00:00）：还剩 {{ hoursUntilPacificMidnight }}</span>
         </div>
       </div>
     </div>

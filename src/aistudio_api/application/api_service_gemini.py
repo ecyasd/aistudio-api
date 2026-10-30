@@ -545,14 +545,15 @@ async def _generate_non_streaming(
 ):
 
     last_error: Exception | None = None
+    normalized: NormalizedGeminiRequest | None = None
     for attempt in range(MAX_RETRIES):
         note_attempt(attempt)
-        normalized = None
         account_id: str | None = None
         request_context_id: int | None = None
         request_auth_generation: object = AUTH_GENERATION_UNTRACKED
         try:
-            normalized = normalize_gemini_request(req, model_path)
+            if normalized is None:
+                normalized = normalize_gemini_request(req, model_path)
             note_timing("account_preparation_started")
             await ensure_active_account(attempt, model=model_path)
             note_timing("account_ready")

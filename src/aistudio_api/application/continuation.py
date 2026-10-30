@@ -22,11 +22,14 @@ from aistudio_api.domain.models import Candidate, ContentPart, ModelOutput
 from aistudio_api.infrastructure.gateway.client import AIStudioClient
 from aistudio_api.infrastructure.gateway.model_defaults import resolve_model_defaults
 from aistudio_api.infrastructure.gateway.wire_types import AistudioContent, AistudioPart
-from aistudio_api.infrastructure.utils.response_diagnostics import note_continuation
+from aistudio_api.infrastructure.utils.response_diagnostics import (
+    note_continuation,
+    note_flag,
+)
 
 MAX_EXTRA_ROUNDS = 2
 MAX_CONTINUATION_BYTES = 512 * 1024
-MAX_HISTORY_BYTES = 1024 * 1024
+MAX_HISTORY_BYTES = 8 * 1024 * 1024
 MAX_TOKENS_FINISH_REASON = 2
 PART_OVERHEAD_BYTES = 128
 CONTENT_OVERHEAD_BYTES = 64
@@ -105,16 +108,20 @@ def _plain_input_part(part: AistudioPart) -> bool:
 def _history_budget(normalized: NormalizedGeminiRequest) -> int:
     """Return remaining history bytes, or zero when continuation is unsafe."""
     if normalized.capture_images:
+        note_flag("continuation_skipped_unsupported")
         return 0
     if resolve_model_defaults(normalized.model).is_image_model:
+        note_flag("continuation_skipped_unsupported")
         return 0
     overrides = normalized.generation_config_overrides or {}
     if overrides.get("response_mime_type") not in (None, "", "text/plain"):
+        note_flag("continuation_skipped_unsupported")
         return 0
     if any(
         overrides.get(key) is not None
         for key in ("response_schema", "image_output_mode", "output_resolution")
     ):
+        note_flag("continuation_skipped_unsupported")
         return 0
     remaining = MAX_HISTORY_BYTES
     contents = chain(
@@ -126,17 +133,21 @@ def _history_budget(normalized: NormalizedGeminiRequest) -> int:
     for content in contents:
         remaining -= CONTENT_OVERHEAD_BYTES + len(content.role.encode("utf-8"))
         if remaining <= 0:
+            note_flag("continuation_skipped_budget")
             return 0
         for part in content.parts:
             if not _plain_input_part(part):
+                note_flag("continuation_skipped_unsupported")
                 return 0
             # The character check avoids allocating an encoded copy of a huge
             # already-rejected string. Object overhead is bounded as well.
             cost = _part_cost(part.text, part.thought_signature, remaining)
             if cost > remaining:
+                note_flag("continuation_skipped_budget")
                 return 0
             remaining -= cost
             if remaining <= 0:
+                note_flag("continuation_skipped_budget")
                 return 0
     return remaining
 

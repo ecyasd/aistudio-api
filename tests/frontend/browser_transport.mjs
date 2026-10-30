@@ -212,4 +212,25 @@ for (const mode of ['stream total bound', 'stream read failure', 'stream cancell
     assert.equal(Object.keys(b.window.__AISTUDIO__.streams).length, 0);
     checks.push(mode);
 }
+{
+    const source = fs.readFileSync(new URL('bootstrap_run_ready.js', scripts), 'utf8');
+    const input = {value: "say '1'"};
+    const button = {innerText: 'Run', disabled: false, classList: {contains: () => false}, getAttribute: () => null};
+    const document = {querySelector: () => input, querySelectorAll: () => [button]};
+    const ready = vm.runInNewContext(`(${source})`, {document});
+    assert.equal(ready("say '1'"), true);
+    input.value = 'not settled';
+    assert.equal(ready("say '1'"), false);
+    input.value = "say '1'";
+    button.disabled = true;
+    assert.equal(ready("say '1'"), false);
+    button.disabled = false;
+    button.getAttribute = () => 'true';
+    assert.equal(ready("say '1'"), false);
+    document.querySelectorAll = () => [];
+    assert.equal(ready("say '1'"), false);
+    document.querySelector = () => null;
+    assert.equal(ready("say '1'"), false);
+    checks.push('bootstrap input settling is bypassed only for matching text and an enabled Run control');
+}
 console.log(JSON.stringify({offline: true, passed: checks.length, checks}, null, 2));
