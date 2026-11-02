@@ -154,7 +154,8 @@ async def _consume(env, request, model, stream):
     )
     if stream:
         frames = [
-            json.loads(frame[6:]) async for frame in response.body_iterator
+            json.loads(frame[6:]) async for write in response.body_iterator
+            for frame in write.split("\n\n")
             if frame.startswith("data: ")
         ]
     else:

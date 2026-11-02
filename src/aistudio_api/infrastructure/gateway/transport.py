@@ -33,8 +33,11 @@ if TYPE_CHECKING:
 
 from aistudio_api.infrastructure.utils.logger import get_logger
 from aistudio_api.infrastructure.utils.response_diagnostics import (
+    current_monotonic,
     note_timing,
     note_transport_wait,
+    observe_ack_wait_ms,
+    observe_upstream_gap_ms,
 )
 
 logger = get_logger("transport")
@@ -104,6 +107,7 @@ class XHRStreamTransport:
         self._pages: dict[str, CDPPage] = {}
         self._failed: set[str] = set()
         self._received_seq: dict[str, int] = {}
+        self._pushed_at: dict[str, dict[int, float]] = {}
         self._cleanup_tasks: set[asyncio.Task[None]] = set()
 
     async def _cleanup_browser(self, page: CDPPage, script: str, rid: str) -> None:
@@ -120,6 +124,20 @@ class XHRStreamTransport:
         self._cleanup_tasks.add(task)
         task.add_done_callback(self._cleanup_tasks.discard)
         return task
+
+    async def _join_cleanup(self, page: CDPPage, script: str, rid: str) -> None:
+        """Keep the lease until this bounded abort settles, even on repeated cancel."""
+        cleanup = self._schedule_cleanup(page, script, rid)
+        cancelled = False
+        with CancelScope(shield=True):
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    cancelled = True
+            cleanup.result()
+        if cancelled:
+            raise asyncio.CancelledError
 
     def _clear_buffer(self, rid: str) -> None:
         self._buffered_bytes -= self._queue_bytes.pop(rid, 0)
@@ -194,6 +212,7 @@ class XHRStreamTransport:
                             q.put_nowait(data)
                             if type(seq) is int and seq > 0:
                                 self._received_seq[rid] = seq
+                                self._pushed_at.setdefault(rid, {})[seq] = current_monotonic()
                             self._queue_bytes[rid] = (
                                 self._queue_bytes.get(rid, 0) + size
                             )
@@ -350,8 +369,7 @@ class XHRStreamTransport:
             # permit account recovery to repeat the original generation.
             raise BrowserTransportError("Browser response delivery failed") from exc
         finally:
-            with CancelScope(shield=True):
-                await asyncio.shield(self._schedule_cleanup(page, HOOKED_CLEANUP_JS, rid))
+            await self._join_cleanup(page, HOOKED_CLEANUP_JS, rid)
 
     async def send_streaming_request(
         self,
@@ -391,6 +409,7 @@ class XHRStreamTransport:
         self._queue_bytes[rid] = 0
         self._pages[rid] = page
         self._received_seq[rid] = 0
+        self._pushed_at[rid] = {}
 
         init_args = build_streaming_init_args(
             url=url,
@@ -408,6 +427,8 @@ class XHRStreamTransport:
         last_progress_at = asyncio.get_running_loop().time()
         last_probe_at = last_progress_at
         repaired_stream = False
+        ack_wait_started: float | None = None
+        upstream_wait_started = current_monotonic()
 
         try:
             async with asyncio.timeout_at(deadline):
@@ -437,6 +458,7 @@ class XHRStreamTransport:
                 if isinstance(receipt, dict) and receipt.get("started") is True:
                     note_timing("browser_request_started")
             last_progress_at = asyncio.get_running_loop().time()
+            upstream_wait_started = current_monotonic()
             while not is_terminal:
                 if page.is_closed() is True:
                     raise RuntimeError("Browser page closed during streaming")
@@ -477,6 +499,11 @@ class XHRStreamTransport:
                 )
                 self._queue_bytes[rid] = self._queue_bytes.get(rid, 0) - event_size
                 self._buffered_bytes -= event_size
+                seq = event.get("seq")
+                if isinstance(seq, int) and seq > 0:
+                    ack_wait_started = self._pushed_at.get(rid, {}).pop(
+                        seq, current_monotonic()
+                    )
                 if etype == "status":
                     status = int(str(event.get("status") or 0))
                     yield ("status", status)
@@ -485,6 +512,12 @@ class XHRStreamTransport:
                 elif etype == "chunk":
                     text = str(event.get("text") or "")
                     if text:
+                        # Use binding arrival, not dequeue time: downstream
+                        # processing and ACK time must not look like Google silence.
+                        arrived_at = ack_wait_started if ack_wait_started is not None else current_monotonic()
+                        observe_upstream_gap_ms(
+                            int(max(0.0, arrived_at - upstream_wait_started) * 1000)
+                        )
                         yield ("chunk", text.encode("utf-8"))
                         deadline = asyncio.get_running_loop().time() + timeout_s
                 elif etype == "error":
@@ -496,7 +529,6 @@ class XHRStreamTransport:
                     raise RuntimeError("streaming request failed: cancelled")
                 elif etype == "done":
                     is_terminal = True
-                seq = event.get("seq")
                 if isinstance(seq, int) and seq > 0:
                     await asyncio.wait_for(
                         page.evaluate(
@@ -506,7 +538,13 @@ class XHRStreamTransport:
                         ),
                         timeout=CLEANUP_TIMEOUT_S,
                     )
+                    if ack_wait_started is not None:
+                        observe_ack_wait_ms(
+                            int(max(0.0, current_monotonic() - ack_wait_started) * 1000)
+                        )
+                        ack_wait_started = None
                 last_progress_at = asyncio.get_running_loop().time()
+                upstream_wait_started = current_monotonic()
             if not status_sent:
                 raise TimeoutError("streaming request timeout: no response status")
             if not is_terminal:
@@ -519,10 +557,14 @@ class XHRStreamTransport:
             # session preparation's broad recovery policy and replay it.
             raise BrowserTransportError("Browser stream delivery failed") from exc
         finally:
+            if ack_wait_started is not None:
+                observe_ack_wait_ms(
+                    int(max(0.0, current_monotonic() - ack_wait_started) * 1000)
+                )
             self._clear_buffer(rid)
             self._queues.pop(rid, None)
             self._pages.pop(rid, None)
             self._failed.discard(rid)
             self._received_seq.pop(rid, None)
-            with CancelScope(shield=True):
-                await asyncio.shield(self._schedule_cleanup(page, STREAM_CLEANUP_JS, rid))
+            self._pushed_at.pop(rid, None)
+            await self._join_cleanup(page, STREAM_CLEANUP_JS, rid)

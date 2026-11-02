@@ -166,7 +166,8 @@ async def test_public_response_keeps_code_parts_in_order_with_metadata(
         "gemini-synthetic", request, client, stream=stream,
     )
     if stream:
-        frames = [json.loads(frame[6:]) async for frame in response.body_iterator
+        frames = [json.loads(frame[6:]) async for write in response.body_iterator
+                  for frame in write.split("\n\n")
                   if frame.startswith("data: ")]
         assert not any("error" in frame for frame in frames)
         public = [part for frame in frames for candidate in frame.get("candidates", [])

@@ -8,6 +8,11 @@ from collections import deque
 from starlette.exceptions import HTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from aistudio_api.api.sse_delivery import (
+    FIRST_SSE_SEND_STATE_KEY,
+    SSE_DELIVERY_STATE_KEY,
+    SSEDelivery,
+)
 from aistudio_api.infrastructure.utils.error_records import (
     bind_request_context,
     finish_request,
@@ -18,10 +23,12 @@ from aistudio_api.infrastructure.utils.error_records import (
     reset_request_context,
 )
 from aistudio_api.infrastructure.utils.response_diagnostics import (
+    current_monotonic,
     finish_response_diagnostics,
     initialize_response_diagnostics,
     note_timing,
     observe_request_body_bytes,
+    observe_send_wait_ms,
 )
 
 
@@ -85,6 +92,9 @@ class ErrorRecordsMiddleware:
         context.operation = operation
         if operation in {"generate_content", "stream_generate_content"}:
             initialize_response_diagnostics(stream=operation == "stream_generate_content")
+        first_sse_sent = asyncio.Event() if operation == "stream_generate_content" else None
+        if first_sse_sent is not None:
+            scope.setdefault("state", {})[FIRST_SSE_SEND_STATE_KEY] = first_sse_sent
         scope.setdefault("state", {})["error_record_context"] = context
         status = None
         completed = False
@@ -111,14 +121,33 @@ class ErrorRecordsMiddleware:
                     (key, value) for key, value in message.get("headers", [])
                     if key.lower() != b"x-request-id"
                 ] + [(b"x-request-id", context.request_id.encode("ascii"))]
+            is_body_write = (
+                message["type"] == "http.response.body"
+                and bool(message.get("body"))
+            )
+            send_started = current_monotonic() if is_body_write else 0.0
             try:
-                await send(message)
+                # HTTP middleware accepts messages through memory streams;
+                # enforce the budget at the actual outer ASGI write as well.
+                delivery = scope.get("state", {}).get(SSE_DELIVERY_STATE_KEY)
+                timeout = delivery.send_timeout_seconds if isinstance(delivery, SSEDelivery) else None
+                async with asyncio.timeout(timeout):
+                    await send(message)
+            except TimeoutError:
+                raise
             except OSError:
                 disconnected = True
                 raise
+            finally:
+                if is_body_write:
+                    observe_send_wait_ms(
+                        int(max(0.0, current_monotonic() - send_started) * 1000)
+                    )
             if message["type"] == "http.response.start":
                 note_timing("response_started")
             elif message["type"] == "http.response.body" and message.get("body", b"").startswith(b"data:"):
+                if first_sse_sent is not None:
+                    first_sse_sent.set()
                 # Empty heartbeat separators do not mean the model emitted a
                 # token. Measure successful ASGI sends, including backpressure.
                 note_timing("first_data_sent")

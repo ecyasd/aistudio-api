@@ -43,6 +43,13 @@ export interface ResponseDiagnostic {
   transport_probes?: number
   transport_repair_attempts?: number
   transport_wait_ms?: number
+  max_upstream_gap_ms?: number
+  max_queue_bytes?: number
+  send_wait_ms?: number
+  max_send_wait_ms?: number
+  ack_wait_ms?: number
+  max_ack_wait_ms?: number
+  coalesced_events?: number
   timings_ms?: Record<string, number>
   upstream_calls: number
   retries: number

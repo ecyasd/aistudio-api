@@ -199,6 +199,25 @@ WARNING，失败和取消的摘要也使用 WARNING，普通成功和恢复使�
 `response_started` / `first_data_sent` 为 HTTP 响应头与首个 SSE data 帧成功交给 ASGI。
 缺失阶段不填零，重试与续写不覆盖首次时间；空心跳不算 SSE data。
 这些时间不证明客户端收到或显示了文本；非流式解析的正文时间包含等待完整响应的时间。
+
+流式传输还记录以下固定数字，管理页在“流式传输”中展示；不记录逐片内容或逐片时间列表：
+
+- `max_upstream_gap_ms`：收到正文 binding 之前的最长主动读取等待，包含响应头到首片的
+  等待，排除 Python 下游消费和 ACK 调用耗时。没有观测到正文片段时为 0，不能据此
+  推断上游很快；也不等于 Google 内部 token 生成间隔。结束前的未完成等待仍需结合
+  原 `transport_wait_phase`、超时分类和阶段时间判断。
+- `max_queue_bytes`：HTTP SSE 缓冲中完整事件的 UTF-8 字节峰值，包含等待即时取走的事件，
+  不含已交给 ASGI 的写入批次及生产者正在提交的一个事件，不表示整条链路的总内存。
+- `send_wait_ms` / `max_send_wait_ms`：最外层应用调用 ASGI `send` 的累计／最长耗时，
+  包含失败或取消的发送，不在多层中间件重复累计。它只表示应用发送耗时，不证明公网
+  已交付；Caddy、操作系统或客户端仍可能继续缓冲。
+- `ack_wait_ms` / `max_ack_wait_ms`：浏览器事件到达 Python 至消费确认完成的累计／最长
+  耗时，包含消费、解析和 ACK 调用，不是公网 RTT。状态和完成事件也参与统计。
+- `coalesced_events`：通过拼接已有完整 SSE 事件省去的写入次数，不是删除的文本数或批次数。
+
+首片发送完成前保持单槽，之后缓冲最多 8 事件／32 KiB；单个超大完整事件可独占空缓冲。
+只合并已有积压，不增加固定延时，不改变心跳、发送超时、真实结束条件或已发布后禁止重放
+的规则。心跳和合并都不能恢复机场切换后已经断开的连接，也不提高模型自身生成速度。
 `browser_request_started` 表示浏览器初始化脚本已返回启动回执，仍不证明 Google 已收到请求。
 无片段期间，服务端每 20 秒进行一次只读状态检查，每次不超过两秒，记录
 `transport_wait_phase`、`transport_wait_ms`、`transport_probes` 和 `transport_repair_attempts`。

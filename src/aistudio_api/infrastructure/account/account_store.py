@@ -26,6 +26,7 @@ from aistudio_api.infrastructure.account.storage_state import (
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
+_AUTH_GENERATION_UNCHECKED = object()
 
 
 def _registry_transaction(
@@ -414,12 +415,17 @@ class AccountStore:
         return registry.accounts[account_id]
 
     @_registry_transaction
-    def update_account_email(self, account_id: str, email: str) -> bool:
+    def update_account_email(
+        self, account_id: str, email: str, *,
+        expected_generation: object = _AUTH_GENERATION_UNCHECKED,
+    ) -> bool:
         """更新账号的登录邮箱，并持久化 meta.json 与 registry.json。"""
         registry = self._load_registry()
         if account_id not in registry.accounts:
             return False
         acc = registry.accounts[account_id]
+        if expected_generation is not _AUTH_GENERATION_UNCHECKED and acc.auth_generation != expected_generation:
+            return False
         if acc.email == email:
             return False
         acc.email = email

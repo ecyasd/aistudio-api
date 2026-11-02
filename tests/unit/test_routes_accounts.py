@@ -196,7 +196,9 @@ async def test_detect_email_uses_isolated_target_when_browser_is_cold(
     )
     session.switch_auth.assert_not_awaited()
     service.set_active_account.assert_not_called()
-    service.update_account_email.assert_called_once_with("acc_1", "detected@example.com")
+    service.update_account_email.assert_called_once_with(
+        "acc_1", "detected@example.com", expected_generation=account.auth_generation,
+    )
     assert session._auth_file == "synthetic/active/auth.json"
 
 

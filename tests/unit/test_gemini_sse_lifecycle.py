@@ -652,7 +652,7 @@ async def test_heartbeat_does_not_prevent_retry_or_change_usage(sse_env, request
     assert closed == [0, 1]
     assert attempts[0]["force_refresh_capture"] is False
     assert attempts[1]["force_refresh_capture"] is True
-    payloads = [json.loads(chunk[6:]) for chunk in chunks if chunk.startswith("data: ")]
+    payloads = [json.loads(frame[6:]) for chunk in chunks for frame in chunk.split("\n\n") if frame.startswith("data: ")]
     assert payloads[0]["candidates"][0]["content"]["parts"][0]["text"] == "completed after retry"
     assert "thoughtSignature" not in payloads[0]["candidates"][0]["content"]["parts"][0]
     assert payloads[-1]["usageMetadata"]["totalTokenCount"] == 13
@@ -868,7 +868,7 @@ async def test_retry_drops_metadata_from_the_failed_attempt(sse_env, request_bod
         "gemini-test", request_body, sse_env.client, stream=True
     )
     chunks = [chunk async for chunk in response.body_iterator if chunk.startswith("data: ")]
-    payloads = [json.loads(chunk[6:]) for chunk in chunks]
+    payloads = [json.loads(frame[6:]) for chunk in chunks for frame in chunk.split("\n\n") if frame.startswith("data: ")]
     assert len(payloads) == 2
     assert all("responseId" not in payload for payload in payloads)
     assert "thoughtSignature" not in payloads[0]["candidates"][0]["content"]["parts"][0]

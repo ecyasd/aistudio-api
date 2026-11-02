@@ -333,6 +333,20 @@ onUnmounted(errorsStore.cancel)
               </dt>
               <dd class="mt-1 text-gray-700">
                 {{ transportPhases[record.transport_wait_phase ?? ''] ?? '未记录等待阶段' }} · 探测 {{ record.transport_probes ?? '未记录' }} 次 · 恢复尝试 {{ record.transport_repair_attempts ?? '未记录' }} 次
+                <template v-if="record.coalesced_events">
+                  · 合并省去 {{ record.coalesced_events }} 次写入
+                </template>
+              </dd>
+            </div>
+            <div>
+              <dt class="text-gray-400">
+                流式传输
+              </dt>
+              <dd class="mt-1 text-gray-700">
+                上游读取最大等待 {{ record.max_upstream_gap_ms != null ? `${record.max_upstream_gap_ms} ms` : '未记录' }} · HTTP 缓冲峰值 {{ record.max_queue_bytes != null ? `${(record.max_queue_bytes / 1024).toFixed(1)} KiB` : '未记录' }}
+                <template v-if="record.send_wait_ms != null || record.ack_wait_ms != null">
+                  · 应用发送最长 {{ record.max_send_wait_ms ?? 0 }} ms (累计 {{ record.send_wait_ms ?? 0 }} ms) · 浏览器确认最长 {{ record.max_ack_wait_ms ?? 0 }} ms (累计 {{ record.ack_wait_ms ?? 0 }} ms)
+                </template>
               </dd>
             </div>
             <div>

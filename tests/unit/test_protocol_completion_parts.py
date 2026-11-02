@@ -113,7 +113,8 @@ async def sse_payloads(client, req):
     )
     return [
         json.loads(frame[6:])
-        async for frame in response.body_iterator
+        async for write in response.body_iterator
+        for frame in write.split("\n\n")
         if frame.startswith("data: ")
     ]
 

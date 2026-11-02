@@ -7,7 +7,9 @@ function isResponseDiagnostic(value: unknown): value is ResponseDiagnostic {
   const counters = ['duration_ms', 'upstream_calls', 'retries', 'body_chars', 'thought_chars',
     'thought_after_body', 'empty_thought_parts', 'marker_count']
   const inputCounters = ['request_body_bytes', 'prompt_tokens', 'thought_tokens', 'browser_idle_timeout_s',
-    'transport_probes', 'transport_repair_attempts', 'transport_wait_ms']
+    'transport_probes', 'transport_repair_attempts', 'transport_wait_ms',
+    'max_upstream_gap_ms', 'max_queue_bytes', 'send_wait_ms', 'max_send_wait_ms',
+    'ack_wait_ms', 'max_ack_wait_ms', 'coalesced_events']
   return typeof record.request_id === 'string' && typeof record.time === 'string'
     && (record.account_ids === undefined || (Array.isArray(record.account_ids) && record.account_ids.length <= 32
       && record.account_ids.every(value => typeof value === 'string')))
