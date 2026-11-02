@@ -93,8 +93,12 @@ def test_dynamic_log_level_switching():
     set_log_level("INFO")
 
 
-def test_debug_env_var_triggers_dump_without_changing_log_level():
+def test_debug_env_var_triggers_dump_without_changing_log_level(monkeypatch):
     """验证 DEBUG 环境变量仅用于触发 dump 请求，绝不影响日志输出级别。"""
+    from aistudio_api.infrastructure.utils import logger
+
+    # Exercise environment defaults without a prior management runtime override.
+    monkeypatch.setattr(logger, "_dump_requests_override", None)
     set_log_level("INFO")
     initial_level = get_log_level()
 

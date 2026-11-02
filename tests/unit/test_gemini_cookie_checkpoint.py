@@ -174,7 +174,7 @@ async def test_completed_response_releases_lease_after_checkpoint_budget(
         )
         if stream:
             chunks = [chunk async for chunk in response.body_iterator]
-            final = json.loads(chunks[-1][6:])
+            final = json.loads("".join(chunks).strip().split("\n\n")[-1][6:])
             assert final["candidates"][0]["finishReason"] == "STOP"
             assert final["usageMetadata"]["totalTokenCount"] == 2
         else:

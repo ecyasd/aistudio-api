@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections import deque
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from contextlib import suppress
+from dataclasses import dataclass
 from typing import cast
 
 from anyio import CancelScope
 from fastapi import HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
-from starlette.types import Message, Send
+from starlette.types import Message, Receive, Scope, Send
 
 from aistudio_api.api.gemini_errors import project_gemini_error
 from aistudio_api.api.response_models import (
@@ -22,6 +24,12 @@ from aistudio_api.api.response_models import (
 )
 from aistudio_api.api.responses import to_gemini_parts, to_gemini_usage_metadata
 from aistudio_api.api.schemas import GeminiGenerateContentRequest
+from aistudio_api.api.sse_delivery import (
+    FIRST_SSE_SEND_STATE_KEY,
+    SSE_DELIVERY_STATE_KEY,
+    SSE_SEND_TIMEOUT_SECONDS,
+    SSEDelivery,
+)
 from aistudio_api.application.account_orchestrator import validate_account_availability
 from aistudio_api.application.chat_service import (
     NormalizedGeminiRequest,
@@ -42,11 +50,14 @@ from aistudio_api.infrastructure.utils.error_records import (
 from aistudio_api.infrastructure.utils.logger import get_logger
 from aistudio_api.infrastructure.utils.response_diagnostics import (
     configure_generation,
+    note_coalesced_events,
+    observe_queue_bytes,
 )
 
 logger = get_logger("api.gemini")
 SSE_HEARTBEAT_INTERVAL_SECONDS = 15.0
-SSE_SEND_TIMEOUT_SECONDS = 30.0
+SSE_BUFFER_MAX_BYTES = 32 * 1024
+SSE_BUFFER_MAX_EVENTS = 8
 WIRE_TO_GEMINI_FINISH_REASON: dict[int, str] = {
     0: "FINISH_REASON_UNSPECIFIED",
     1: "STOP",
@@ -295,26 +306,132 @@ def _preflight_gemini_stream(
     return normalized
 
 
+@dataclass(frozen=True)
+class _QueuedSSEItem:
+    value: str | Exception | None
+    size: int = 0
+    coalesceable: bool = False
+
+
+class _SSEBuffer:
+    """Single-producer FIFO, bounded by UTF-8 bytes and event count.
+
+    One indivisible oversized event may occupy the empty buffer on its own;
+    splitting a signed/multimodal Part or waiting for space forever is invalid.
+    The caller still owns the yielded write and at most one blocked put.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_bytes: int = SSE_BUFFER_MAX_BYTES,
+        max_events: int = SSE_BUFFER_MAX_EVENTS,
+        coalesce: bool = False,
+    ) -> None:
+        self.max_bytes = max(1, int(max_bytes))
+        self.max_events = max(1, int(max_events))
+        self.coalesce = coalesce
+        self.buffered_bytes = 0
+        self._items: deque[_QueuedSSEItem] = deque()
+        self._not_empty = asyncio.Event()
+        self._not_full = asyncio.Event()
+        self._not_full.set()
+        self._first_data_sent = False
+        self._backlog_enabled = False
+
+    def allow_backlog(self) -> None:
+        """Expand only after the first yield resumes (the first send finished)."""
+        self._backlog_enabled = True
+        self._not_full.set()
+
+    def _can_put(self, size: int) -> bool:
+        if not self._items:
+            return True
+        return (
+            len(self._items) < (self.max_events if self._backlog_enabled else 1)
+            and self.buffered_bytes + size <= self.max_bytes
+        )
+
+    async def put(self, item: str | Exception | None) -> None:
+        if isinstance(item, str):
+            size = len(item.encode("utf-8"))
+            while not self._can_put(size):
+                self._not_full.clear()
+                await self._not_full.wait()
+            coalesceable = (
+                item.startswith("data: ")
+                and not item.startswith('data: {"error":')
+            )
+            self._items.append(_QueuedSSEItem(item, size, coalesceable))
+            self.buffered_bytes += size
+            observe_queue_bytes(self.buffered_bytes)
+            if not self._can_put(1):
+                self._not_full.clear()
+        else:
+            self._items.append(_QueuedSSEItem(item, 0, False))
+        self._not_empty.set()
+
+    async def get(self) -> str | Exception | None:
+        while not self._items:
+            self._not_empty.clear()
+            await self._not_empty.wait()
+        first = self._items.popleft()
+        if not isinstance(first.value, str):
+            if not self._items:
+                self._not_empty.clear()
+            self._not_full.set()
+            return first.value
+        freed = first.size
+        value = first.value
+        if self.coalesce and self._first_data_sent and first.coalesceable:
+            batch = [value]
+            while self._items and self._items[0].coalesceable:
+                next_item = self._items.popleft()
+                assert isinstance(next_item.value, str)
+                batch.append(next_item.value)
+                freed += next_item.size
+            if len(batch) > 1:
+                note_coalesced_events(len(batch) - 1)
+                value = "".join(batch)
+        if first.coalesceable:
+            self._first_data_sent = True
+        self.buffered_bytes = max(0, self.buffered_bytes - freed)
+        if not self._items:
+            self._not_empty.clear()
+        self._not_full.set()
+        return value
+
+
 async def _sse_with_heartbeats(
-    source: Callable[[Callable[[str], Awaitable[None]]], Awaitable[None]], *, interval: float,
+    source: Callable[[Callable[[str], Awaitable[None]]], Awaitable[None]],
+    *,
+    interval: float,
+    max_buffer_bytes: int = SSE_BUFFER_MAX_BYTES,
+    max_buffer_events: int = 1,
+    coalesce: bool = False,
+    delivery: SSEDelivery | None = None,
 ) -> AsyncGenerator[str, None]:
-    """Run generation and close its resources in one task, with one bounded queue."""
-    queue: asyncio.Queue[str | Exception | None] = asyncio.Queue(maxsize=1)
+    """Run generation and close its resources in one task, with a bounded byte/event buffer."""
+    buffer = _SSEBuffer(
+        max_bytes=max_buffer_bytes,
+        max_events=max_buffer_events,
+        coalesce=coalesce,
+    )
 
     async def produce() -> None:
         try:
-            await source(queue.put)
+            await source(buffer.put)
         except Exception as exc:
-            await queue.put(exc)
+            await buffer.put(exc)
         else:
-            await queue.put(None)
+            await buffer.put(None)
 
     producer = asyncio.create_task(produce(), name="gemini-sse-producer")
     pending: asyncio.Task[str | Exception | None] | None = None
     try:
         while True:
             if pending is None:
-                pending = asyncio.create_task(queue.get(), name="gemini-sse-read")
+                pending = asyncio.create_task(buffer.get(), name="gemini-sse-read")
             done, _ = await asyncio.wait(
                 {pending, producer},
                 timeout=interval,
@@ -337,6 +454,8 @@ async def _sse_with_heartbeats(
             if isinstance(item, Exception):
                 raise item
             yield item
+            if delivery is None or delivery.first_sent is None or delivery.first_sent.is_set():
+                buffer.allow_backlog()
     finally:
         # Cancel the producer even while it is blocked on queue backpressure.
         # Its aclosing block closes all upstream scopes in the same task.
@@ -351,6 +470,23 @@ async def _sse_with_heartbeats(
 
 
 class _GeminiStreamingResponse(StreamingResponse):
+    def __init__(
+        self, content: AsyncGenerator[str, None], *,
+        delivery: SSEDelivery | None = None,
+        media_type: str | None = None, headers: Mapping[str, str] | None = None,
+    ) -> None:
+        super().__init__(content, media_type=media_type, headers=headers)
+        self._delivery = delivery or SSEDelivery()
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        state = scope.setdefault("state", {})
+        first_sent = state.get(FIRST_SSE_SEND_STATE_KEY)
+        if isinstance(first_sent, asyncio.Event):
+            self._delivery.first_sent = first_sent
+        self._delivery.send_timeout_seconds = SSE_SEND_TIMEOUT_SECONDS
+        state[SSE_DELIVERY_STATE_KEY] = self._delivery
+        await super().__call__(scope, receive, send)
+
     async def stream_response(self, send: Send) -> None:
         async def bounded_send(message: Message) -> None:
             async with asyncio.timeout(SSE_SEND_TIMEOUT_SECONDS):
@@ -415,8 +551,16 @@ def _build_gemini_streaming_response(
                 )
             await emit(format_sse_error(exc))
 
+    delivery = SSEDelivery()
     return _GeminiStreamingResponse(
-        _sse_with_heartbeats(produce, interval=SSE_HEARTBEAT_INTERVAL_SECONDS),
+        _sse_with_heartbeats(
+            produce,
+            interval=SSE_HEARTBEAT_INTERVAL_SECONDS,
+            max_buffer_events=SSE_BUFFER_MAX_EVENTS,
+            coalesce=True,
+            delivery=delivery,
+        ),
+        delivery=delivery,
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

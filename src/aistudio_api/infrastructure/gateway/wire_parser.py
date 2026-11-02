@@ -539,6 +539,12 @@ def _validate_content(raw_candidate: list[object]) -> None:
             )
         ):
             raise RequestError(502, "Upstream response contains a malformed Part")
+        signature = (
+            part[WIRE_PART_THOUGHT_SIGNATURE_INDEX]
+            if len(part) > WIRE_PART_THOUGHT_SIGNATURE_INDEX else None
+        )
+        if signature is not None and not isinstance(signature, str):
+            raise RequestError(502, "Upstream response contains a malformed signature Part")
         inline = part[WIRE_PART_INLINE_DATA_INDEX] if len(part) > WIRE_PART_INLINE_DATA_INDEX else None
         if inline is not None:
             if (

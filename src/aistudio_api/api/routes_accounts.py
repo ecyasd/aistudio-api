@@ -167,9 +167,11 @@ async def detect_account_email(
     target_auth = account_service.get_account_auth_path(account_id)
     if target_auth is None:
         raise HTTPException(status_code=404, detail="账号凭据不存在")
+    expected_generation = acc.auth_generation
     email = await browser_session.detect_account_email(str(target_auth))
-    if email:
-        account_service.update_account_email(account_id, email)
+    if email and account_service.update_account_email(
+        account_id, email, expected_generation=expected_generation,
+    ):
         log.info("已自动识别并更新账号 %s 邮箱: %s", account_id, mask_email(email))
 
     acc = account_service.get_account(account_id)

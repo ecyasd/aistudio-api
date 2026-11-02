@@ -56,6 +56,10 @@ _COUNTERS = (
     "request_body_bytes",
     "transport_probes", "transport_repair_attempts", "transport_wait_ms",
     "body_parts", "terminal_body_chars", "terminal_body_replays", "suppressed_body_chars",
+    "max_upstream_gap_ms", "max_queue_bytes",
+    "send_wait_ms", "max_send_wait_ms",
+    "ack_wait_ms", "max_ack_wait_ms",
+    "coalesced_events",
 )
 _TIMINGS = (
     "admitted", "account_preparation_started", "account_ready", "session_ready",
@@ -230,6 +234,13 @@ class _Accumulator:
     transport_repair_attempts: int = 0
     transport_wait_ms: int = 0
     transport_wait_phase: str | None = None
+    max_upstream_gap_ms: int = 0
+    max_queue_bytes: int = 0
+    send_wait_ms: int = 0
+    max_send_wait_ms: int = 0
+    ack_wait_ms: int = 0
+    max_ack_wait_ms: int = 0
+    coalesced_events: int = 0
     thought_after_body: int = 0
     empty_thought_parts: int = 0
     marker_count: int = 0
@@ -381,6 +392,55 @@ def note_transport_wait(phase: str, elapsed_ms: int, *, repair_attempted: bool =
             current.transport_wait_ms = _count(elapsed_ms)
             current.transport_probes = _count(current.transport_probes + 1)
             current.transport_repair_attempts = _count(current.transport_repair_attempts + int(repair_attempted))
+
+
+def current_monotonic() -> float:
+    """Return monotonic clock value shared with diagnostic timing probes."""
+    return time.monotonic()
+
+
+def observe_upstream_gap_ms(elapsed_ms: int) -> None:
+    """Record active wait to a body binding arrival, excluding consumer/ACK time."""
+    with contextlib.suppress(Exception):
+        current = _current()
+        if current is not None and type(elapsed_ms) is int and elapsed_ms >= 0:
+            current.max_upstream_gap_ms = max(current.max_upstream_gap_ms, _count(elapsed_ms))
+
+
+def observe_queue_bytes(buffered_bytes: int) -> None:
+    """Record peak HTTP SSE buffer bytes, excluding the yielded/blocked write."""
+    with contextlib.suppress(Exception):
+        current = _current()
+        if current is not None and type(buffered_bytes) is int and buffered_bytes >= 0:
+            current.max_queue_bytes = max(current.max_queue_bytes, _count(buffered_bytes))
+
+
+def observe_send_wait_ms(elapsed_ms: int) -> None:
+    """Record outer ASGI send duration, not time of client receipt/display."""
+    with contextlib.suppress(Exception):
+        current = _current()
+        if current is not None and type(elapsed_ms) is int and elapsed_ms >= 0:
+            bounded = _count(elapsed_ms)
+            current.send_wait_ms = _count(current.send_wait_ms + bounded)
+            current.max_send_wait_ms = max(current.max_send_wait_ms, bounded)
+
+
+def observe_ack_wait_ms(elapsed_ms: int) -> None:
+    """Record cumulative and peak time browser events waited for consumer ACK."""
+    with contextlib.suppress(Exception):
+        current = _current()
+        if current is not None and type(elapsed_ms) is int and elapsed_ms >= 0:
+            bounded = _count(elapsed_ms)
+            current.ack_wait_ms = _count(current.ack_wait_ms + bounded)
+            current.max_ack_wait_ms = max(current.max_ack_wait_ms, bounded)
+
+
+def note_coalesced_events(count: int) -> None:
+    """Record how many queued SSE events were merged into batched writes."""
+    with contextlib.suppress(Exception):
+        current = _current()
+        if current is not None and type(count) is int and count > 0:
+            current.coalesced_events = _count(current.coalesced_events + count)
 
 
 def begin_upstream_call() -> None:

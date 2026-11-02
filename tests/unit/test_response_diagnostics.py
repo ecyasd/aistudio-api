@@ -323,7 +323,8 @@ async def test_api_retry_and_continuation_counters_share_one_inbound_context(dia
     with trace(stream=stream):
         response = await api.handle_gemini_generate_content("gemini-4-argon", req, client, stream=stream)
         if stream:
-            frames = [json.loads(frame[6:]) async for frame in response.body_iterator if frame.startswith("data: ")]
+            frames = [json.loads(frame[6:]) async for write in response.body_iterator
+                      for frame in write.split("\n\n") if frame.startswith("data: ")]
             assert not any("error" in frame for frame in frames)
         else:
             assert "".join(part.text or "" for part in response.candidates[0].content.parts) == "AB"

@@ -438,4 +438,36 @@ checks.push('malformed model structures remain editable in YAML and cannot crash
 }
 checks.push('the YAML editor preserves native forward and backward Tab navigation')
 
+for (const mode of ['visual', 'yaml']) {
+  const submissions = []
+  const h = setup('components/config/VisualConfigEditor.vue', {
+    updateConfigYaml: async content => { submissions.push(YAML.parse(content)) },
+  }, { initialYaml: 'logging: {level: INFO}\nextension_setting: {keep: true}\nmodel_defaults: {profiles: []}\n' })
+  if (mode === 'yaml') {
+    h.state.switchTab('yaml')
+    h.state.rawYaml.value = h.state.rawYaml.value.replace('level: INFO', 'level: ERROR')
+  }
+  h.state.handleResetDefaults()
+  await h.state.handleSave()
+  assert.equal(submissions[0].logging.level, mode === 'yaml' ? 'ERROR' : 'INFO')
+  assert.equal(submissions[0].extension_setting.keep, true)
+  assert(submissions[0].model_defaults.profiles.length > 0)
+  h.stop()
+}
+{
+  let saved = false
+  const h = setup('components/config/VisualConfigEditor.vue', {
+    updateConfigYaml: async () => { saved = true },
+  }, { initialYaml: 'logging: {level: INFO}\nmodel_defaults: {}\n' })
+  h.state.switchTab('yaml')
+  h.state.rawYaml.value += 'unfinished: ['
+  const draft = h.state.rawYaml.value
+  h.state.handleResetDefaults()
+  assert.equal(h.state.rawYaml.value, draft, 'reset must retain an invalid YAML draft')
+  await h.state.handleSave()
+  assert.equal(saved, false)
+  h.stop()
+}
+checks.push('resetting model defaults retains unrelated configuration and current YAML edits, including invalid drafts')
+
 console.log(JSON.stringify({ passed: true, checks, groups: checks.length, syntheticOnly: true }))

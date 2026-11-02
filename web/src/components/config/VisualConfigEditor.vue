@@ -308,12 +308,18 @@ function updateGlobalDropUnsupported(val: boolean) {
 
 function handleResetDefaults() {
   if (confirm('确定要将所有模型规则重置为官方推荐默认预设吗？')) {
-    const currentLogging = (parsedConfig.value as Record<string, unknown>).logging || {
-      level: 'INFO',
-      dump_requests: false,
+    applyPendingLoggingRefresh()
+    let currentConfig: ParsedConfigYaml
+    try {
+      currentConfig = activeTab.value === 'yaml'
+        ? readEditorYaml(rawYaml.value).config
+        : parsedConfig.value
+    } catch (err) {
+      toast.error('请先修复 YAML 再重置模型规则: ' + (err instanceof Error ? err.message : '解析失败'))
+      return
     }
     const doc: ParsedConfigYaml = {
-      logging: currentLogging,
+      ...currentConfig,
       model_defaults: {
         drop_unsupported_params: false,
         profiles: [

@@ -180,7 +180,7 @@ async def test_internal_wire_safety_marker_never_leaks_or_starts_continuation(
     if stream:
         frames = [frame async for frame in response.body_iterator]
         serialized = "".join(frames)
-        payloads = [json.loads(frame[6:]) for frame in frames if frame.startswith("data: ")]
+        payloads = [json.loads(frame[6:]) for frame in serialized.split("\n\n") if frame.startswith("data: ")]
         assert env.transport_closed == [True]
     else:
         payload = response.model_dump(mode="json", exclude_none=True)

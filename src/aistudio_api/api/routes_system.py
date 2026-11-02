@@ -20,6 +20,7 @@ from aistudio_api.application import account_orchestrator
 from aistudio_api.application.model_selection import parse_model_selection
 from aistudio_api.infrastructure.gateway.model_defaults import (
     _resolve_config_path,
+    get_configured_logging_settings,
     invalidate_config_cache,
     preview_model_defaults,
     validate_model_config,
@@ -387,11 +388,13 @@ async def update_config_yaml(req: ConfigYamlUpdateRequest) -> dict[str, object]:
         raise HTTPException(400, detail="模型规则的结构、枚举或数值无效，请检查配置") from exc
     config_yaml_path = _resolve_config_path(None)
     try:
-        saved = save_model_config(config_yaml_path, parsed, baseline=baseline)
+        save_model_config(config_yaml_path, parsed, baseline=baseline)
         invalidate_config_cache()
 
-        if logging_changed and isinstance(saved.get("logging"), dict):
-            _apply_logging_settings(LoggingConfigRequest.model_validate(saved["logging"]))
+        if logging_changed:
+            _apply_logging_settings(LoggingConfigRequest.model_validate(
+                get_configured_logging_settings(config_yaml_path),
+            ))
         logger.info("配置文件 config.yaml 已更新并重新加载")
         return {"ok": True, "message": "配置已保存并重载"}
     except ConfigConflictError as e:

@@ -72,9 +72,13 @@ class AccountService:
         """更新账号名称。"""
         return self._store.update_account(account_id, name)
 
-    def update_account_email(self, account_id: str, email: str) -> bool:
+    def update_account_email(
+        self, account_id: str, email: str, *, expected_generation: str | None,
+    ) -> bool:
         """更新账号的登录邮箱。"""
-        return self._store.update_account_email(account_id, email)
+        return self._store.update_account_email(
+            account_id, email, expected_generation=expected_generation,
+        )
 
     def save_account_from_cookies(
         self,

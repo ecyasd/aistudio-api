@@ -224,7 +224,7 @@ const nonStringOutcomeApi = execute(fs.readFileSync(path.join(webRoot, 'src/api/
 await assert.rejects(nonStringOutcomeApi.list({ include_diagnostics: true }), /响应探测记录格式无效/)
 checks.push('requested response diagnostics must be present and valid before a read succeeds')
 
-for (const fields of [{ prompt_tokens: '80000' }, { request_body_bytes: -1 }, { timings_ms: { first_body: 'invalid' } }]) {
+for (const fields of [{ prompt_tokens: '80000' }, { request_body_bytes: -1 }, { max_upstream_gap_ms: 'invalid' }, { max_queue_bytes: -5 }, { timings_ms: { first_body: 'invalid' } }]) {
   const invalidMetricsApi = execute(fs.readFileSync(path.join(webRoot, 'src/api/errors.ts'), 'utf8'), 'api/errors.ts', {
     './client.ts': { request: async () => response([], { diagnostics: {
       items: [diagnostic(fields)], retention: { max_records: 100, minutes: 10 },
@@ -414,6 +414,9 @@ checks.push('the shared polling scheduler stops while hidden, refreshes on visib
 store = freshStore()
 requestImpl = async () => response([], { diagnostics: { items: [diagnostic({
   prompt_tokens: 80_000, request_body_bytes: 320_000,
+  max_upstream_gap_ms: 1250, max_queue_bytes: 8192,
+  send_wait_ms: 320, max_send_wait_ms: 180,
+  ack_wait_ms: 90, max_ack_wait_ms: 50, coalesced_events: 3,
   session_preparation_reason: 'warm_reuse', browser_idle_timeout_s: 1800,
   timings_ms: { account_preparation_started: 200, account_ready: 7040,
     transport_dispatched: 7100, upstream_first_byte: 30600, first_body: 30601, first_thought: 0,
@@ -425,7 +428,8 @@ retention: { max_records: 100, minutes: 10 } } })
 await store.refresh()
 html = await render()
 for (const text of ['80,000', '312.5 KiB', '6.840 秒', '23.500 秒', '30.601 秒', '0.000 秒', '0.900 秒',
-  '历史预算不足', '暂不支持回放', '输入 未知', '未记录']) assert(html.includes(text), text)
+  '历史预算不足', '暂不支持回放', '输入 未知', '未记录',
+  '1250 ms', '8.0 KiB', '合并省去 3 次写入', '应用发送最长 180 ms', '累计 320 ms', '浏览器确认最长 50 ms', '累计 90 ms']) assert(html.includes(text), text)
 for (const text of ['复用热会话', '1800 秒', '不自动回收']) assert(html.includes(text), text)
 assert.doesNotMatch(html, /SYNTHETIC_PRIVATE_TIMING|SYNTHETIC_PRIVATE_REASON/)
 checks.push('latency rows distinguish local preparation, upstream wait, absolute first content, zero and unknown without rendering unrecognized metadata')

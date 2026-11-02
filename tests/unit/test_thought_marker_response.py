@@ -132,7 +132,8 @@ async def test_plain_model_thought_trailer_does_not_reopen_reasoning_or_continue
     if stream:
         frames = [
             json.loads(frame[6:])
-            async for frame in response.body_iterator
+            async for write in response.body_iterator
+            for frame in write.split("\n\n")
             if frame.startswith("data: ")
         ]
         assert not any("error" in frame for frame in frames)
