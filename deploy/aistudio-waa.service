@@ -2,6 +2,7 @@
 Description=Local AI Studio WAA signer
 After=network-online.target aistudio-github-recover.service
 Requires=aistudio-github-recover.service
+PartOf=aistudio-api.service
 ConditionPathExists=/opt/aistudio-api/source/runtime/waa-signer
 Wants=network-online.target
 
