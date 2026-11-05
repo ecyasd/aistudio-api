@@ -487,8 +487,10 @@ def credentials(paths: Paths) -> tuple[str, list[str]]:
 
 def diagnostics(admin: str, keys: list[str], public_base: str | None = None) -> None:
     require(request("/stats", admin)[0] == 200, "management-auth")
-    require(request("/__deployment/api-auth", admin)[0] == 401, "auth-separation")
-    require(request("/__deployment/api-auth")[0] == 401, "anonymous-auth")
+    # Repeated checks can fill the guard's failure window. It authenticates before
+    # throttling invalid credentials; valid keys must still return success below.
+    require(request("/__deployment/api-auth", admin)[0] in (401, 429), "auth-separation")
+    require(request("/__deployment/api-auth")[0] in (401, 429), "anonymous-auth")
     for key in keys:
         require(request("/__deployment/api-auth", key)[0] == 204, "existing-key-bearer")
         require(
@@ -496,7 +498,7 @@ def diagnostics(admin: str, keys: list[str], public_base: str | None = None) -> 
             == 204,
             "existing-key-query",
         )
-        require(request("/stats", key)[0] == 401, "key-management-separation")
+        require(request("/stats", key)[0] in (401, 429), "key-management-separation")
         if public_base:
             endpoint = "/v1beta/models/deployment-validation:generateContent"
             require(
