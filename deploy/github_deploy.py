@@ -388,7 +388,7 @@ def native_candidate_smoke(release: Path, commit: str) -> None:
     if not binary.is_file():
         return
     # Never execute new native code as root, or give its self-test real account paths.
-    result = subprocess.run(["runuser", "-u", "aistudio-api", "--", str(binary), "-self-test"],
+    result = subprocess.run(["/usr/sbin/runuser", "-u", "aistudio-api", "--", str(binary), "-self-test"],
                             capture_output=True, timeout=25, check=False,
                             env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"}, cwd="/")
     require(result.returncode == 0 and len(result.stdout) <= 4096, "native-self-test")

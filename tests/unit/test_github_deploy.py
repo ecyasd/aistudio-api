@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import sys
 import tarfile
 from pathlib import Path
@@ -93,6 +94,35 @@ def test_native_rejects_other_formats(tmp_path, monkeypatch):
     path, destination, expected = archive(tmp_path)
     with pytest.raises(module.DeploymentError, match="native-elf"):
         module.extract_release(path, destination, COMMIT, expected)
+
+
+@pytest.mark.parametrize("failure", [None, "process", "provenance"])
+def test_native_self_test_uses_absolute_runner_with_isolated_environment(
+    tmp_path, monkeypatch, failure
+):
+    binary = tmp_path / "runtime/waa-signer"
+    binary.parent.mkdir()
+    binary.touch()
+
+    def run(command, **options):
+        # The child PATH deliberately omits sbin; lookup must happen by absolute path.
+        assert command == [
+            "/usr/sbin/runuser", "-u", "aistudio-api", "--", str(binary), "-self-test"
+        ]
+        assert options["env"] == {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"}
+        assert options["cwd"] == "/"
+        return subprocess.CompletedProcess(
+            command, 1 if failure == "process" else 0,
+            json.dumps({"ok": True, "commit": "b" * 40 if failure == "provenance" else COMMIT}).encode(),
+            b"",
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+    if failure:
+        with pytest.raises(module.DeploymentError, match="native-self-test"):
+            module.native_candidate_smoke(tmp_path, COMMIT)
+    else:
+        module.native_candidate_smoke(tmp_path, COMMIT)
 
 
 @pytest.mark.parametrize(
