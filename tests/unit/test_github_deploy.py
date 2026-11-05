@@ -213,6 +213,31 @@ def test_archive_wrong_external_digest_rejected_before_writes(tmp_path):
     assert list(destination.iterdir()) == []
 
 
+@pytest.mark.parametrize("denied", [401, 429])
+def test_diagnostics_accepts_denied_requests_even_when_failure_window_is_full(
+    monkeypatch, denied
+):
+    def request(path, token=None, **_options):
+        if path == "/stats":
+            return (200, {}) if token == "synthetic-admin" else (denied, {})
+        assert path.startswith("/__deployment/api-auth")
+        return (204, None) if token == "synthetic-key" or "key=synthetic-key" in path else (denied, {})
+
+    monkeypatch.setattr(module, "request", request)
+    module.diagnostics("synthetic-admin", ["synthetic-key"])
+
+
+def test_diagnostics_still_rejects_a_throttled_valid_key(monkeypatch):
+    def request(path, token=None, **_options):
+        if path == "/stats" and token == "synthetic-admin":
+            return 200, {}
+        return 429, {}
+
+    monkeypatch.setattr(module, "request", request)
+    with pytest.raises(module.DeploymentError, match="existing-key-bearer"):
+        module.diagnostics("synthetic-admin", ["synthetic-key"])
+
+
 @pytest.fixture
 def deployment(tmp_path, monkeypatch):
     if os.name != "posix":
