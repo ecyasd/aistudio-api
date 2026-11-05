@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from contextlib import aclosing
 from pathlib import Path
 from typing import ClassVar
@@ -65,7 +66,16 @@ class AIStudioClient:
     def __init__(self, port: int = DEFAULT_BROWSER_PORT):
         self.port = port
         self._captured: CapturedRequest | None = None
-        self._session = BrowserSession(port=port)
+        backend = os.getenv("AISTUDIO_WAA_BACKEND", "browser").strip().lower()
+        if backend == "browserless":
+            from .native_session import NativeSession
+            self._session = NativeSession(port=port, signer_url=os.getenv(
+                "AISTUDIO_WAA_SIGNER_URL", "http://127.0.0.1:8081",
+            ))
+        elif backend == "browser":
+            self._session = BrowserSession(port=port)
+        else:
+            raise ValueError("AISTUDIO_WAA_BACKEND must be browser or browserless")
         self._capture_service = RequestCaptureService(self._session)
         self._replay_service = RequestReplayService(session=self._session)
 

@@ -462,7 +462,7 @@ def parse_usage_metadata(raw_usage: object) -> dict[str, object]:
         and isinstance(completion_tokens, int)
     ):
         total_tokens = prompt_tokens + completion_tokens
-    return {
+    usage: dict[str, object] = {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
@@ -477,6 +477,11 @@ def parse_usage_metadata(raw_usage: object) -> dict[str, object]:
             "visible_tokens": visible_completion_tokens or 0,
         },
     }
+    from aistudio_api.infrastructure.utils.response_diagnostics import (
+        observe_call_usage,
+    )
+    observe_call_usage(usage)
+    return usage
 
 
 def parse_chunk_usage(chunk: object) -> dict[str, object]:

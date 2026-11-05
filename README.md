@@ -9,6 +9,8 @@
 仍需重新导入有效登录状态，现有调用密钥保持不变。公开 HTTPS 运行与自动发布说明见
 [deploy/README.md](deploy/README.md)。
 协议保真、账号隔离和失败处理的实现边界见 [反代契约](docs/PROXY_CONTRACT.md)。
+可选的本地 SpiderMonkey WAA、Build 写代码助手和「用量与请求」页见
+[本地 WAA 与 Build](docs/BROWSERLESS.md)。默认仍用浏览器后端，启用原生后端需单独安装签名器。
 上游 Docker Hub 镜像不包含本分支修复；使用
 `docker build -t aistudio-api:local .` 从本仓库构建，才能使用对应的前后端。
 

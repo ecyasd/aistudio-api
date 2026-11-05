@@ -6,7 +6,7 @@ import contextlib
 from typing import TYPE_CHECKING
 
 import yaml
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field, StrictBool, ValidationError, field_validator
 
 from aistudio_api.api.dependencies import get_runtime_state
@@ -87,6 +87,15 @@ async def health():
 @protected_router.get("/stats", response_model=StatsResponse)
 async def stats():
     return stats_response()
+
+
+@protected_router.get("/requests")
+async def request_usage(
+    days: int = Query(7, ge=1, le=30), model: str = Query("", max_length=96),
+    page: int = Query(1, ge=1, le=1000), page_size: int = Query(25, ge=1, le=100),
+) -> dict:
+    from aistudio_api.infrastructure.utils.request_usage import query_requests
+    return query_requests(days=days, model=model, page=page, page_size=page_size)
 
 
 @protected_router.get("/browser/status")

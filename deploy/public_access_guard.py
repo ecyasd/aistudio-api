@@ -18,7 +18,7 @@ from urllib.parse import parse_qsl
 
 MAX_TOKEN_LENGTH = 4096
 MAX_QUERY_LENGTH = 16384
-_MANAGEMENT_ROOTS = ("/stats", "/rotation", "/config", "/api-keys", "/api/accounts", "/errors", "/browser/status")
+_MANAGEMENT_ROOTS = ("/stats", "/requests", "/rotation", "/config", "/api-keys", "/api/accounts", "/errors", "/browser/status")
 _SENSITIVE_QUERY_NAMES = frozenset(
     (
         "key", "api_key", "api-key", "apikey", "x-api-key", "x-goog-api-key",
