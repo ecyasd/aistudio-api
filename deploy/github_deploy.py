@@ -29,8 +29,8 @@ import yaml
 if os.name == "posix":
     import fcntl
 
-MAX_COMPRESSED = 16 * 1024 * 1024
-MAX_EXPANDED = 64 * 1024 * 1024
+MAX_COMPRESSED = 64 * 1024 * 1024
+MAX_EXPANDED = 128 * 1024 * 1024
 MAX_MEMBERS = 512
 MAX_MANIFEST = 256 * 1024
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -136,7 +136,7 @@ def allowed_file(name: str) -> bool:
         return False
     if path.as_posix() != name:
         return False
-    if name == "runtime/public_access_guard.py":
+    if name in {"runtime/public_access_guard.py", "runtime/waa-signer"}:
         return True
     if path.parts[:2] != ("src", "aistudio_api") or len(path.parts) < 3:
         return False
@@ -255,6 +255,12 @@ def extract_release(
         )
         declared.add(name)
     require(declared == set(members) - {"manifest.json"}, "manifest-members")
+    if "runtime/waa-signer" in declared:
+        native = destination / "runtime/waa-signer"
+        blob = native.read_bytes()
+        require(len(blob) >= 64 and blob[:7] == b"\x7fELF\x02\x01\x01"
+                and int.from_bytes(blob[18:20], "little") == 62, "native-elf")
+        native.chmod(0o755)
     require(
         {
             "src/aistudio_api/__init__.py",
@@ -355,6 +361,39 @@ def service(action: str) -> None:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+
+def native_service(paths: Paths, action: str) -> None:
+    """Keep the optional native executable aligned with the current code link."""
+    if not (paths.etc / "native-enabled").is_file():
+        return
+    require(action in {"stop", "start"}, "native-service-action")
+    if action == "start" and not (paths.source / "runtime/waa-signer").is_file():
+        return
+    subprocess.run(["systemctl", action, "aistudio-waa.service"], check=True, timeout=40,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if action == "start":
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            with contextlib.suppress(Exception):
+                status, data = request("/health", base="http://127.0.0.1:8081")
+                if status == 200 and isinstance(data, dict) and data.get("ok") is True:
+                    return
+            time.sleep(0.2)
+        raise DeploymentError("native-startup-health")
+
+
+def native_candidate_smoke(release: Path, commit: str) -> None:
+    binary = release / "runtime/waa-signer"
+    if not binary.is_file():
+        return
+    # Never execute new native code as root, or give its self-test real account paths.
+    result = subprocess.run(["runuser", "-u", "aistudio-api", "--", str(binary), "-self-test"],
+                            capture_output=True, timeout=25, check=False,
+                            env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"}, cwd="/")
+    require(result.returncode == 0 and len(result.stdout) <= 4096, "native-self-test")
+    value = json.loads(result.stdout)
+    require(value.get("ok") is True and value.get("commit") == commit, "native-self-test-provenance")
 
 
 def wait_healthy(admin: str) -> None:
@@ -569,6 +608,7 @@ def rollout(
     paths: Paths, release: Path, commit: str, artifact_digest: str, public_base: str
 ) -> dict[str, object]:
     require(warmup_disabled(paths.base / "secure-runner.py"), "startup-warmup-policy")
+    native_candidate_smoke(release, commit)
     admin, keys = credentials(paths)
     require(keys, "configured-keys-required")
     diagnostics(admin, keys)
@@ -585,6 +625,7 @@ def rollout(
     try:
         stopped = True
         service("stop")
+        native_service(paths, "stop")
         baseline = protected_snapshot(paths, accounts, stats["totals"])
         if paths.source.is_symlink():
             old_source = {
@@ -626,6 +667,7 @@ def rollout(
             paths.source.replace(old_source["path"])
         atomic_link(paths.guard, paths.source / "runtime/public_access_guard.py")
         atomic_link(paths.source, release)
+        native_service(paths, "start")
         service("start")
         wait_healthy(admin)
         diagnostics(admin, keys, public_base)
@@ -682,8 +724,10 @@ def rollout(
         if not committed and stopped:
             try:
                 service("stop")
+                native_service(paths, "stop")
                 recover(paths)
             finally:
+                native_service(paths, "start")
                 service("start")
                 wait_healthy(admin)
 
@@ -881,7 +925,9 @@ def main() -> int:
                 # Normal deployment must stop it before restoring code. The
                 # separate boot-time --recover path runs before the app starts.
                 service("stop")
+                native_service(paths, "stop")
                 recover(paths)
+                native_service(paths, "start")
                 service("start")
 
             def interrupted(_signum, _frame):

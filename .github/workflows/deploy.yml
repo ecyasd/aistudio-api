@@ -131,30 +131,33 @@ jobs:
               path = PurePosixPath(name)
               require(not path.is_absolute() and path.as_posix() == name and '..' not in path.parts)
               require(not any(piece.casefold() in forbidden or piece.casefold().startswith('.env') for piece in path.parts))
-              allowed = (name == 'runtime/public_access_guard.py' or
+              allowed = (name in {'runtime/public_access_guard.py', 'runtime/waa-signer'} or
                          (name.startswith('src/aistudio_api/static/') and path.suffix in static_suffixes) or
                          (name.startswith('src/aistudio_api/') and path.suffix in {'.py', '.js'}))
               require(allowed and name not in expected and type(item['mode']) is int and item['mode'] == 420)
               require(isinstance(item['sha256'], str) and re.fullmatch(r'[0-9a-f]{64}', item['sha256']))
               expected[name] = item['sha256']
           require({'src/aistudio_api/__init__.py', 'src/aistudio_api/static/index.html',
-                   'runtime/public_access_guard.py'} <= expected.keys())
+                   'runtime/public_access_guard.py', 'runtime/waa-signer'} <= expected.keys())
           seen = set()
           total = 0
           with tarfile.open(archive, mode='r|gz') as tar:
               for member in tar:
                   require(member.isfile() and member.name not in seen and not member.pax_headers)
-                  require(0 <= member.size <= 8 * 1024 * 1024)
+                  limit = (96 if member.name == 'runtime/waa-signer' else 8) * 1024 * 1024
+                  require(0 <= member.size <= limit)
                   total += member.size
-                  require(total <= 64 * 1024 * 1024 and len(seen) < 513)
+                  require(total <= 128 * 1024 * 1024 and len(seen) < 513)
                   require(member.name == 'manifest.json' or member.name in expected)
                   require(member.mode == 420)
-                  content = tar.extractfile(member).read(8 * 1024 * 1024 + 1)
+                  content = tar.extractfile(member).read(limit + 1)
                   require(len(content) == member.size)
                   if member.name == 'manifest.json':
                       require(content == manifest_bytes)
                   else:
                       require(hashlib.sha256(content).hexdigest() == expected[member.name])
+                  if member.name == 'runtime/waa-signer':
+                      require(content[:7] == b'\x7fELF\x02\x01\x01' and int.from_bytes(content[18:20], 'little') == 62)
                   seen.add(member.name)
           require(seen == set(expected) | {'manifest.json'})
           with Path(os.environ['GITHUB_OUTPUT']).open('a', encoding='utf-8') as output:

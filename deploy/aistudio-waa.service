@@ -1,6 +1,8 @@
 [Unit]
 Description=Local AI Studio WAA signer
-After=network-online.target
+After=network-online.target aistudio-github-recover.service
+Requires=aistudio-github-recover.service
+ConditionPathExists=/opt/aistudio-api/source/runtime/waa-signer
 Wants=network-online.target
 
 [Service]
@@ -8,7 +10,7 @@ User=aistudio-api
 Group=aistudio-api
 StateDirectory=aistudio-waa
 StateDirectoryMode=0700
-ExecStart=/usr/local/libexec/aistudio-waa-signer -listen 127.0.0.1:8081 -state-dir /var/lib/aistudio-waa
+ExecStart=/opt/aistudio-api/source/runtime/waa-signer -listen 127.0.0.1:8081 -state-dir /var/lib/aistudio-waa
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=30

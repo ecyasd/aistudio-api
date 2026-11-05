@@ -70,9 +70,47 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  native-check:
+    name: Linux amd64 WAA Build and Offline Runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: native/waa-signer/go.mod
+          cache-dependency-path: native/waa-signer/go.sum
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test local protocol, ownership and stream failures
+        working-directory: native/waa-signer
+        run: go test ./internal/localapi
+      - name: Fetch the pinned Linux glibc SpiderMonkey SDK
+        run: |
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/spidermonkey.tar.gz" \
+            https://github.com/Mag1cFall/firefox/releases/download/v152.0.4-aistudio2api.1/spidermonkey-v152.0.4-aistudio2api.1-linux-amd64-gnu.tar.gz
+          echo "50df89da549e87f0baedfaa15f05ba5faf4719eaafee5da48c3b9f46a29b06d3  $RUNNER_TEMP/spidermonkey.tar.gz" | sha256sum --check
+          mkdir "$RUNNER_TEMP/spidermonkey"
+          tar -xzf "$RUNNER_TEMP/spidermonkey.tar.gz" -C "$RUNNER_TEMP/spidermonkey"
+      - name: Build Linux amd64 and evaluate synthetic JavaScript
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          python scripts/build_waa.py --deps "$RUNNER_TEMP/spidermonkey" --cache "$RUNNER_TEMP/waa-build" \
+            --output "$RUNNER_TEMP/waa-signer" --expected-sha "$EXPECTED_SHA"
+          python scripts/smoke_waa.py --binary "$RUNNER_TEMP/waa-signer" --expected-sha "$EXPECTED_SHA"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-waa-${{ github.sha }}
+          path: ${{ runner.temp }}/waa-signer
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
   build-release:
     name: Assemble Verified Code Release
-    needs: [backend-check, frontend-check]
+    needs: [backend-check, frontend-check, native-check]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -85,10 +123,14 @@ jobs:
         with:
           name: web-static-${{ github.sha }}
           path: dist/web-static
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-waa-${{ github.sha }}
+          path: dist/native
       - name: Build allowlisted release and verify commit provenance
         env:
           EXPECTED_SHA: ${{ github.sha }}
-        run: python scripts/build_release.py --static-dir dist/web-static --output-dir dist/release --expected-sha "$EXPECTED_SHA"
+        run: python scripts/build_release.py --static-dir dist/web-static --native-signer dist/native/waa-signer --output-dir dist/release --expected-sha "$EXPECTED_SHA"
       - uses: actions/upload-artifact@v4
         with:
           name: aistudio-code-${{ github.sha }}

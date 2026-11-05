@@ -78,6 +78,23 @@ def test_archive_round_trip_keeps_only_code(tmp_path):
     ]
 
 
+def test_native_is_digest_checked_before_executable_mode(tmp_path, monkeypatch):
+    header = bytearray(64)
+    header[:7], header[18:20] = b"\x7fELF\x02\x01\x01", b"\x3e\x00"
+    monkeypatch.setitem(FILES, "runtime/waa-signer", bytes(header))
+    path, destination, expected = archive(tmp_path)
+    module.extract_release(path, destination, COMMIT, expected)
+    if os.name == "posix":
+        assert (destination / "runtime/waa-signer").stat().st_mode & 0o777 == 0o755
+
+
+def test_native_rejects_other_formats(tmp_path, monkeypatch):
+    monkeypatch.setitem(FILES, "runtime/waa-signer", b"untrusted shell payload")
+    path, destination, expected = archive(tmp_path)
+    with pytest.raises(module.DeploymentError, match="native-elf"):
+        module.extract_release(path, destination, COMMIT, expected)
+
+
 @pytest.mark.parametrize(
     "name,kind",
     [

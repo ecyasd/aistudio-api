@@ -4,7 +4,7 @@
 
 可选的本地 SpiderMonkey WAA、Build 写代码助手及请求用量账本见 [BROWSERLESS.md](BROWSERLESS.md)。
 `NativeSession` 复用原账号代际、就绪门和请求租约；`native/waa-signer` 仅提供本机签名与固定 RPC。
-默认后端保持受控浏览器，原生二进制单独安装，普通代码工件不隐式切换后端。
+默认后端保持受控浏览器；启用 native 的服务器先接入对应单元，随后原生二进制随 Linux 工件一起发布和回滚。
 
 反代的协议保真、身份边界、失败处理和验收约束见 [PROXY_CONTRACT.md](PROXY_CONTRACT.md)。
 

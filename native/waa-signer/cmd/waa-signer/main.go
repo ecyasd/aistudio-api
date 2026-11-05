@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 	_ "time/tzdata"
@@ -20,9 +21,29 @@ import (
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
 	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
 	"github.com/Mag1cFall/AIStudio2API/internal/localapi"
+	"github.com/Mag1cFall/AIStudio2API/internal/waa/mozjs"
 )
 
 const rpcBase = "https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/"
+
+var buildCommit = "development"
+
+func selfTest() bool {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	cx, err := mozjs.NewContext(mozjs.Options{HeapBytes: 32 << 20, Locale: "en-US"})
+	if err != nil {
+		return false
+	}
+	defer cx.Close()
+	global, err := cx.NewGlobal(0, "UTC")
+	if err != nil {
+		return false
+	}
+	defer cx.Release(global)
+	value, err := cx.Evaluate(global, "1 + 1", "offline-self-test", 1)
+	return err == nil && value.Number == 2
+}
 
 type nativeWorker struct {
 	worker    *aistudio.NativeWorker
@@ -75,10 +96,19 @@ func (w *nativeWorker) Send(ctx context.Context, method string, body []byte) (*h
 }
 
 func main() {
+	selfTestFlag := flag.Bool("self-test", false, "evaluate synthetic JavaScript without network or credentials")
 	listen := flag.String("listen", "127.0.0.1:8081", "loopback HTTP address")
 	stateDir := flag.String("state-dir", "", "private state directory outside source control")
 	proxy := flag.String("proxy", "", "existing upstream proxy, if required")
 	flag.Parse()
+	if *selfTestFlag {
+		ok := selfTest()
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": ok, "commit": buildCommit, "googleContacted": false})
+		if !ok {
+			os.Exit(1)
+		}
+		return
+	}
 	host, _, err := net.SplitHostPort(*listen)
 	ip := net.ParseIP(host)
 	if err != nil || ip == nil || !ip.IsLoopback() || *stateDir == "" {

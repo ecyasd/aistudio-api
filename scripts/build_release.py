@@ -44,7 +44,9 @@ FORBIDDEN_PARTS = {
     "stats.json",
 }
 MAX_FILE_BYTES = 8 * 1024 * 1024
-MAX_RELEASE_BYTES = 32 * 1024 * 1024
+MAX_RELEASE_BYTES = 128 * 1024 * 1024
+NATIVE_TARGET = "runtime/waa-signer"
+MAX_NATIVE_BYTES = 96 * 1024 * 1024
 
 
 class ReleaseError(ValueError):
@@ -97,6 +99,7 @@ def build_release(
     static_dir: Path,
     output_dir: Path,
     expected_sha: str | None = None,
+    native_signer: Path | None = None,
 ) -> dict[str, object]:
     """Read code from Git objects, never local configuration or account files."""
     repo = repo.resolve(strict=True)
@@ -131,6 +134,13 @@ def build_release(
     if GUARD_TARGET not in files or SOURCE_PREFIX + "__init__.py" not in files:
         raise ReleaseError("Required application code or public guard is missing")
     files.update(_read_static(static_dir))
+    if native_signer is not None:
+        if native_signer.is_symlink() or not native_signer.is_file() or not 64 <= native_signer.stat().st_size <= MAX_NATIVE_BYTES:
+            raise ReleaseError("Invalid native signer file")
+        native = native_signer.read_bytes()
+        if native[:7] != b"\x7fELF\x02\x01\x01" or int.from_bytes(native[18:20], "little") != 62:
+            raise ReleaseError("Native signer must be a Linux amd64 ELF")
+        files[NATIVE_TARGET] = native
     if sum(map(len, files.values())) > MAX_RELEASE_BYTES:
         raise ReleaseError("Release exceeds its total size limit")
     manifest: dict[str, object] = {
@@ -177,11 +187,12 @@ def main() -> None:
     parser.add_argument("--static-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, default=Path("dist/release"))
     parser.add_argument("--expected-sha")
+    parser.add_argument("--native-signer", type=Path)
     args = parser.parse_args()
     print(
         json.dumps(
             build_release(
-                args.repo, args.static_dir, args.output_dir, args.expected_sha
+                args.repo, args.static_dir, args.output_dir, args.expected_sha, args.native_signer
             ),
             sort_keys=True,
         )

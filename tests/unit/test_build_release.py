@@ -99,6 +99,22 @@ def test_release_is_byte_reproducible_and_rejects_wrong_commit(candidate):
         builder.build_release(repo, assets, output, "0" * 40)
 
 
+def test_release_includes_only_explicit_linux_native_file(candidate, tmp_path):
+    repo, assets, output = candidate
+    native = tmp_path / "waa-signer"
+    header = bytearray(64)
+    header[:7], header[18:20] = b"\x7fELF\x02\x01\x01", b"\x3e\x00"
+    native.write_bytes(header)
+    builder.build_release(repo, assets, output, native_signer=native)
+    with tarfile.open(output / "release.tar.gz", "r:gz") as archive:
+        member = archive.getmember("runtime/waa-signer")
+        assert archive.extractfile(member).read() == header
+        assert member.mode == 0o644
+    native.write_bytes(b"unsupported native executable")
+    with pytest.raises(builder.ReleaseError):
+        builder.build_release(repo, assets, output, native_signer=native)
+
+
 @pytest.mark.parametrize(
     "name",
     [
