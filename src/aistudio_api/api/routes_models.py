@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
@@ -52,6 +53,14 @@ def _continuation_variant(
     return variant
 
 
+def _build_variant(model_data: Mapping[str, object]) -> dict[str, object] | None:
+    if os.getenv("AISTUDIO_WAA_BACKEND", "browser").strip().lower() != "browserless" or model_data.get("build_assistant") is not True:
+        return None
+    clean = str(model_data.get("id") or model_data.get("name") or "").removeprefix("models/")
+    return {**model_data, "id": clean + "-build", "displayName": str(model_data.get("displayName") or clean) + " (Build)",
+            "description": "Build 写代码助手，带 Google 自带系统提示词；支持文本对话及思考档位。"}
+
+
 def _to_gemini_model(model_data: Mapping[str, object]) -> GeminiModelResponse:
     raw_id = str(model_data.get("id") or model_data.get("name") or "")
     clean_id = raw_id.removeprefix("models/")
@@ -89,6 +98,9 @@ async def list_models(
     seen: set[str] = set()
     for item in discovered:
         candidates = [item]
+        build = _build_variant(item)
+        if build is not None:
+            candidates.append(build)
         variant = _continuation_variant(item)
         if variant is not None:
             candidates.append(variant)

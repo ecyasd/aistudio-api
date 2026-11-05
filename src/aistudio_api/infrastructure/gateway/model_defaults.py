@@ -363,7 +363,9 @@ def validate_model_config(config: dict[str, object]) -> None:
                 if len(thinking) < 4 or type(thinking[0]) is not int:
                     raise ValueError("thinking config wire list is invalid")
                 _coerce_thinking_level(thinking[3])
-        _defaults_from_mapping(rule)
+        compiled = _defaults_from_mapping(rule)
+        if any(index < 0 for index in compiled.clear_generation_config_indexes):
+            raise ValueError("generation config indexes must be nonnegative")
 
     profiles = defaults.get("profiles")
     if profiles is not None:

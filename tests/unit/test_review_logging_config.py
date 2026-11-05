@@ -93,3 +93,20 @@ async def test_yaml_null_logging_fields_apply_their_disabled_defaults(config_pat
     runtime_setters["set_dump_requests"].assert_called_once_with(False)
     runtime_setters["set_dump_to_file"].assert_called_once_with(False)
     runtime_setters["set_dump_dir"].assert_called_once_with("")
+
+
+async def test_logging_patch_preserves_fields_saved_by_yaml(config_path, runtime_setters):
+    config_path.write_text(
+        "api_keys: [synthetic-key]\nlogging: {level: ERROR, dump_requests: true, dump_dir: old-dir}\n",
+        encoding="utf-8",
+    )
+    await routes.update_logging_config(routes.LoggingConfigRequest(dump_dir="new-dir"))
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved["logging"] == {
+        "level": "ERROR", "dump_requests": True, "dump_dir": "new-dir",
+    }
+    assert saved["api_keys"] == ["synthetic-key"]
+    runtime_setters["set_log_level"].assert_not_called()
+    runtime_setters["set_dump_requests"].assert_not_called()
+    runtime_setters["set_dump_to_file"].assert_not_called()
+    runtime_setters["set_dump_dir"].assert_called_once_with("new-dir")

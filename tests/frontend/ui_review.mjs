@@ -50,7 +50,7 @@ function loader({ inline = false, hooks = {}, globals = {}, imports = {}, stubCo
   const app = vue.createSSRApp(load('components/config/ProfileCard.vue').default, { profile, index: 0 })
   const html = await renderToString(app)
   assert(html.includes('google_search') && html.includes('code_execution'))
-  const plain = loader()
+  const plain = loader({ hooks: { useId: () => 'fixture-tag-input' } })
   const events = []
   const state = plain('components/config/ConfigTagList.vue').default.setup(
     vue.reactive({ modelValue: profile.default_tools }),

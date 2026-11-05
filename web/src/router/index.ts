@@ -5,8 +5,10 @@ const DashboardView = () => import('@/views/DashboardView.vue')
 const AccountsView = () => import('@/views/AccountsView.vue')
 const SettingsView = () => import('@/views/SettingsView.vue')
 const ErrorRecordsView = () => import('@/views/ErrorRecordsView.vue')
+const UsageView = () => import('@/views/UsageView.vue')
 
 const routes: RouteRecordRaw[] = [
+  { path: '/usage', name: 'usage', component: UsageView, meta: { title: '用量与请求' } },
   {
     path: '/login',
     name: 'login',

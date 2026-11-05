@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 import uuid
 from collections.abc import Mapping
@@ -143,7 +144,16 @@ class ModelDiscoveryService:
             if session is not None:
                 try:
                     async with session.existing_context_scope() as context:
-                        if context is not None:
+                        if context is not None and context.native is not None:
+                            from .native_session import NativeSession
+                            if isinstance(session, NativeSession):
+                                status, raw = await session.bridge.rpc(context.native.session, "ListModels", [], 12)
+                                models = self._parse_raw_models(json.loads(raw)) if status == 200 else []
+                                if models:
+                                    self._cached_models = models
+                                    self._last_fetched_at = time.time()
+                                    return models
+                        elif context is not None and context.page is not None:
                             models = await self._fetch_via_page(
                                 context.page, auth_user=context.auth_user
                             )
@@ -156,6 +166,10 @@ class ModelDiscoveryService:
                                 return models
                 except Exception as e:
                     logger.debug("通过页面 XHR 拉取模型列表失败: %s", e)
+
+            # Native requests keep the worker's Firefox identity; no direct HTTP fallback.
+            if getattr(session, "uses_native_signer", False) is True:
+                return self._cached_models or [dict(m) for m in _FALLBACK_MODELS]
 
             # 2. 次选通过直接 HTTP 协议拉取
             effective_cookies = cookies
@@ -214,6 +228,11 @@ class ModelDiscoveryService:
         for model_info in discovered:
             model_raw_id = str(model_info.get("id") or model_info.get("name") or "")
             model_clean_id = model_raw_id.removeprefix("models/")
+            if (clean_target.endswith("-build") and model_clean_id == clean_target.removesuffix("-build")
+                    and model_info.get("build_assistant") is True
+                    and os.getenv("AISTUDIO_WAA_BACKEND", "browser").strip().lower() == "browserless"):
+                return {**model_info, "id": clean_target, "displayName": str(model_info.get("displayName") or clean_target) + " (Build)",
+                        "description": "Build 写代码助手，带 Google 自带系统提示词；文本对话及思考档位。"}
             if model_clean_id == clean_target:
                 return model_info
         for model_info in _FALLBACK_MODELS:
@@ -360,6 +379,8 @@ class ModelDiscoveryService:
                     "is_audio_model": is_audio,
                 }
             )
+            if len(item) > 64 and isinstance(item[64], list) and 48 in item[64]:
+                models[-1]["build_assistant"] = True
 
         return models
 

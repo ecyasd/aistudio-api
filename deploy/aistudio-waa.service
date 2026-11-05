@@ -1,0 +1,25 @@
+[Unit]
+Description=Local AI Studio WAA signer
+After=network-online.target aistudio-github-recover.service
+Requires=aistudio-github-recover.service
+PartOf=aistudio-api.service
+ConditionPathExists=/opt/aistudio-api/source/runtime/waa-signer
+Wants=network-online.target
+
+[Service]
+User=aistudio-api
+Group=aistudio-api
+StateDirectory=aistudio-waa
+StateDirectoryMode=0700
+ExecStart=/opt/aistudio-api/source/runtime/waa-signer -listen 127.0.0.1:8081 -state-dir /var/lib/aistudio-waa
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

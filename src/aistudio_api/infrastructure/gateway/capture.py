@@ -90,6 +90,8 @@ class RequestCaptureService:
             sanitize_plain_text=sanitize_plain_text,
             snapshot=snapshot,
         )
+        if getattr(self._session, "uses_native_signer", False) is True:
+            body = await self._session.finalize_request(body, model)
         captured = CapturedRequest(
             url=template.url,
             headers=dict(template.headers),

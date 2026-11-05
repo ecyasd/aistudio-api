@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from aistudio_api.infrastructure.browser.cdp_client import CDPPage
+    from aistudio_api.infrastructure.gateway.native_session import NativeAccount
 
 
 class SessionState(StrEnum):
@@ -24,12 +25,13 @@ class SessionState(StrEnum):
 class SessionContext:
     """Encapsulates a fully-bootstrapped, verified AI Studio page context."""
 
-    page: CDPPage
+    page: CDPPage | None
     snap_key: str
     auth_user: str
     auth_file: str | None
     base_template: dict[str, object]
     auth_generation: str | None = None
+    native: NativeAccount | None = field(default=None, repr=False)
     context_id: int = field(default_factory=itertools.count(1).__next__)
     created_at: float = field(default_factory=time.time)
     in_flight: int = 0
@@ -47,7 +49,9 @@ class SessionContext:
             self.drain_event.set()
 
     def is_usable(self) -> bool:
-        return not self.page.is_closed() and bool(self.snap_key)
+        if self.native is not None:
+            return not self.native.closed
+        return self.page is not None and not self.page.is_closed() and bool(self.snap_key)
 
 
 class SessionReadinessGate:

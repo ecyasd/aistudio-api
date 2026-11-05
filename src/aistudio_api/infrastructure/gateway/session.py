@@ -75,6 +75,8 @@ DEFAULT_BOOTSTRAP_TEMPLATE: dict[str, object] = {
 class BrowserSession:
     """Coordinates browser lifecycle, readiness gate, and blue-green tab transitions."""
 
+    uses_native_signer = False
+
     def __init__(self, port: int):
         self.port = port
         self._auth_file: str | None = settings.auth_file or None
@@ -253,7 +255,9 @@ class BrowserSession:
             log.warning("浏览器页面无响应，重新连接...")
         await self._close_internal()
         res = await self._ensure_browser_cdp()
-        return res or (await self.ensure_ready()).page
+        result = res or (await self.ensure_ready()).page
+        assert result is not None
+        return result
 
     async def is_alive(self, timeout_s: float = 1.5) -> bool:
         if self._proc is not None and not self._proc.is_alive():
@@ -338,7 +342,7 @@ class BrowserSession:
                 reason = "browser_recovery"
             elif force_refresh:
                 reason = "forced_refresh"
-            elif current is not None and current.page.is_closed():
+            elif current is not None and current.page is not None and current.page.is_closed():
                 reason = "page_recovery"
             else:
                 reason = "session_not_ready"
@@ -445,6 +449,7 @@ class BrowserSession:
                 self._gate.set_ready(new_context)
                 if (
                     old_context is not None
+                    and old_context.page is not None
                     and old_context.page.target_id != new_page.target_id
                 ):
                     self._retiring_contexts.append(old_context)
@@ -463,30 +468,46 @@ class BrowserSession:
                 return new_context
 
             except BaseException as exc:
-                # ASGI cancellation can recur at every await. Dispose only our
-                # candidate and restore the previously ready context first.
+                async def rollback_candidate(reason: BaseException) -> None:
+                    with CancelScope(shield=True):
+                        if new_page is not None and self._cdp_client is not None:
+                            with suppress(Exception):
+                                await self._cdp_client.close_target(new_page.target_id)
+                        self._auth_file = old_auth_file
+                        self._auth_user = old_auth_user
+                        self._profile_dir = old_profile_dir
+                        if (
+                            old_context is not None
+                            and old_context.is_usable()
+                            and self._proc is not None
+                            and self._proc.is_alive()
+                        ):
+                            self._gate.set_ready(old_context)
+                        else:
+                            await self._close_internal()
+                            self._last_stop_reason = "failed"
+                            self._gate.set_failed(
+                                reason if isinstance(reason, Exception)
+                                else RuntimeError("Session transition cancelled")
+                            )
+
+                # Keep this one bounded rollback alive across both AnyIO level
+                # cancellation and direct Task.cancel(), without releasing the
+                # transition lock before candidate disposal and gate restoration.
+                rollback = asyncio.create_task(
+                    rollback_candidate(exc), name="session-transition-rollback",
+                )
+                cancelled = False
                 with CancelScope(shield=True):
-                    if new_page is not None and self._cdp_client is not None:
-                        with suppress(Exception):
-                            await self._cdp_client.close_target(new_page.target_id)
-                    self._auth_file = old_auth_file
-                    self._auth_user = old_auth_user
-                    self._profile_dir = old_profile_dir
-                    if (
-                        old_context is not None
-                        and old_context.is_usable()
-                        and self._proc is not None
-                        and self._proc.is_alive()
-                    ):
-                        self._gate.set_ready(old_context)
-                    else:
-                        await self._close_internal()
-                        self._last_stop_reason = "failed"
-                        self._gate.set_failed(
-                            exc if isinstance(exc, Exception)
-                            else RuntimeError("Session transition cancelled")
-                        )
+                    while not rollback.done():
+                        try:
+                            await asyncio.shield(rollback)
+                        except asyncio.CancelledError:
+                            cancelled = True
+                    rollback.result()
                 log.error("会话切换失败: %s", exc)
+                if cancelled:
+                    raise asyncio.CancelledError from exc
                 raise
 
     async def _drain_retiring_context(
@@ -501,6 +522,7 @@ class BrowserSession:
             log.exception("释放已退出账号的浏览器上下文失败")
 
     async def _release_context(self, context: SessionContext) -> None:
+        assert context.page is not None
         async with self._retirement_lock:
             if context not in self._retiring_contexts:
                 return
@@ -525,7 +547,9 @@ class BrowserSession:
             await self.transition_to_account(
                 self._auth_file, force_refresh=force_refresh
             )
-        return (await self.ensure_ready()).page
+        result = (await self.ensure_ready()).page
+        assert result is not None
+        return result
 
     async def capture_template(self, model: str) -> dict[str, object]:
         if self._proc is not None and not self._proc.is_alive():
@@ -552,8 +576,13 @@ class BrowserSession:
             log.debug("Failed to adapt model into base template body: %s", e)
         return base
 
+    async def finalize_request(self, body: str, model: str) -> str:  # noqa: ARG002 - native backend hook
+        """Browser requests already carry the proof generated by their page."""
+        return body
+
     async def generate_snapshot(self, contents: list[AistudioContent]) -> str:
         ctx = await self.ensure_ready()
+        assert ctx.page is not None
         if ctx.context_id in self._failed_snapshot_contexts:
             raise InvalidRequestTemplateError("BotGuard signing context is unavailable")
         hasher = sha256()
@@ -585,6 +614,7 @@ class BrowserSession:
                 raise InvalidRequestTemplateError("BotGuard signing context is unavailable")
 
             async def read_snapshot() -> str:
+                assert ctx.page is not None
                 async with asyncio.timeout(SNAPSHOT_TIMEOUT_SECONDS):
                     snapshot = await ctx.page.evaluate(
                         SNAPSHOT_GENERATE_JS, args=content_hash,
@@ -632,6 +662,7 @@ class BrowserSession:
         headers: dict[str, str] | None = None,
     ) -> tuple[int, bytes]:
         async with self.request_scope() as ctx:
+            assert ctx.page is not None
             captured_url = url or str(ctx.base_template.get("url") or "")
             hdrs_val = ctx.base_template.get("headers")
             captured_headers = headers or (
@@ -657,6 +688,7 @@ class BrowserSession:
         headers: dict[str, str] | None = None,
     ) -> AsyncGenerator[tuple[str, object], None]:
         async with self.request_scope() as ctx:
+            assert ctx.page is not None
             captured_url = url or str(ctx.base_template.get("url") or "")
             hdrs_val = ctx.base_template.get("headers")
             captured_headers = headers or (
@@ -797,7 +829,7 @@ class BrowserSession:
     ) -> None:
         """Save a verified page only to the account owning that page's lease."""
         target = context or self.request_context
-        if target is None or not target.auth_file or target.page.is_closed():
+        if target is None or not target.auth_file or target.page is None or target.page.is_closed():
             return
         with suppress(Exception):
             await save_browser_cookies(target.page, auth_file=target.auth_file)

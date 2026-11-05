@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { LayoutDashboard, Users, Sliders, Key, LogOut, FileWarning } from 'lucide-vue-next'
+import { LayoutDashboard, Users, Sliders, Key, LogOut, FileWarning, ChartNoAxesCombined } from 'lucide-vue-next'
 import { useAuthStore } from '@/stores/auth.ts'
 import { useRouter, useRoute } from 'vue-router'
 import { useSystemHealth } from '@/composables/useSystemHealth.ts'
@@ -24,6 +24,7 @@ const navItems = [
     path: '/',
     icon: LayoutDashboard,
   },
+  { name: '用量与请求', path: '/usage', icon: ChartNoAxesCombined },
   {
     name: '账号管理',
     path: '/accounts',

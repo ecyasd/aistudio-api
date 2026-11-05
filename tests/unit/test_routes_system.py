@@ -89,6 +89,9 @@ async def test_update_config_yaml_validation():
     "profiles: [{generation_config_defaults: {thinking_config: {level: TYPO}}}]",
     "profiles: [{generation_config_defaults: {image_output_mode: TYPO}}]",
     "profiles: [{generation_config_defaults: {temperature: .nan}}]",
+    "profiles: [{is_image_model: true, clear_generation_config_indexes: [-100]}]",
+    "profiles: [{clear_generation_config_indexes: [7, -1, 17]}]",
+    "models: {gemini-image: {clear_generation_config_indexes: [-100]}}",
     "models: {other: {generation_config_defaults: {top_k: broken}}}",
 ])
 async def test_bad_model_rule_does_not_poison_config_or_cached_models(monkeypatch, tmp_path, rule):

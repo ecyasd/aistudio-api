@@ -28,7 +28,7 @@ function componentSetup(relative, props, emit = () => {}) {
   const context = {
     exports: module.exports, module, console, confirm: () => true,
     require(name) {
-      if (name === 'vue') return { ...vue, onMounted() {} }
+      if (name === 'vue') return { ...vue, onMounted() {}, onUnmounted() {} }
       if (name === 'vue-router') return { onBeforeRouteLeave() {} }
       if (name === '@/api/system.ts') return { systemApi }
       if (name === '@/composables/usePolling.ts') return { usePolling() {} }
@@ -259,6 +259,52 @@ for (const scenario of ['replacement token', 'current 401', 'server 500', 'netwo
   assert.equal(logging.dumpDir.value, 'fixture-normalized-dumps', 'an unchanged submitted draft must accept the saved server values')
 }
 
+{
+  const pending = []
+  systemApi.updateLoggingConfig = submitted => new Promise(resolve => { pending.push({ submitted, resolve }) })
+  const initial = { log_level: 'INFO', dump_requests: false, dump_to_file: false, dump_dir: 'old-dir' }
+  const props = vue.reactive({ initialConfig: initial })
+  const card = componentSetup('components/settings/LogConfigCard.vue', props)
+  card.dumpDir.value = 'new-dir'
+  props.initialConfig = { ...initial, log_level: 'ERROR', dump_to_file: true }
+  await vue.nextTick()
+  assert.equal(card.logLevel.value, 'ERROR', 'a dirty directory must not block a saved level refresh')
+  assert.equal(card.dumpToFile.value, true)
+  assert.equal(card.dumpDir.value, 'new-dir', 'refreshes must retain the locally edited field')
+  const save = card.handleSave()
+  assert.deepEqual(JSON.parse(JSON.stringify(pending[0].submitted)), { dump_dir: 'new-dir' },
+    'only edited fields may be submitted, including before another card refresh arrives')
+  card.dumpDir.value = 'newer-dir'
+  pending[0].resolve({ ...props.initialConfig, log_level: 'ERROR', dump_dir: 'normalized-dir' })
+  await save
+  assert.equal(card.dumpDir.value, 'newer-dir')
+  assert.equal(card.logLevel.value, 'ERROR')
+}
+
+{
+  const pending = []
+  systemApi.updateLoggingConfig = submitted => new Promise(resolve => { pending.push({ submitted, resolve }) })
+  const initial = { log_level: 'INFO', dump_dir: 'old-dir' }
+  const props = vue.reactive({ initialConfig: initial })
+  const card = componentSetup('components/settings/LogConfigCard.vue', props)
+  card.dumpDir.value = 'new-dir'
+  const saving = card.handleSave()
+  assert.deepEqual(JSON.parse(JSON.stringify(pending[0].submitted)), { dump_dir: 'new-dir' })
+  props.initialConfig = { ...initial, log_level: 'ERROR' }
+  await vue.nextTick()
+  // This logging write committed before the later YAML save/refresh, but its
+  // response travels back after that newer GET /config response.
+  pending[0].resolve({ ...initial, dump_dir: 'new-dir' })
+  await saving
+  assert.equal(card.logLevel.value, 'ERROR')
+  card.dumpDir.value = 'next-dir'
+  const nextSave = card.handleSave()
+  assert.deepEqual(JSON.parse(JSON.stringify(pending[1].submitted)), { dump_dir: 'next-dir' },
+    'an old response must not mark an untouched, refreshed level dirty for the next save')
+  pending[1].resolve({ ...initial, log_level: 'ERROR', dump_dir: 'next-dir' })
+  await nextSave
+}
+
 const table = componentSetup('components/accounts/AccountTable.vue', vue.reactive({ accounts: [], activeId: '' }))
 await table.handleReverifyAccount({ id: 'fixture-expired-account' })
 assert.deepEqual(activations, ['fixture-expired-account'])
@@ -280,6 +326,7 @@ const result = {
     'late auth-store verification cannot clear a replacement token',
     'network and server failures preserve the token while its actual 401 clears it',
     'logging refresh and save completion preserve unsaved and newly edited drafts',
+    'logging saves patch only edited fields and cannot rewind a newer refresh through a late response',
     'expired-session reverify does not clear request counters or quota cooldowns',
   ],
 }

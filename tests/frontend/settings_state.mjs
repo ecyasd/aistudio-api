@@ -42,11 +42,12 @@ function load(relative, imports = {}, globals = {}, component = false) {
 function setup(relative, api, props = {}) {
   const callbacks = [], polls = [], events = [], scope = vue.effectScope()
   const exports = load(relative, {
-    vue: { ...vue, onMounted() {}, onUnmounted: callback => callbacks.push(callback) },
+    vue: { ...vue, useId: () => 'fixture-field', onMounted() {}, onUnmounted: callback => callbacks.push(callback) },
     '@/api/system.ts': { systemApi: api },
     '@/composables/useClipboard.ts': { useClipboard: () => ({ copy() {}, copied: vue.ref('') }) },
     '@/composables/usePolling.ts': { usePolling: callback => polls.push(callback) },
     'vue-router': { onBeforeRouteLeave() {} },
+    './schema.ts': load('components/config/schema.ts'),
   }, { setInterval() { return 1 }, clearInterval() {} }, true)
   const state = scope.run(() => exports.default.setup(props, { expose() {}, emit: (...event) => events.push(event) }))
   return { state, polls, events, stop() { callbacks.forEach(callback => callback()); scope.stop() } }
@@ -469,5 +470,58 @@ for (const mode of ['visual', 'yaml']) {
   h.stop()
 }
 checks.push('resetting model defaults retains unrelated configuration and current YAML edits, including invalid drafts')
+
+for (const key of ['media_resolution', 'image_output_mode', 'thinking_config']) {
+  const inherited = { media_resolution: 'HIGH', image_output_mode: 'image_only', thinking_config: { level: 'HIGH', mode: 1 } }
+  const h = setup('components/config/ModelOverrideCard.vue', {}, vue.reactive({
+    models: { 'gemini-synthetic': { generation_config_defaults: { ...inherited, temperature: 0.7 } } },
+  }))
+  const select = setup('components/config/ConfigSelect.vue', {}, { options: [{ value: null, label: 'Null' }] })
+  select.state.handleChange({ target: { value: '__null__' } })
+  const selected = select.events.at(-1)[1]
+  if (key === 'thinking_config') h.state.updateModelThinkingConfig('gemini-synthetic', selected)
+  else h.state.updateModelGenField('gemini-synthetic', key, selected)
+  let saved
+  const editor = setup('components/config/VisualConfigEditor.vue', {
+    async updateConfigYaml(content) { saved = YAML.parse(content); return { ok: true } },
+  }, { initialYaml: YAML.stringify({ model_defaults: { profiles: [{ name: 'synthetic', match: { prefixes: ['gemini-'] }, generation_config_defaults: inherited }] } }) })
+  editor.state.updateModelsOverride(h.events.at(-1)[1])
+  await editor.state.handleSave()
+  assert.equal(saved.model_defaults.models['gemini-synthetic'].generation_config_defaults[key], null,
+    `${key}: selecting upstream default must save an explicit null rather than inherit the profile`)
+  assert.equal(saved.model_defaults.models['gemini-synthetic'].generation_config_defaults.temperature, 0.7)
+  editor.stop(); select.stop(); h.stop()
+}
+checks.push('single-model upstream defaults retain explicit nulls through select, override and YAML save')
+
+{
+  const h = setup('components/config/ConfigTagList.vue', {}, { modelValue: [7, 13, 17], isNumber: true })
+  for (const value of ['-100', '-1', '1.5', 'Infinity']) {
+    h.state.inputVal.value = value
+    h.state.addTag()
+    assert.equal(h.events.length, 0, `wire indexes must reject ${value}`)
+    assert(h.state.inputError.value, 'invalid index feedback must explain how to fix the input')
+  }
+  h.state.inputVal.value = '0'
+  h.state.addTag()
+  assert.deepEqual(Array.from(h.events.at(-1)[1]), [7, 13, 17, 0])
+  assert.equal(h.state.inputError.value, null)
+  h.stop()
+}
+checks.push('wire index input rejects negative and non-integer values with inline feedback and permits zero')
+
+{
+  const pending = deferred()
+  const h = setup('components/settings/LogConfigCard.vue', { updateLoggingConfig: () => pending.promise }, {
+    initialConfig: { log_level: 'INFO', dump_dir: 'old-dir' },
+  })
+  h.state.dumpDir.value = 'new-dir'
+  const save = h.state.handleSave()
+  h.stop()
+  pending.resolve({ log_level: 'INFO', dump_dir: 'new-dir' })
+  await save
+  assert.equal(h.events.length, 0, 'unmounted logging saves must not refresh their old parent')
+}
+checks.push('logging mutations cannot emit a refresh after unmount')
 
 console.log(JSON.stringify({ passed: true, checks, groups: checks.length, syntheticOnly: true }))

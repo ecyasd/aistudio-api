@@ -36,6 +36,7 @@ def main() -> int:
                 "PYTHONDONTWRITEBYTECODE": "1",
                 "PYTHON_DOTENV_DISABLED": "1",
                 "AISTUDIO_WEB_PASSWORD": "",
+                "AISTUDIO_WAA_BACKEND": "browser",
                 "AISTUDIO_ADMIN_PASSWORD": "",
                 "AISTUDIO_CONFIG_FILE": str(config),
                 "AISTUDIO_DATA_DIR": str(isolated),

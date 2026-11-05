@@ -132,7 +132,9 @@ def to_gemini_parts(
     for function_response in function_responses or []:
         fr_name = str(function_response.get("name") or "unknown")
         resp_payload = GeminiFunctionResponsePayload(name=fr_name)
-        if "args" in function_response:
+        if "response" in function_response:
+            resp_payload.response = function_response["response"]
+        elif "args" in function_response:
             resp_payload.response = function_response["args"]
         elif "arguments" in function_response:
             resp_payload.response = function_response["arguments"]

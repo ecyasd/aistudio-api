@@ -23,6 +23,7 @@ def supports_continuation_model(model: str) -> bool:
     clean = model.removeprefix("models/").lower()
     return (
         bool(_MODEL_ID.fullmatch(clean))
+        and not clean.endswith("-build")
         and clean.startswith(("gemini-", "gemma-"))
         and not _NON_TEXT_TOKENS.intersection(clean.split("-"))
     )

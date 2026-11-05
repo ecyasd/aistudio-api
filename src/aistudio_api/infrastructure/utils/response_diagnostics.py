@@ -226,6 +226,7 @@ class _Accumulator:
     thought_parts: int = 0
     thought_tokens: int | None = None
     prompt_tokens: int | None = None
+    usage_by_call: dict[int, dict[str, int]] = field(default_factory=dict, repr=False)
     session_preparation_reason: str | None = None
     browser_idle_timeout_s: int | None = None
     prompt_tokens_call: int | None = None
@@ -353,6 +354,18 @@ def observe_reasoning_tokens(reasoning_tokens: int | None) -> None:
             current.thought_tokens = _count(
                 current.previous_thought_tokens + _count(reasoning_tokens)
             )
+
+
+def observe_call_usage(usage: dict[str, object]) -> None:
+    """Keep each call's latest cumulative report, including failed attempts."""
+    with contextlib.suppress(Exception):
+        current = _current()
+        if current is None or not 0 < current.upstream_calls <= 32:
+            return
+        known = {key: int(value) for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens")
+                 if type(value := usage.get(key)) is int and 0 <= value <= MAX_COUNT}
+        if known:
+            current.usage_by_call.setdefault(current.upstream_calls, {}).update(known)
 
 
 def note_attempt(attempt: int) -> None:
@@ -571,6 +584,9 @@ def finish_response_diagnostics(outcome: str, transport_status: int | None = Non
             "flags": sorted(current.flags),
         })
         if summary is not None:
+            with contextlib.suppress(Exception):
+                from .request_usage import record_request
+                record_request(summary, current.usage_by_call)
             # Keep the same small allowlist in the existing service log so a
             # later investigation need not depend on the live ten-minute view.
             with contextlib.suppress(Exception):
