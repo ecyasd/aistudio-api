@@ -73,7 +73,7 @@ function updateModelGenField(modelKey: string, key: string, val: unknown) {
   const next: ModelOverrideMap = { ...(props.models || {}) }
   const current = next[modelKey] || {}
   const currentGen = { ...(current.generation_config_defaults || {}) }
-  if (val === null || val === undefined) {
+  if (val === undefined) {
     delete (currentGen as Record<string, unknown>)[key]
   } else {
     ;(currentGen as Record<string, unknown>)[key] = val
@@ -90,7 +90,7 @@ function updateModelThinkingConfig(modelKey: string, level: string | null) {
   const current = next[modelKey] || {}
   const currentGen = { ...(current.generation_config_defaults || {}) }
   if (level === null) {
-    delete currentGen.thinking_config
+    currentGen.thinking_config = null
   } else {
     const prevThinking = currentGen.thinking_config || { mode: 1 }
     currentGen.thinking_config = { ...prevThinking, level: level as ThinkingConfig['level'] }

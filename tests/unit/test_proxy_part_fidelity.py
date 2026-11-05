@@ -22,10 +22,39 @@ from aistudio_api.domain.errors import RequestError
 from aistudio_api.infrastructure.gateway.capture import CapturedRequest
 from aistudio_api.infrastructure.gateway.streaming import StreamingGateway
 from aistudio_api.infrastructure.gateway.wire_parser import (
+    WIRE_PART_FUNCTION_RESPONSE_INDEX,
     parse_response_part,
     parse_text_output,
 )
 from aistudio_api.infrastructure.gateway.wire_types import AistudioPart
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("field", ["response", "args", "arguments", "wire-list"])
+async def test_function_response_result_survives_public_projection(streaming, field):
+    expected = {"result": ["synthetic-result", False, None, {"value": 0}]}
+    if field == "wire-list":
+        part = AistudioPart(
+            function_response=("synthetic_tool", expected, "synthetic-call"),
+        ).to_wire()
+    else:
+        part = _part(WIRE_PART_FUNCTION_RESPONSE_INDEX, {
+            "name": "synthetic_tool", field: expected, "id": "synthetic-call",
+        })
+    raw = json.dumps([[_chunk([part], finish=1)]])
+    closed = []
+    if streaming:
+        parts = []
+        async for kind, payload in _stream(raw, closed):
+            if kind == "parts":
+                parts.extend(payload)
+        assert closed == [True]
+    else:
+        parts = parse_text_output(raw).candidates[0].parts
+    public = to_gemini_parts("", source_parts=parts)[0].model_dump(exclude_none=True)
+    assert public["functionResponse"] == {
+        "name": "synthetic_tool", "response": expected, "id": "synthetic-call",
+    }
 
 
 def _chunk(parts=None, *, finish=None, content=None):

@@ -463,30 +463,46 @@ class BrowserSession:
                 return new_context
 
             except BaseException as exc:
-                # ASGI cancellation can recur at every await. Dispose only our
-                # candidate and restore the previously ready context first.
+                async def rollback_candidate(reason: BaseException) -> None:
+                    with CancelScope(shield=True):
+                        if new_page is not None and self._cdp_client is not None:
+                            with suppress(Exception):
+                                await self._cdp_client.close_target(new_page.target_id)
+                        self._auth_file = old_auth_file
+                        self._auth_user = old_auth_user
+                        self._profile_dir = old_profile_dir
+                        if (
+                            old_context is not None
+                            and old_context.is_usable()
+                            and self._proc is not None
+                            and self._proc.is_alive()
+                        ):
+                            self._gate.set_ready(old_context)
+                        else:
+                            await self._close_internal()
+                            self._last_stop_reason = "failed"
+                            self._gate.set_failed(
+                                reason if isinstance(reason, Exception)
+                                else RuntimeError("Session transition cancelled")
+                            )
+
+                # Keep this one bounded rollback alive across both AnyIO level
+                # cancellation and direct Task.cancel(), without releasing the
+                # transition lock before candidate disposal and gate restoration.
+                rollback = asyncio.create_task(
+                    rollback_candidate(exc), name="session-transition-rollback",
+                )
+                cancelled = False
                 with CancelScope(shield=True):
-                    if new_page is not None and self._cdp_client is not None:
-                        with suppress(Exception):
-                            await self._cdp_client.close_target(new_page.target_id)
-                    self._auth_file = old_auth_file
-                    self._auth_user = old_auth_user
-                    self._profile_dir = old_profile_dir
-                    if (
-                        old_context is not None
-                        and old_context.is_usable()
-                        and self._proc is not None
-                        and self._proc.is_alive()
-                    ):
-                        self._gate.set_ready(old_context)
-                    else:
-                        await self._close_internal()
-                        self._last_stop_reason = "failed"
-                        self._gate.set_failed(
-                            exc if isinstance(exc, Exception)
-                            else RuntimeError("Session transition cancelled")
-                        )
+                    while not rollback.done():
+                        try:
+                            await asyncio.shield(rollback)
+                        except asyncio.CancelledError:
+                            cancelled = True
+                    rollback.result()
                 log.error("会话切换失败: %s", exc)
+                if cancelled:
+                    raise asyncio.CancelledError from exc
                 raise
 
     async def _drain_retiring_context(

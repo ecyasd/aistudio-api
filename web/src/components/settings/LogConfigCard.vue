@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { onUnmounted, ref, watch } from 'vue'
 import { systemApi } from '@/api/system.ts'
 import { useToastStore } from '@/stores/toast.ts'
 import type { SystemConfig, UpdateLoggingConfigRequest } from '@/types/system.ts'
@@ -34,6 +34,8 @@ const debugEnvActive = ref(Boolean(props.initialConfig.debug_env_active))
 const saving = ref(false)
 type LoggingDraft = Required<UpdateLoggingConfigRequest>
 let savedLogging = currentLogging()
+let disposed = false
+onUnmounted(() => { disposed = true })
 
 function currentLogging(): LoggingDraft {
   return {
@@ -53,11 +55,6 @@ function serverLogging(config: Pick<SystemConfig, 'log_level' | 'dump_requests' 
   }
 }
 
-function sameLogging(left: LoggingDraft, right: LoggingDraft): boolean {
-  return left.level === right.level && left.dump_requests === right.dump_requests
-    && left.dump_to_file === right.dump_to_file && left.dump_dir === right.dump_dir
-}
-
 function applyLogging(config: LoggingDraft) {
   logLevel.value = config.level
   dumpRequests.value = config.dump_requests
@@ -65,12 +62,22 @@ function applyLogging(config: LoggingDraft) {
   dumpDir.value = config.dump_dir
 }
 
+function mergeServerLogging(baseline: LoggingDraft, incoming: LoggingDraft) {
+  const current = currentLogging()
+  applyLogging({
+    level: current.level === baseline.level ? incoming.level : current.level,
+    dump_requests: current.dump_requests === baseline.dump_requests ? incoming.dump_requests : current.dump_requests,
+    dump_to_file: current.dump_to_file === baseline.dump_to_file ? incoming.dump_to_file : current.dump_to_file,
+    dump_dir: current.dump_dir === baseline.dump_dir ? incoming.dump_dir : current.dump_dir,
+  })
+}
+
 watch(
   () => props.initialConfig,
   (cfg) => {
-    const clean = sameLogging(currentLogging(), savedLogging)
-    savedLogging = serverLogging(cfg)
-    if (clean) applyLogging(savedLogging)
+    const incoming = serverLogging(cfg)
+    mergeServerLogging(savedLogging, incoming)
+    savedLogging = incoming
     debugEnvActive.value = Boolean(cfg.debug_env_active)
   },
   { deep: true },
@@ -84,20 +91,34 @@ const logLevels = [
 ]
 
 async function handleSave() {
-  if (saving.value) return
+  if (saving.value || disposed) return
   const submitted = currentLogging()
+  const patch: UpdateLoggingConfigRequest = {}
+  if (submitted.level !== savedLogging.level) patch.level = submitted.level
+  if (submitted.dump_requests !== savedLogging.dump_requests) patch.dump_requests = submitted.dump_requests
+  if (submitted.dump_to_file !== savedLogging.dump_to_file) patch.dump_to_file = submitted.dump_to_file
+  if (submitted.dump_dir !== savedLogging.dump_dir) patch.dump_dir = submitted.dump_dir
   saving.value = true
   try {
-    const res = await systemApi.updateLoggingConfig(submitted)
-    savedLogging = serverLogging(res)
-    if (sameLogging(currentLogging(), submitted)) applyLogging(savedLogging)
+    const res = await systemApi.updateLoggingConfig(patch)
+    if (disposed) return
+    const acknowledged = serverLogging(res)
+    // This response only owns the submitted fields. A later config refresh may
+    // already contain newer server values for the fields we never edited.
+    if (patch.level === undefined) acknowledged.level = savedLogging.level
+    if (patch.dump_requests === undefined) acknowledged.dump_requests = savedLogging.dump_requests
+    if (patch.dump_to_file === undefined) acknowledged.dump_to_file = savedLogging.dump_to_file
+    if (patch.dump_dir === undefined) acknowledged.dump_dir = savedLogging.dump_dir
+    savedLogging = acknowledged
+    mergeServerLogging(submitted, savedLogging)
     debugEnvActive.value = res.debug_env_active
     emit('saved')
   } catch (err: unknown) {
+    if (disposed) return
     const msg = err instanceof Error ? err.message : '保存配置失败'
     toast.error(msg)
   } finally {
-    saving.value = false
+    if (!disposed) saving.value = false
   }
 }
 </script>

@@ -242,7 +242,7 @@ class AistudioWireCodec:
             if isinstance(gc, list):
                 # Different image-capable models reject some text-model carry-over slots.
                 for idx in model_defaults.clear_generation_config_indexes:
-                    if idx < len(gc):
+                    if 0 <= idx < len(gc):
                         gc[idx] = None
             if model_defaults.disable_safety_settings:
                 body[self.SAFETY_INDEX] = None
