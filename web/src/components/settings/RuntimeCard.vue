@@ -7,12 +7,13 @@ interface RuntimeState { saved: { engine: 'browserless' | 'browser' }; active: {
 const state = ref<RuntimeState>()
 const engine = ref('browserless'), error = ref(''), notice = ref(''), busy = ref(false), confirm = ref(false)
 const controller = new AbortController()
+const emit = defineEmits<{ saved: [] }>()
 async function load() { state.value = await request<RuntimeState>('/api/console/runtime', { signal: controller.signal }); engine.value = state.value.saved.engine }
 onMounted(() => { void load().catch(cause => { if (!controller.signal.aborted) error.value = String(cause) }) })
 onUnmounted(() => controller.abort())
 async function save() {
   busy.value = true; error.value = ''; notice.value = ''
-  try { state.value = await request('/api/console/runtime', { method: 'PUT', body: JSON.stringify({ engine: engine.value }), signal: controller.signal }); notice.value = '引擎配置已保存，重启服务后生效' }
+  try { state.value = await request('/api/console/runtime', { method: 'PUT', body: JSON.stringify({ engine: engine.value }), signal: controller.signal }); notice.value = '引擎配置已保存，重启服务后生效'; emit('saved') }
   catch (cause) { if (!controller.signal.aborted) error.value = cause instanceof Error ? cause.message : '保存失败' }
   finally { busy.value = false }
 }
@@ -35,7 +36,7 @@ async function restart() {
 <template>
   <article class="console-panel runtime-card monitor-page">
     <div class="panel-heading">
-      <h2>运行引擎与服务重启</h2><span class="muted-text">当前：{{ state?.active.engine === 'browser' ? '有浏览器' : '无浏览器' }}</span>
+      <h2>运行引擎</h2><span class="muted-text">当前：{{ state?.active.engine === 'browser' ? 'CloakBrowser' : '无浏览器' }}</span>
     </div>
     <div class="runtime-body">
       <label for="runtime-engine">运行引擎</label><select
@@ -59,6 +60,18 @@ async function restart() {
       </button>
       <p class="muted-text">
         PG 与 Build 代码助手同时开放，普通模型走 PG，带 -build 的模型走代码助手。引擎切换需要重启。
+      </p>
+      <div
+        v-show="engine === 'browserless'"
+        class="runtime-signers"
+      >
+        <slot name="signers" />
+      </div>
+      <p
+        v-if="engine === 'browser'"
+        class="muted-text"
+      >
+        CloakBrowser 在本机生成证明并发送请求，无需选择 WAA 签名服务。
       </p>
       <div
         v-if="state?.restart_required"
@@ -132,4 +145,8 @@ async function restart() {
 
 <style scoped>
 .runtime-body { padding: 20px; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }.runtime-body > p, .runtime-body > details, .runtime-notice, .runtime-confirm, .runtime-restart { width: 100%; }.runtime-body label { font-size: 13px; }.runtime-restart { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 18px; padding-top: 20px; border-top: 1px solid var(--console-line); }.runtime-restart strong { display: block; margin-bottom: 6px; }.runtime-restart > div { flex: 1; min-width: 210px; }.runtime-notice { color: #e5b96a; }.runtime-confirm { padding: 18px; border: 1px solid #e5b96a; border-radius: 6px; }.runtime-confirm > div { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; }.restart-command { display: block; padding: 14px; margin-top: 10px; background: var(--console-bg); overflow-wrap: anywhere; }.runtime-body :is(.muted-text, .console-error) { margin: 0; }
+</style>
+
+<style scoped>
+.runtime-signers { width: 100%; border-top: 1px solid var(--console-line); padding-top: 18px; }
 </style>

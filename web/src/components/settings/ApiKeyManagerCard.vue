@@ -131,13 +131,13 @@ async function handleDeleteKey(item: ApiKeyItem) {
 </script>
 
 <template>
-  <div class="bg-white border border-gray-200/80 rounded-2xl p-6 shadow-xs space-y-5">
+  <div class="bg-panel border border-line/80 rounded-2xl p-6  space-y-5">
     <!-- Header -->
-    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-gray-100 pb-4">
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-line pb-4">
       <div class="flex items-center gap-2">
-        <Key class="w-4 h-4 text-brand-600" />
+        <Key class="w-4 h-4 text-accent" />
         <div>
-          <h3 class="font-semibold text-gray-900 text-sm">
+          <h3 class="font-semibold text-fg text-sm">
             客户端 API 密钥 (API Keys)
           </h3>
         </div>
@@ -158,9 +158,9 @@ async function handleDeleteKey(item: ApiKeyItem) {
     <!-- Status Banner -->
     <div
       v-if="!apiKeys.length"
-      class="p-4 bg-amber-50/70 border border-amber-200/80 rounded-xl text-xs text-amber-900 flex items-start gap-3"
+      class="p-4 bg-warning-soft/70 border border-warning-line/80 rounded-xl text-xs text-warning flex items-start gap-3"
     >
-      <AlertTriangle class="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+      <AlertTriangle class="w-4 h-4 text-warning shrink-0 mt-0.5" />
       <div>
         未配置 API Key 时接口开放访问。添加密钥后将对入站请求进行校验。
       </div>
@@ -168,11 +168,11 @@ async function handleDeleteKey(item: ApiKeyItem) {
     <!-- Key List Table -->
     <div
       v-if="apiKeys.length"
-      class="overflow-x-auto border border-gray-100 rounded-xl"
+      class="overflow-x-auto border border-line rounded-xl"
     >
       <table class="w-full text-left border-collapse text-xs">
         <thead>
-          <tr class="bg-gray-50 text-gray-500 font-semibold border-b border-gray-100">
+          <tr class="bg-canvas text-muted font-semibold border-b border-line">
             <th class="py-3 px-4">
               备注名称
             </th>
@@ -187,19 +187,19 @@ async function handleDeleteKey(item: ApiKeyItem) {
             </th>
           </tr>
         </thead>
-        <tbody class="divide-y divide-gray-100">
+        <tbody class="divide-y divide-line">
           <tr
             v-for="item in apiKeys"
             :key="item.key"
-            class="hover:bg-gray-50/60 transition-colors"
+            class="hover:bg-canvas/60 transition-colors"
           >
             <!-- Name / Memo -->
             <td class="py-3.5 px-4">
-              <div class="flex items-center gap-1.5 font-semibold text-gray-900">
+              <div class="flex items-center gap-1.5 font-semibold text-fg">
                 <span>{{ item.name }}</span>
                 <button
                   type="button"
-                  class="text-gray-300 hover:text-gray-600 p-0.5 rounded cursor-pointer"
+                  class="text-fg hover:text-secondary p-0.5 rounded cursor-pointer"
                   title="修改备注名"
                   @click="openEditModal(item)"
                 >
@@ -211,13 +211,13 @@ async function handleDeleteKey(item: ApiKeyItem) {
             <!-- Secret Key with Visibility -->
             <td class="py-3.5 px-4 font-mono">
               <div class="flex items-center gap-2">
-                <span class="text-gray-800 bg-gray-50 px-2 py-0.5 rounded border border-gray-200/60">
+                <span class="text-fg bg-canvas px-2 py-0.5 rounded border border-line/60">
                   {{ visibleKeys.has(item.key) ? item.key : maskKey(item.key) }}
                 </span>
 
                 <button
                   type="button"
-                  class="text-gray-400 hover:text-gray-700 p-1 rounded hover:bg-gray-100 cursor-pointer"
+                  class="text-muted hover:text-secondary p-1 rounded hover:bg-raised cursor-pointer"
                   :title="visibleKeys.has(item.key) ? '隐藏密钥' : '显示完整密钥'"
                   @click="toggleVisibility(item.key)"
                 >
@@ -233,13 +233,13 @@ async function handleDeleteKey(item: ApiKeyItem) {
 
                 <button
                   type="button"
-                  class="text-gray-400 hover:text-brand-600 p-1 rounded hover:bg-brand-50 cursor-pointer"
+                  class="text-muted hover:text-accent p-1 rounded hover:bg-accent-soft cursor-pointer"
                   title="复制密钥"
                   @click="handleCopy(item.key)"
                 >
                   <Check
                     v-if="copied === item.key"
-                    class="w-3.5 h-3.5 text-emerald-500"
+                    class="w-3.5 h-3.5 text-success"
                   />
                   <Copy
                     v-else
@@ -250,7 +250,7 @@ async function handleDeleteKey(item: ApiKeyItem) {
             </td>
 
             <!-- Created At -->
-            <td class="py-3.5 px-4 text-gray-400 font-mono">
+            <td class="py-3.5 px-4 text-muted font-mono">
               {{ item.created_at || '配置文件导入' }}
             </td>
 
@@ -258,7 +258,7 @@ async function handleDeleteKey(item: ApiKeyItem) {
             <td class="py-3.5 px-4 text-right">
               <button
                 type="button"
-                class="text-gray-400 hover:text-rose-600 p-1.5 rounded-lg hover:bg-rose-50 transition-colors cursor-pointer"
+                class="text-muted hover:text-danger p-1.5 rounded-lg hover:bg-danger-soft transition-colors cursor-pointer"
                 title="删除 API Key"
                 @click="handleDeleteKey(item)"
               >
@@ -277,26 +277,26 @@ async function handleDeleteKey(item: ApiKeyItem) {
     >
       <div class="space-y-4">
         <div class="space-y-1.5">
-          <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wider">
+          <label class="block text-xs font-semibold text-secondary uppercase tracking-wider">
             备注名称 / 标识
           </label>
           <input
             v-model="newKeyName"
             type="text"
             placeholder="例如: dev-client、prod-backend"
-            class="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs outline-none focus:bg-white focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 transition-all"
+            class="w-full px-3.5 py-2.5 bg-canvas border border-line rounded-xl text-xs outline-none focus:bg-panel focus:border-accent-line focus:ring-2 focus:ring-accent/20 transition-all"
           >
         </div>
 
         <div class="space-y-1.5">
-          <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wider">
-            自定义密钥 <span class="text-gray-400 font-normal">(留空将自动生成)</span>
+          <label class="block text-xs font-semibold text-secondary uppercase tracking-wider">
+            自定义密钥 <span class="text-muted font-normal">(留空将自动生成)</span>
           </label>
           <input
             v-model="customKeyValue"
             type="text"
             placeholder="sk-..."
-            class="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-mono outline-none focus:bg-white focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 transition-all"
+            class="w-full px-3.5 py-2.5 bg-canvas border border-line rounded-xl text-xs font-mono outline-none focus:bg-panel focus:border-accent-line focus:ring-2 focus:ring-accent/20 transition-all"
           >
         </div>
       </div>
@@ -329,13 +329,13 @@ async function handleDeleteKey(item: ApiKeyItem) {
     >
       <div class="space-y-4">
         <div class="space-y-1.5">
-          <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wider">
+          <label class="block text-xs font-semibold text-secondary uppercase tracking-wider">
             备注名称
           </label>
           <input
             v-model="editKeyNameInput"
             type="text"
-            class="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs outline-none focus:bg-white focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 transition-all"
+            class="w-full px-3.5 py-2.5 bg-canvas border border-line rounded-xl text-xs outline-none focus:bg-panel focus:border-accent-line focus:ring-2 focus:ring-accent/20 transition-all"
           >
         </div>
       </div>

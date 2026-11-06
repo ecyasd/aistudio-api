@@ -69,7 +69,7 @@ const widthClasses: Record<string, string> = {
     >
       <div
         v-if="modelValue"
-        class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-gray-900/50 backdrop-blur-sm overflow-y-auto"
+        class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm overflow-y-auto"
         @click.self="closeModal"
       >
         <Transition
@@ -82,19 +82,23 @@ const widthClasses: Record<string, string> = {
         >
           <div
             v-if="modelValue"
+            role="dialog"
+            aria-modal="true"
+            :aria-label="title"
             :class="[
-              'w-full bg-white rounded-2xl shadow-xl border border-gray-100 flex flex-col overflow-hidden my-8',
+              'w-full bg-overlay rounded-xl border border-line-strong flex flex-col overflow-hidden max-h-[calc(100dvh-2rem)]',
               widthClasses[maxWidth] || 'max-w-md',
             ]"
           >
             <!-- Modal Header -->
-            <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-              <h3 class="text-base font-semibold text-gray-900">
+            <div class="px-6 py-4 border-b border-line flex items-center justify-between">
+              <h3 class="text-base font-semibold text-fg">
                 {{ title }}
               </h3>
               <button
                 type="button"
-                class="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 transition-colors"
+                aria-label="关闭弹窗"
+                class="text-muted hover:text-fg p-2.5 rounded-lg hover:bg-raised transition-colors"
                 @click="closeModal"
               >
                 <X class="w-5 h-5" />
@@ -102,14 +106,14 @@ const widthClasses: Record<string, string> = {
             </div>
 
             <!-- Modal Body -->
-            <div class="px-6 py-5 overflow-y-auto max-h-[75vh]">
+            <div class="px-6 py-5 overflow-y-auto min-h-0">
               <slot />
             </div>
 
             <!-- Modal Footer -->
             <div
               v-if="$slots.footer"
-              class="px-6 py-3.5 bg-gray-50 border-t border-gray-100 flex items-center justify-end gap-3"
+              class="px-6 py-3.5 bg-canvas border-t border-line flex items-center justify-end gap-3"
             >
               <slot name="footer" />
             </div>

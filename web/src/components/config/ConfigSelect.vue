@@ -41,12 +41,12 @@ function handleChange(e: Event) {
 <template>
   <div class="space-y-1.5">
     <div class="flex items-center justify-between">
-      <label class="block text-xs font-semibold text-gray-700">
+      <label class="block text-xs font-semibold text-secondary">
         {{ label }}
       </label>
       <span
         v-if="description"
-        class="text-[11px] text-gray-400"
+        class="text-[11px] text-muted"
       >
         {{ description }}
       </span>
@@ -56,7 +56,7 @@ function handleChange(e: Event) {
       <select
         :value="modelValue === null || modelValue === undefined ? '__null__' : modelValue"
         :disabled="disabled"
-        class="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs font-mono outline-none focus:bg-white focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 transition-all cursor-pointer disabled:opacity-50"
+        class="w-full px-3 py-2 bg-canvas border border-line rounded-xl text-xs font-mono outline-none focus:bg-panel focus:border-accent-line focus:ring-2 focus:ring-accent/20 transition-all cursor-pointer disabled:opacity-50"
         @change="handleChange"
       >
         <option

@@ -61,7 +61,14 @@ usePolling(loadData, 10000)
 </script>
 
 <template>
-  <div class="space-y-6">
+  <div class="monitor-page space-y-6">
+    <header class="monitor-heading">
+      <div>
+        <div class="eyebrow">
+          WORKSPACE / OVERVIEW
+        </div><h1>概览</h1><p>查看账号状态与 API 使用概况。</p>
+      </div>
+    </header>
     <!-- Stat Cards Grid -->
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
       <StatCard
@@ -71,7 +78,7 @@ usePolling(loadData, 10000)
         :color="accountsStore.activeAccount ? 'green' : 'default'"
       >
         <template #icon>
-          <UserCheck class="w-4 h-4 text-emerald-600" />
+          <UserCheck class="w-4 h-4 text-success" />
         </template>
       </StatCard>
 
@@ -81,7 +88,7 @@ usePolling(loadData, 10000)
         color="default"
       >
         <template #icon>
-          <Users class="w-4 h-4 text-brand-600" />
+          <Users class="w-4 h-4 text-accent" />
         </template>
       </StatCard>
 
@@ -92,7 +99,7 @@ usePolling(loadData, 10000)
         color="default"
       >
         <template #icon>
-          <Activity class="w-4 h-4 text-blue-600" />
+          <Activity class="w-4 h-4 text-info" />
         </template>
       </StatCard>
 
@@ -102,7 +109,7 @@ usePolling(loadData, 10000)
         :color="systemStore.totalRateLimited > 0 ? 'amber' : 'default'"
       >
         <template #icon>
-          <AlertTriangle class="w-4 h-4 text-amber-500" />
+          <AlertTriangle class="w-4 h-4 text-warning" />
         </template>
       </StatCard>
 
@@ -112,7 +119,7 @@ usePolling(loadData, 10000)
         color="default"
       >
         <template #icon>
-          <Brain class="w-4 h-4 text-purple-600" />
+          <Brain class="w-4 h-4 text-violet" />
         </template>
       </StatCard>
 
@@ -122,7 +129,7 @@ usePolling(loadData, 10000)
         color="default"
       >
         <template #icon>
-          <Database class="w-4 h-4 text-teal-600" />
+          <Database class="w-4 h-4 text-success" />
         </template>
       </StatCard>
     </div>

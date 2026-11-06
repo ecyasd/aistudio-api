@@ -16,11 +16,11 @@ withDefaults(defineProps<Props>(), {
     :class="[
       size === 'sm' ? 'px-2 py-0.5 text-xs' : 'px-2.5 py-1 text-xs',
       {
-        'bg-emerald-50 text-emerald-700 border border-emerald-200/60': variant === 'green',
-        'bg-rose-50 text-rose-700 border border-rose-200/60': variant === 'red',
-        'bg-amber-50 text-amber-700 border border-amber-200/60': variant === 'amber',
-        'bg-blue-50 text-blue-700 border border-blue-200/60': variant === 'blue',
-        'bg-gray-100 text-gray-700 border border-gray-200/60': variant === 'gray',
+        'bg-success-soft text-success border border-success-line/60': variant === 'green',
+        'bg-danger-soft text-danger border border-danger-line/60': variant === 'red',
+        'bg-warning-soft text-warning border border-warning-line/60': variant === 'amber',
+        'bg-info-soft text-info border border-info-line/60': variant === 'blue',
+        'bg-raised text-secondary border border-line/60': variant === 'gray',
       },
     ]"
   >

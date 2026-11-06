@@ -61,19 +61,19 @@ async function handleLogin() {
 </script>
 
 <template>
-  <div class="min-h-screen bg-gray-100/90 flex flex-col justify-center items-center p-4 sm:p-6">
+  <div class="min-h-screen bg-canvas flex flex-col justify-center items-center p-4 sm:p-6">
     <ToastContainer />
 
-    <div class="w-full max-w-md bg-white rounded-3xl shadow-xl border border-gray-100 p-8 sm:p-10 transition-all">
+    <div class="w-full max-w-md bg-panel rounded-3xl  border border-line p-8 sm:p-10 transition-all">
       <!-- Header / Logo -->
       <div class="text-center mb-8">
-        <div class="w-14 h-14 bg-brand-500 text-white rounded-2xl flex items-center justify-center font-bold text-2xl mx-auto mb-4 shadow-md shadow-brand-500/20">
+        <div class="w-14 h-14 bg-accent text-on-accent rounded-2xl flex items-center justify-center font-semibold text-2xl mx-auto mb-4  shadow-accent/20">
           AI
         </div>
-        <h1 class="text-2xl font-extrabold text-gray-900 tracking-tight">
+        <h1 class="text-2xl font-semibold text-fg tracking-tight">
           AI Studio Proxy
         </h1>
-        <p class="text-xs text-gray-400 mt-1.5">
+        <p class="text-xs text-muted mt-1.5">
           请输入控制台管理密码
         </p>
       </div>
@@ -81,9 +81,9 @@ async function handleLogin() {
       <!-- Error Alert -->
       <div
         v-if="errorMsg"
-        class="mb-6 p-3.5 bg-rose-50 border border-rose-200/80 rounded-xl text-xs font-medium text-rose-800 flex items-start gap-2.5 animate-shake"
+        class="mb-6 p-3.5 bg-danger-soft border border-danger-line/80 rounded-xl text-xs font-medium text-danger flex items-start gap-2.5 animate-shake"
       >
-        <AlertCircle class="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+        <AlertCircle class="w-4 h-4 text-danger shrink-0 mt-0.5" />
         <span>{{ errorMsg }}</span>
       </div>
 
@@ -93,11 +93,11 @@ async function handleLogin() {
         @submit.prevent="handleLogin"
       >
         <div class="space-y-1.5">
-          <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wider">
+          <label class="block text-xs font-semibold text-secondary uppercase tracking-wider">
             访问密码
           </label>
           <div class="relative">
-            <div class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-gray-400">
+            <div class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-muted">
               <Lock class="w-4 h-4" />
             </div>
             <input
@@ -106,11 +106,11 @@ async function handleLogin() {
               placeholder="输入访问密码"
               autocomplete="current-password"
               autofocus
-              class="w-full pl-10 pr-10 py-3 bg-gray-50 border border-gray-200 rounded-xl text-sm outline-none focus:bg-white focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 transition-all font-mono"
+              class="w-full pl-10 pr-10 py-3 bg-canvas border border-line rounded-xl text-sm outline-none focus:bg-panel focus:border-accent-line focus:ring-2 focus:ring-accent/20 transition-all font-mono"
             >
             <button
               type="button"
-              class="absolute inset-y-0 right-0 pr-3.5 flex items-center text-gray-400 hover:text-gray-600 transition-colors"
+              class="absolute inset-y-0 right-0 pr-3.5 flex items-center text-muted hover:text-secondary transition-colors"
               @click="showPassword = !showPassword"
             >
               <EyeOff
@@ -129,7 +129,7 @@ async function handleLogin() {
           type="submit"
           variant="primary"
           size="lg"
-          class="w-full justify-center text-sm font-semibold shadow-md shadow-brand-500/10"
+          class="w-full justify-center text-sm font-semibold  shadow-accent/10"
           :loading="loading"
           :disabled="!inputToken.trim()"
         >

@@ -199,6 +199,8 @@ def parse_raw_cookies(raw: object) -> dict[str, str]:
 
     for line in lines:
         trimmed = line.strip()
+        if trimmed.startswith("#HttpOnly_") and "\t" in trimmed:
+            trimmed = trimmed.removeprefix("#HttpOnly_")
         if not trimmed or trimmed.startswith("#"):
             continue
 

@@ -1,4 +1,4 @@
-:root { --console-bg: #0d1117; --console-panel: #151a22; --console-raised: #1b222d; --console-line: #2a3341; --console-text: #e6edf5; --console-muted: #98a6ba; --console-accent: #70dab0; --console-error: #ff9ba7; }
+:root { --console-bg: var(--color-canvas); --console-panel: var(--color-panel); --console-raised: var(--color-raised); --console-line: var(--color-line); --console-text: var(--color-fg); --console-muted: var(--color-muted); --console-accent: var(--color-accent); --console-error: var(--color-danger); }
 .panel-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 15px 20px; border-bottom: 1px solid var(--console-line); }
 .panel-heading h2 { font-size: 14px; font-weight: 600; }.panel-heading small { margin-left: 8px; color: var(--console-muted); font-size: 11px; font-weight: 400; }
 .monitor-page select, .usage-filters input { color: var(--console-text); background: var(--console-bg); border: 1px solid var(--console-line); border-radius: 5px; min-height: 36px; padding: 6px 10px; font-size: 12px; max-width: 100%; }
