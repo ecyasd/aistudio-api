@@ -3,39 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import math
 import time
-from copy import deepcopy
-from pathlib import Path
 
-from aistudio_api.application.account_rotator import (
-    AccountStats,
-    get_seconds_until_pacific_midnight,
-)
-from aistudio_api.application.generation_errors import GenerationFailure
-from aistudio_api.application.runtime import runtime_state
+from aistudio_api.api.state import runtime_state
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 logger = get_logger("orchestrator")
 MAX_RETRIES = 5
-AUTH_GENERATION_UNTRACKED = object()
 
 _switch_lock: asyncio.Lock | None = None
 _switch_lock_loop: asyncio.AbstractEventLoop | None = None
 _last_switch_time: float = 0.0
-
-
-class AccountPreparationError(Exception):
-    """Preserve the identity attempted before a request obtained a session lease."""
-
-    def __init__(
-        self, account_id: str, original_error: Exception,
-        *, auth_generation: object = AUTH_GENERATION_UNTRACKED,
-    ) -> None:
-        super().__init__("Could not prepare account session")
-        self.account_id = account_id
-        self.original_error = original_error
-        self.auth_generation = auth_generation
 
 
 def _get_switch_lock() -> asyncio.Lock:
@@ -50,33 +28,26 @@ def _get_switch_lock() -> asyncio.Lock:
     return _switch_lock
 
 
-def account_change_lock() -> asyncio.Lock:
-    """Management changes share inference's registry/context switch boundary."""
-    return _get_switch_lock()
-
-
-def note_account_changed() -> None:
-    """A completed owner change supersedes failures waiting on the old context."""
-    global _last_switch_time
-    _last_switch_time = time.time()
-
-
 async def try_switch_account(
     model: str | None = None,
     failed_account_id: str | None = None,
+    required_tiers: tuple[str, ...] | list[str] | None = None,
     *,
-    is_auth_error: bool = False,
     is_session_expired: bool = False,
-    failure_recorded: bool = False,
-    failed_context_id: int | None = None,
-    failed_auth_generation: object = AUTH_GENERATION_UNTRACKED,
 ) -> bool:
     """尝试切换到下一个对目标 model 可用的账号。防止并发级联切号。"""
     global _last_switch_time
     entry_time = time.time()
 
+    if model and not required_tiers:
+        from aistudio_api.infrastructure.gateway.model_discovery import model_discovery
+
+        tiers = model_discovery.get_required_tiers(model)
+        if tiers:
+            required_tiers = tuple(tiers)
+
     # 乐观快速预检：若无需记录永久失效/短时隔离，且当前活跃账号已被并发请求切换至健康状态，直接免锁复用
-    if failed_account_id and not is_session_expired and not is_auth_error:
+    if failed_account_id and not is_session_expired:
         rotator = runtime_state.rotator
         account_service = runtime_state.account_service
         if rotator is not None and account_service is not None:
@@ -87,6 +58,7 @@ async def try_switch_account(
                     cur_active.id != failed_account_id
                     or _last_switch_time >= entry_time
                 )
+                and (not required_tiers or cur_active.tier in required_tiers)
                 and rotator.is_account_available(cur_active.id, model=model)
             ):
                 return True
@@ -107,70 +79,41 @@ async def try_switch_account(
         current_active = account_service.get_active_account()
         current_id = current_active.id if current_active else None
 
-        # An owner import can complete while a 403 waits for this lock. Check
-        # again before recording a quarantine or starting any recovery work.
-        if (
-            failed_account_id is not None
-            and failed_auth_generation is not AUTH_GENERATION_UNTRACKED
-            and not account_generation_is_current(failed_account_id, failed_auth_generation)
-        ):
-            return bool(current_id and rotator.is_account_available(current_id, model=model))
-
-        active_context = client.session.active_context
-        active_context_id = active_context.context_id if active_context else None
-        same_account_recovered = bool(
-            current_id
-            and current_id == failed_account_id
-            and not is_session_expired
-            and (
-                _last_switch_time >= entry_time
-                or (
-                    failed_context_id is not None
-                    and isinstance(active_context_id, int)
-                    and active_context_id != failed_context_id
-                )
-            )
-        )
-        if same_account_recovered and current_id is not None:
-            # Old concurrent 403s belong to the retired session. A caller may
-            # already have marked one before entering the lock; remove only
-            # that obsolete auth lockout, preserving model quotas/cooldowns.
-            if is_auth_error and failure_recorded:
-                rotator.clear_auth_lockout(current_id)
-            if rotator.is_account_available(current_id, model=model):
-                return True
-
-        # A concurrent switch must not prevent attribution to the failed lease.
-        # Auth errors from a retired context must not lock a refreshed session.
-        if failed_account_id and not failure_recorded and not same_account_recovered:
-            if is_session_expired:
-                rotator.record_session_expired(failed_account_id, model=model)
-            elif is_auth_error:
-                rotator.record_auth_error(failed_account_id, model=model)
-
         # 双重检查 1：如果已有并发协程在 entry_time 之后完成切号或在位自愈刷新，且当前账号对该模型可用，则直接复用
         if (
             _last_switch_time >= entry_time
             and current_id
             and (not is_session_expired or current_id != failed_account_id)
+            and (
+                not required_tiers
+                or (current_active and current_active.tier in required_tiers)
+            )
             and rotator.is_account_available(current_id, model=model)
         ):
             logger.info(
-                "已有并发请求完成切号或会话自愈，直接复用当前健康账号: %s (model=%s)",
+                "并发请求已完成切号，复用当前账号: account=%s, model=%s",
                 current_id,
                 model,
             )
             return True
+
+        # 遇到登录态失效时，永久禁用该账号并拒绝原地重试
+        if failed_account_id and is_session_expired:
+            rotator.record_session_expired(failed_account_id, model=model)
 
         # 双重检查 2：如果已经由并发协程切换到了新账号，且新账号对当前 model 可用，则直接复用
         if (
             failed_account_id
             and current_id
             and current_id != failed_account_id
+            and (
+                not required_tiers
+                or (current_active and current_active.tier in required_tiers)
+            )
             and rotator.is_account_available(current_id, model=model)
         ):
             logger.info(
-                "已有并发请求完成切号，直接复用当前健康账号: %s (model=%s)",
+                "并发请求已完成切号，复用当前账号: account=%s, model=%s",
                 current_id,
                 model,
             )
@@ -180,31 +123,37 @@ async def try_switch_account(
             model=model,
             current_account_id=current_id,
             failed_account_id=failed_account_id,
+            required_tiers=required_tiers,
             is_session_expired=is_session_expired,
         )
         if next_account is None:
             if is_session_expired:
                 logger.error(
-                    "账号 %s 登录态失效且无其他可用备用账号，禁止原地重试",
+                    "账号 %s 登录态失效且无其他可用账号，停止重试",
+                    failed_account_id,
+                )
+            else:
+                logger.warning(
+                    "未找到可用备用账号: model=%s, failed_account=%s",
+                    model,
                     failed_account_id,
                 )
             return False
 
         if current_id is None or next_account.id != current_id:
-            try:
-                result = await account_service.activate_account(
-                    next_account.id,
-                    client.session,
-                )
-            except AccountPreparationError:
-                raise
-            except Exception as exc:
-                raise AccountPreparationError(
-                    next_account.id, exc, auth_generation=next_account.auth_generation,
-                ) from exc
+            result = await account_service.activate_account(
+                next_account.id,
+                client.session,
+            )
             if result is not None:
-                rotator.clear_auth_lockout(next_account.id)
+                rotator.clear_cooldown(next_account.id, model=model)
                 _last_switch_time = time.time()
+                logger.info(
+                    "账号切换成功: %s -> %s, model=%s",
+                    current_id,
+                    next_account.id,
+                    model,
+                )
             return result is not None
         # 登录态失效严禁在原账号原地重试
         if is_session_expired and (
@@ -213,195 +162,126 @@ async def try_switch_account(
             logger.error("账号 %s 登录态已失效，禁止在原账号重试", failed_account_id)
             return False
 
-        # 单账号模式或所有其他账号均不可用时（非登录态失效，如偶发 403 鉴权波动），如果指定了 failed_account_id，强制刷新当前会话与 BotGuard
+        # 单账号模式或所有其他账号均不可用时（非登录态失效，如偶发 403 鉴权波动），如果指定了 failed_account_id，强制刷新当前会话
         if failed_account_id and failed_account_id == current_id:
             logger.info(
-                "无其他可用备用账号，重新刷新当前账号会话与 BotGuard: %s",
+                "无其他可用备用账号，重置当前账号会话: account=%s",
                 current_id,
             )
-            client.clear_templates()
-            try:
-                result = await account_service.activate_account(
-                    current_id,
-                    client.session,
-                )
-            except AccountPreparationError:
-                raise
-            except Exception as exc:
-                raise AccountPreparationError(
-                    current_id, exc, auth_generation=current_active.auth_generation if current_active else None,
-                ) from exc
+            result = await account_service.activate_account(
+                current_id,
+                client.session,
+            )
             if result is not None:
-                rotator.clear_auth_lockout(current_id)
+                rotator.clear_cooldown(current_id, model=model)
                 _last_switch_time = time.time()
             return result is not None
         return bool(
-            current_id and rotator.is_account_available(current_id, model=model)
+            current_id
+            and (
+                not required_tiers
+                or (current_active and current_active.tier in required_tiers)
+            )
+            and rotator.is_account_available(current_id, model=model)
         )
 
 
-def quota_unavailable_error(model: str | None = None) -> GenerationFailure:
-    """Describe current cooldowns without assuming all 429s last until midnight."""
-    delays: list[int] = []
-    service, rotator = runtime_state.account_service, runtime_state.rotator
-    if service is not None and rotator is not None:
-        for account in service.list_accounts():
-            current = rotator.get_account_stats(account.id)
-            if not isinstance(current, AccountStats) or current.session_expired:
-                continue
-            snapshot = deepcopy(current)
-            # Admission allows isolated auth recovery; this hint concerns quota.
-            snapshot.auth_cooldown = 0
-            if snapshot.is_available(model, ignore_auth_cooldown=True):
-                remaining = 0.0
-            elif snapshot.rate_limited_date_la:
-                remaining = get_seconds_until_pacific_midnight()
-            else:
-                remaining = snapshot.get_cooldown_remaining(model)
-            if math.isfinite(remaining):
-                delays.append(max(1, math.ceil(remaining)))
-    label = f"model '{model}'" if model else "the requested model"
-    return GenerationFailure(429, reason="rate_limit_exceeded", message=f"All accounts are temporarily rate limited for {label}. Retry after the current cooldown.", retry_after_seconds=min(delays) if delays else None)
-
-
-def validate_account_availability(model: str | None = None) -> None:
-    """Check admission without starting a browser or changing daily counters."""
-    account_service = runtime_state.account_service
-    rotator = runtime_state.rotator
-    if account_service is None or rotator is None:
-        raise GenerationFailure(503, reason="account_not_ready", message="Account service is not ready")
-    accounts = account_service.list_accounts()
-    if not accounts:
-        raise GenerationFailure(503, reason="no_accounts", message="No accounts configured. Please import an account.")
-    stats = [rotator.get_account_stats(account.id) for account in accounts]
-    # A temporary auth failure may still use the existing isolated refresh
-    # path. Expired credentials and model cooldowns must never bypass admission.
-    if any(
-        item is None
-        or deepcopy(item).is_available(model, ignore_auth_cooldown=True)
-        for item in stats
-    ):
-        return
-    if all(item is not None and item.session_expired for item in stats):
-        raise GenerationFailure(503, reason="upstream_auth_expired", message="The API key is valid, but all upstream Google sessions have expired. Visit the management page to import fresh cookies; keep the current API key.")
-    raise quota_unavailable_error(model)
-
-
 async def ensure_active_account(attempt: int, model: str | None = None) -> None:
-    """Select a usable account before every attempt, including retry races."""
-    logger.debug("Preparing an available account: attempt=%d", attempt + 1)
-    validate_account_availability(model)
+    """确保在初次尝试时存在活跃账号，且若请求付费模型而当前账号权益不足时主动抢切。"""
+    if attempt != 0:
+        return
     account_svc = runtime_state.account_service
     rotator = runtime_state.rotator
     current = account_svc.get_active_account() if account_svc else None
-    if not current:
-        switched = await try_switch_account(model=model)
-        if not switched:
-            raise GenerationFailure(503, reason="account_not_ready", message="Could not prepare an available account")
-    elif rotator and not rotator.is_account_available(current.id, model=model):
-        # 当前账号对该模型已限流，提前切号
-        switched = await try_switch_account(model=model, failed_account_id=current.id)
-        if not switched:
-            validate_account_availability(model)
-            raise GenerationFailure(503, reason="account_not_ready", message="Could not prepare an available account")
 
-    # Registry selection and browser initialization are separate. Resolve the
-    # active path lazily so accounts imported after process startup also work.
-    async with _get_switch_lock():
-        account_svc = runtime_state.account_service
-        client = runtime_state.client
-        rotator = runtime_state.rotator
-        current = account_svc.get_active_account() if account_svc else None
-        if account_svc is None or client is None or current is None or rotator is None:
-            raise GenerationFailure(503, reason="account_not_ready", message="Account service is not ready")
-        if not rotator.is_account_available(current.id, model=model):
-            validate_account_availability(model)
-            raise GenerationFailure(503, reason="account_not_ready", message="Selected account is no longer available")
-        session = client.session
-        auth_path = account_svc.get_account_auth_path(current.id)
-        if auth_path is None:
-            raise RuntimeError("Active account credentials are unavailable")
-        target_auth = str(auth_path)
-        context = getattr(session, "active_context", None)
-        context_generation = getattr(context, "auth_generation", AUTH_GENERATION_UNTRACKED)
-        if (
-            session._auth_file != target_auth or not session.is_ready
-            or (
-                context_generation is not AUTH_GENERATION_UNTRACKED
-                and context_generation != current.auth_generation
+    # 核心拦截：检测目标模型是否为 Paid 模型且当前账号层级不满足要求
+    if model:
+        from fastapi import HTTPException
+
+        from aistudio_api.infrastructure.gateway.model_discovery import model_discovery
+
+        if model_discovery.is_paid_model(model):
+            req_tier = model_discovery.get_required_tier(model)
+            req_tiers = model_discovery.get_required_tiers(model)
+            allowed_tiers = (
+                set(req_tiers)
+                if req_tiers
+                else (
+                    {"Pro", "Ultra", "Ultra_20X"}
+                    if req_tier == "Pro"
+                    else {"Ultra", "Ultra_20X"}
+                )
             )
-        ):
-            try:
-                await session.transition_to_account(target_auth)
-            except AccountPreparationError:
-                raise
-            except Exception as exc:
-                raise AccountPreparationError(
-                    current.id, exc, auth_generation=current.auth_generation,
-                ) from exc
-        # Browser preparation yields to other requests. A concurrent failure
-        # can quarantine this account while its context is being prepared.
-        if not rotator.is_account_available(current.id, model=model):
-            validate_account_availability(model)
-            raise GenerationFailure(503, reason="account_not_ready", message="Selected account is no longer available")
+            cur_tier = (current.tier if current else None) or "Free"
+            if not current or cur_tier not in allowed_tiers:
+                logger.info(
+                    "模型 %s 需要 %s 权益，当前账号 %s 为 %s，切换至付费账号",
+                    model,
+                    req_tier,
+                    current.id if current else "none",
+                    cur_tier,
+                )
+                switched = await try_switch_account(
+                    model=model,
+                    required_tiers=tuple(req_tiers)
+                    if req_tiers
+                    else tuple(allowed_tiers),
+                )
+                if not switched:
+                    logger.warning(
+                        "请求模型 %s 需要 %s 付费权益，但账号池中无就绪的可用账号",
+                        model,
+                        req_tier,
+                    )
+                    raise HTTPException(
+                        status_code=403,
+                        detail={
+                            "message": f"模型 '{model}' 需要 Google AI Studio {req_tier} 订阅，当前账号池中无就绪的付费账号。",
+                            "type": "permission_denied",
+                        },
+                    )
+                return
 
+    if not current:
+        await try_switch_account(model=model)
+    elif (
+        rotator and model and not rotator.is_account_available(current.id, model=model)
+    ):
+        await try_switch_account(model=model, failed_account_id=current.id)
 
-def account_id_for_auth_file(auth_file: str | None) -> str | None:
-    """Identify the account actually leased by a request, without active fallback."""
-    account_service = runtime_state.account_service
-    if not auth_file or account_service is None:
-        return None
-    target = Path(auth_file).resolve()
-    for account in account_service.list_accounts():
-        auth_path = account_service.get_account_auth_path(account.id)
-        if auth_path is not None and Path(auth_path).resolve() == target:
-            return account.id
-    return None
+    # Restore a persisted selection lazily on an actual generation request.
+    client = runtime_state.client
+    selected = account_svc.get_active_account() if account_svc else None
+    if client and account_svc and selected and client.session.active_context is None:
+        auth_path = account_svc.get_account_auth_path(selected.id)
+        if auth_path:
+            await client.switch_auth(str(auth_path))
 
 
 def record_rotator_event(
     event: str,
     model: str | None = None,
-    *,
-    account_id: str | None,
-    auth_generation: object = AUTH_GENERATION_UNTRACKED,
+    usage: dict[str, object] | None = None,
 ) -> None:
-    """Record an event against its leased account, never the later active account."""
+    """记录调度器事件（成功、限流、错误、鉴权异常）。"""
     rotator = runtime_state.rotator
-    if not rotator or account_id is None:
-        return
-    if (
-        auth_generation is not AUTH_GENERATION_UNTRACKED
-        and not account_generation_is_current(account_id, auth_generation)
-    ):
+    account_service = runtime_state.account_service
+    account = account_service.get_active_account() if account_service else None
+    if not rotator or account is None:
         return
     if event == "success":
-        rotator.record_success(account_id, model=model)
+        rotator.record_success(account.id, model=model, usage=usage)
     elif event == "rate_limited":
-        rotator.record_rate_limited(account_id, model=model)
+        rotator.record_rate_limited(account.id, model=model)
     elif event == "auth_error":
-        rotator.record_auth_error(account_id, model=model)
-    elif event == "session_expired":
-        rotator.record_session_expired(account_id, model=model)
+        rotator.record_auth_error(account.id, model=model)
     elif event == "error":
-        rotator.record_error(account_id, model=model)
-
-
-def account_generation_is_current(account_id: str, auth_generation: object) -> bool:
-    """Retired request outcomes cannot change reimported/deleted account state."""
-    service = runtime_state.account_service
-    if service is None:
-        return False
-    account = service.get_account(account_id)
-    return account is not None and account.auth_generation == auth_generation
+        rotator.record_error(account.id, model=model)
 
 
 __all__ = [
     "MAX_RETRIES",
-    "AccountPreparationError",
-    "account_id_for_auth_file",
     "ensure_active_account",
     "record_rotator_event",
     "try_switch_account",
-    "validate_account_availability",
 ]

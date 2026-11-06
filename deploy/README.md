@@ -1,274 +1,40 @@
-# 部署与维护
+# GitHub 与 Docker 部署
 
-本说明面向已有 Linux 主机上的维护，公开访问采用 HTTPS 反向代理、systemd
-单进程服务和 `secure_runner.py`。普通入口也已实现管理密码与调用密钥分离；
-加固入口额外限制失败认证、强制关闭敏感转储、保持后端与 CDP 私有监听，并禁用启动预热。
+`master` 更新后，CI 在 Linux 检查 Python/SDK、前端和 amd64 容器；镜像内同时包含 API、前端和本地 WAA 签名器。镜像以 `container-<commit>` 的 GitHub Release 分发，服务器校验 SHA-256、镜像提交标签及当前 master，再通过既有 GitHub OIDC → 限定 SSM 文档更新 Docker Compose。服务器不拉取源码、不现场编译，不需要长期 AWS 密钥或容器仓库密码。
 
-## 代码、配置与数据
+## 固定位置
 
-| 内容 | 管理方式 |
-|---|---|
-| Python、浏览器脚本、已构建前端、运行时认证守卫 | 由经过 CI 的代码工件更新 |
-| systemd 服务、启动器、反向代理与部署工具 | 单独维护，常规代码工件不覆盖 |
-| `config.yaml` 与其中的 `api_keys` | 服务器上的持久配置；发布和回滚均不覆盖 |
-| 网站管理密码 | 独立的 systemd credential；不进入 Git、构建工件或日志 |
-| Google 账号与 Cookie、统计、配额及冷却状态 | 独立持久目录；代码发布不导入、激活、清空或替换 |
-| 实时错误 | 仅当前 API 进程的内存；最近 10 分钟、最多 100 条，重启即清空 |
+| 内容 | 服务器位置 | 默认行为 |
+| --- | --- | --- |
+| Compose 定义 | `/srv/aistudio-console/compose.yaml` | 固定运行入口 |
+| 管理密码与初始调用密钥 | `/etc/aistudio-console/runtime.env` | root 0600；全新安装生成 |
+| 当前镜像版本 | `/etc/aistudio-console/image.env` | 固定提交标签 |
+| 模型配置及当前动态调用密钥 | `/var/lib/aistudio-console/config.yaml` | 首次由环境变量初始化，之后更新保留 |
+| 账号 | `/var/lib/aistudio-console/accounts/` | 首次为空，所有者自行导入 |
+| 统计与冷却 | `/var/lib/aistudio-console/stats.json`、`rotator_state.json` | 自动保存 |
+| WAA 状态 | `/var/lib/aistudio-console/waa/` | 默认启用，更新保留 |
+| 请求与事件历史 | `/var/lib/aistudio-console/telemetry.sqlite3` | 默认启用；7 天；请求最多 5,000 条、事件最多 10,000 条 |
+| Python 运行日志 | `/var/log/aistudio-console/runtime.log` | 默认启用；单文件 5 MiB，3 个轮转备份 |
+| API 与 WAA 容器输出 | `docker logs aistudio-console` | 默认启用；Docker local 驱动，10 MiB × 3，压缩 |
+| HTTPS 访问日志 | `/var/log/caddy/aistudio-access.log` | 默认启用；10 MiB × 4，7 天；去除 URI 和请求/响应头 |
 
-从本仓库构建或使用本仓库 CI 工件。上游容器镜像不包含本分支修复。
-开发依赖安装在隔离验证环境中；代码更新不顺便升级生产依赖。
+请求页显示最近 500 条结束记录和进行中的请求，日志页读取最近 1,000 个事件。历史仅包含白名单元数据，不记录对话、正文、思考、签名或凭据。
 
-默认 `docker-compose.yml` 与兼容的 `docker-compose.deploy.yml` 都构建当前维护源码，
-只把 API 发布到 `127.0.0.1:8080`，公网访问由 HTTPS 网关承接。兼容文件保留原有
-`aistudio-api-data` 命名卷和 `/app/data/config.yaml` 路径；使用它更新时执行
-`docker compose -f docker-compose.deploy.yml up -d --build`，保留现有项目名和卷。
+## 环境与服务
 
-## 加固入口
+环境示例见 `runtime.env.example`。`AISTUDIO_WEB_PASSWORD` 与 `AISTUDIO_BOOTSTRAP_API_KEY` 独立；后者只在空目录首次初始化配置时使用，以后通过管理界面维护调用密钥。
 
-先安装项目运行依赖与受控 Chromium，再为服务配置以下持久路径。
-示例使用通用路径；已有部署应保留自己的路径和数据。
+容器以 UID/GID 10001 运行，数据和日志挂载目录由该 UID 拥有。根文件系统只读，临时文件使用有界 tmpfs。Linux 主机网络配合 `AISTUDIO_BIND_HOST=127.0.0.1`，API 8080 与本地签名器 8081 均仅监听 loopback；公网只通过既有 Caddy HTTPS。使用主机网络是为了保持按网卡拓扑检查的现有流量保护稳定。
 
-| 环境变量 | 示例 |
-|---|---|
-| `AISTUDIO_CONFIG_FILE` | `/var/lib/aistudio-api/config.yaml` |
-| `AISTUDIO_DATA_DIR` | `/var/lib/aistudio-api` |
-| `AISTUDIO_ACCOUNTS_DIR` | `/var/lib/aistudio-api/accounts` |
-| `AISTUDIO_STATS_FILE` | `/var/lib/aistudio-api/stats.json` |
-| `AISTUDIO_ROTATOR_STATE_FILE` | `/var/lib/aistudio-api/rotator_state.json` |
+`aistudio-api.service` 是产品的 Docker Compose 启动单元，替换旧 Python 单元；`ExecStartPre` 继续执行既有流量门禁。Docker 守护进程、SSM、HTTPS 证书和流量计数独立维护，发布不重置它们。
 
-持久路径由服务用户读写，凭据来源文件只授予所需读取权限。`secure_runner.py`
-从 systemd 提供的 `CREDENTIALS_DIRECTORY/app-secrets` 读取 JSON 中的
-`admin_password` 字段。通过服务单元的
-`LoadCredential=app-secrets:/etc/aistudio-api/secrets.json` 提供该文件；
-不要把凭据复制到仓库或放入启动命令参数。
+常用命令：
 
-服务的 `ExecStart` 指向已安装虚拟环境的 Python 和本仓库
-`deploy/secure_runner.py` 的绝对路径。该入口将工作目录设为源码目录，监听
-`127.0.0.1:8080`，以一个 worker 运行，并将 Chromium 调试端口保持在 loopback。
-不要把此 loopback 启动方式直接套入依赖容器外访问的网络布局。
-
-代码文件需要服务用户可读。原子替换后应显式设置最终权限，不能仅依赖创建时的
-mode；严格 umask 可能移除服务用户的读取权限。
-
-## HTTPS 与认证
-
-可选本地 WAA/Build 的单独安装与启用见 [BROWSERLESS.md](../docs/BROWSERLESS.md)。
-签名器端口只允许本机访问，不加入公网反代。新增用量页时，网关页面白名单需允许
-`/usage`、`/usage/`，管理 API 白名单需允许 `GET /requests`；后者仍仅接受独立管理 Bearer。
-
-- 反向代理承接公网 HTTPS，后端 8080 与浏览器调试 9222 不公开。
-- 代理覆盖 `X-Real-IP` 为实际连接来源，不能透传客户端自报值；访问日志省略查询字符串。
-- 网站管理只使用独立管理密码的 Bearer 认证。API 只使用管理界面配置的调用密钥，密钥集合为空时拒绝调用。
-- 普通入口和容器同样要求管理密码；未配置或仅含空白时拒绝全部管理请求。`/auth/check` 始终要求登录，公开最小健康仍可读取。
-- 所有启动入口均禁用浏览器预热；仅启动服务、读取健康或诊断状态不会访问 Google。
-- Gemini `key` 查询参数、`x-goog-api-key`、`x-api-key` 与 Bearer 调用方式均保持兼容。管理密码不能调用 API，调用密钥不能访问管理接口。
-- 如有路由白名单，保留页面 `/error-records`、`/error-records/`，以及经管理认证的 `GET /errors` 和 `GET /browser/status`。
-- `/__deployment/api-auth` 是本地、需调用密钥认证的无推理检查，不需要公网放行。公开 `/health` 只返回最小状态。
-
-修改模型设置会保留当前 `api_keys`。重新导入有效 Google 登录状态或激活账号也不会
-重置调用密钥；只有专用密钥管理操作会更改它。上游 Google 登录失效与调用密钥失效
-分别处理，不应通过轮换 API 密钥解决 Google 登录问题。
-
-管理页面保存 YAML 时同时发送加载基线，服务端只合并实际编辑的顶层字段。
-模型草稿不恢复其他设置卡刚保存的日志值；显式修改的同一字段已被并发操作更新时
-返回 `409`，草稿保留，刷新并合并后再保存。调用该接口的自定义客户端应传
-`baseline_yaml_content`；省略基线仍按旧接口语义替换完整非密钥配置。
-
-### 模型选择器的公网路由
-
-若 HTTPS 网关按模型路径设置白名单，必须同时接受普通模型和目录中列出的
-`抗截断/原模型名`。只允许单段 ASCII 模型名的旧规则会让模型列表正常返回，
-但选择抗截断模型时在网关直接返回 `404`，请求不会到达 API。
-
-Caddy 的两个命名匹配器应保留各自的 GET、POST 方法限制，并使用以下路径规则：
-
-```caddyfile
-path_regexp public_model_read ^/v1beta/models(/(抗截断/)?[A-Za-z0-9][A-Za-z0-9._-]*)?$
-path_regexp public_model_generate ^/v1beta/models/(抗截断/)?[A-Za-z0-9][A-Za-z0-9._-]*:(generateContent|streamGenerateContent)$
+```sh
+systemctl status aistudio-api.service
+docker ps --filter name=aistudio-console
+docker logs --tail 100 aistudio-console
+tail -n 100 /var/log/aistudio-console/runtime.log
 ```
 
-[Caddy 的 `path_regexp`](https://caddyserver.com/docs/caddyfile/matchers#path-regexp)
-匹配 URL 解码后的路径；客户端把中文或分隔斜杠编码为 `%xx` 时仍使用同一规则。
-只追加这个明确的选择器前缀，保留现有认证、其他路由、未知方法的 `404` 和私有端口。
-先校验候选 Caddy 配置，再 reload；常规代码工件不会替换现有网关配置。
-无模型调用验证可确认：未认证的普通和抗截断生成路径均进入认证守卫，通常返回 `401`；
-同一来源已触发认证失败限流时可返回 `429`。两者都应拒绝调用，不能因选择抗截断模型
-在网关返回旧规则的 `404`；未知方法仍为 `404`。认证后的真实模型调用须单独按授权验证。
-
-## 发布检查
-
-发布前检查受影响的后端测试及前端类型、lint 和构建，并使用合成数据验证。
-CI 构建的 `aistudio-code-<gitsha>` 工件包含 `release.tar.gz`、`manifest.json`
-和 `release.tar.gz.sha256`。归档只包含 `src/aistudio_api/`（使用本次新构建的前端）
-及由部署源码映射的 `runtime/public_access_guard.py`；运行配置、账号、Cookie、
-`.env`、密码与 `secure_runner.py` 均不进入工件。构建工具为
-`scripts/build_release.py --static-dir <fresh-built-static> --output-dir dist/release --expected-sha <gitsha>`。
-
-自动部署的工作流与一次性接入配置见下一节。服务器接入成功以前，添加工作流文件
-只代表流程已经定义，不代表生产已开始自动更新。
-
-PR 合并后，须确认合并产生的 `master` 提交 SHA 有对应且成功的 `push` CI 运行，
-并以该 SHA 生成发布工件。只有 PR CI 成功或页面显示已合并，不能证明部署已触发；
-缺少这次 `master` CI 时应检查触发情况，保留现有来源校验，不跳过检查发布或部署。
-
-每次更新应核对工件摘要与 Git 提交，串行替换代码并保存上一版本，再检查服务状态、
-本地健康、公开页面与认证分离。验证不能发送测试提示词、启动账号探活或执行模型预热。
-成功后记录提交与结果，不记录密钥、请求或 Cookie 内容。
-
-## GitHub 自动部署
-
-流程定义于 [CI](../.github/workflows/ci.yml) 与
-[部署工作流](../.github/workflows/deploy.yml)：
-
-1. `master` 推送先通过后端测试（含官方 SDK）及前端检查、构建，再生成按提交 SHA 命名的代码工件。
-2. 部署工作流通过 `workflow_run` 等待 CI 成功，并确认来源是本仓库的 `master` 推送。PR、fork 和未通过 CI 的提交不进入部署。
-3. 使用本次通过 CI 的工件创建固定版本 `deploy-<40位提交SHA>` 的 GitHub Release，附上 `release.tar.gz` 和摘要文件。
-4. GitHub Actions 通过 OIDC 获取短期 AWS 权限，调用指定的 SSM Document；只传递 `CommitSha` 与 `ArtifactSha256`，不开放任意远程 shell。
-5. 服务器固定部署工具校验提交、工件摘要与允许的归档路径，将版本放入 `/opt/aistudio-api/releases/<sha>/source`，再原子切换源码符号链接并检查服务。
-
-一次性接入需要仓库管理员配置以下 **Repository variables**：
-
-| 变量 | 内容 |
-|---|---|
-| `AWS_DEPLOY_ROLE_ARN` | 专用 IAM 角色 ARN；OIDC 信任精确限制为本仓库 `refs/heads/master` |
-| `AWS_DEPLOY_DOCUMENT` | 受控部署 SSM Document 的名称 |
-| `AWS_DEPLOY_REGION` | 部署目标区域 |
-| `AWS_DEPLOY_NODE_ID` | 现有 SSM 托管节点 ID |
-
-AWS 角色只需对指定 Document 和目标节点执行该部署及查询其结果；不需要长期 AWS
-Access Key。该流程不使用 GitHub Environment，OIDC 信任须与分支型 subject 一致。
-subject 须匹配仓库的实际 OIDC 格式；启用不可变 subject 的仓库还包含 owner/repository ID，
-不能直接套用仅含名称的旧格式，详见 [GitHub OIDC 参考](https://docs.github.com/en/actions/reference/security/oidc)。
-变量缺失、信任或权限未接入时，不能认为自动部署已经生效。
-
-服务器需预先安装 root 所有且普通服务用户不可改写的
-`/usr/local/sbin/aistudio-github-deploy`，参数只有 `--commit` 与 `--sha256`。
-初始化还需把现有代码纳入版本目录，并将运行时守卫指向
-`source/runtime/public_access_guard.py`。这些接入操作由管理员单独完成；
-后续常规发布不替换启动器、虚拟环境、反向代理、配置、凭据或数据。
-
-在 Actions 中查看关联 CI 与部署运行，核对部署提交和健康检查结果。
-工作流文件存在、Release 已生成或 SSM 命令已发送，都不等于服务健康验证已经通过。
-
-## 回滚
-
-回滚仅恢复之前的代码及前端，使用原有运行依赖并重新启动服务。配置、网站密码、
-调用密钥、账号和统计必须保持当前版本；不要把整个运行目录恢复为旧备份。
-回滚后重复健康与认证检查。重启会清空实时错误，这是设计行为。
-
-## 常见问题
-
-| 现象 | 处理 |
-|---|---|
-| `401 / authentication_error` | 检查客户端发送的调用密钥及管理界面的密钥列表；未配置密钥也会拒绝调用 |
-| `503 / upstream_auth_expired` | 在管理界面重新导入经授权且有效的 Google 登录状态，保留现有 API 密钥 |
-| `503 / upstream_auth_failed` | 检查管理界面的账号状态和上游权限；不要把网站密码或调用密钥当作 Google 凭据 |
-| `503 / upstream_account_mismatch` | 页面当前账号与所选账号记录不符，已阻止使用该会话；检查所选账号，不要轮换 API 密钥 |
-| `503 / upstream_account_unavailable` | 页面暂未提供可核验的当前账号信息；稍后重试并查看实时错误，不等同于 Google 登录已过期 |
-| `503 / service_busy` | 推理并发或等待容量已满，稍后重试；管理请求保留独立处理能力 |
-| 浏览器显示未启动或休眠 | 首次推理之前及空闲回收之后属正常状态；`GET /browser/status` 本身不会启动浏览器 |
-| API 返回 `502` 或流式 error | 查看实时错误中的分类与请求 ID；不完整的上游 HTTP 200 不能算正常生成完成 |
-| 错误列表在重启后为空 | 记录仅在内存存在，不提供跨重启历史 |
-
-实时错误页仅在可见时每 5 秒刷新，读取失败会明确显示；它不会保存原始异常、
-提示词、模型回复、Cookie 或密钥。Cookie 检查点可以保存刷新后的有效会话，
-但无法恢复 Google 已撤销或已过期的登录。
-
-同页的“响应探测”也显示正常完成的生成请求，可核对是否实际发生多轮上游调用、
-重试、正文后再次出现思考，以及 `[:数字]` 形式标记的命中次数。信号表示观测到的
-顺序，不直接证明存在缺陷。按服务端请求 ID 区分单次请求内的阶段变化与客户端
-再次发出的请求；服务端不能据此判断用户正则如何显示文本，也不能识别没有原生
-思考标志的文字是否属于思考。
-
-响应诊断独立保留最近 10 分钟、最多 100 条，只保存固定字段和计数。
-`terminal_body_replay_suppressed` 表示已拦截完成帧中与此前整篇纯正文一致的重复；
-管理页显示“已拦截末尾整篇正文重复”。`body_chars` 统计上游收到的正文，
-`suppressed_body_chars` 为其中未再次交付的字符数，`terminal_body_replays` 为拦截次数。
-`body_parts` 与 `terminal_body_chars` 分别为收到的正文 Part 数和完成帧正文字符量。
-比较不留存正文或摘要；它不检测改写复述，未命中也不能证明没有模型自身重复。
-签名超时或失败的页面不再接收新的签名排队；旧租约结束后走已有恢复替换页面。
-取消已开始的签名只等待当前读操作在原有 10 秒期限内收束，避免遗留后台签名任务。
-每次请求结束时还会向现有服务日志输出 `response_diagnostic` 白名单摘要，便于
-超过管理页窗口后按时间和请求 ID 追查。正文标记、正文后思考及完成后内容使用
-WARNING，失败和取消的摘要也使用 WARNING，普通成功和恢复使用 INFO；
-是否可读取取决于现有日志级别和保留情况。
-不需要打开请求或响应原文转储，不新增模型请求或持久化数据文件。
-
-`timings_ms` 记录从 HTTP 请求进入起、各阶段首次被服务端观测到的毫秒数：
-`admitted` 为取得并发名额，`account_preparation_started` / `account_ready` 为账号准备，
-`session_ready` 为取得浏览器上下文，`capture_started` / `template_ready` / `snapshot_ready`
-为模板与签名，`upstream_started` / `transport_dispatched` 为进入上游调用与浏览器发起请求，
-`upstream_headers` / `upstream_first_byte` 为流式上游头部与首字节，
-`first_thought` / `first_body` 为解析到首个非空思考文本与正文文本，
-`response_started` / `first_data_sent` 为 HTTP 响应头与首个 SSE data 帧成功交给 ASGI。
-缺失阶段不填零，重试与续写不覆盖首次时间；空心跳不算 SSE data。
-这些时间不证明客户端收到或显示了文本；非流式解析的正文时间包含等待完整响应的时间。
-
-流式传输还记录以下固定数字，管理页在“流式传输”中展示；不记录逐片内容或逐片时间列表：
-
-- `max_upstream_gap_ms`：收到正文 binding 之前的最长主动读取等待，包含响应头到首片的
-  等待，排除 Python 下游消费和 ACK 调用耗时。没有观测到正文片段时为 0，不能据此
-  推断上游很快；也不等于 Google 内部 token 生成间隔。结束前的未完成等待仍需结合
-  原 `transport_wait_phase`、超时分类和阶段时间判断。
-- `max_queue_bytes`：HTTP SSE 缓冲中完整事件的 UTF-8 字节峰值，包含等待即时取走的事件，
-  不含已交给 ASGI 的写入批次及生产者正在提交的一个事件，不表示整条链路的总内存。
-- `send_wait_ms` / `max_send_wait_ms`：最外层应用调用 ASGI `send` 的累计／最长耗时，
-  包含失败或取消的发送，不在多层中间件重复累计。它只表示应用发送耗时，不证明公网
-  已交付；Caddy、操作系统或客户端仍可能继续缓冲。
-- `ack_wait_ms` / `max_ack_wait_ms`：浏览器事件到达 Python 至消费确认完成的累计／最长
-  耗时，包含消费、解析和 ACK 调用，不是公网 RTT。状态和完成事件也参与统计。
-- `coalesced_events`：通过拼接已有完整 SSE 事件省去的写入次数，不是删除的文本数或批次数。
-
-首片发送完成前保持单槽，之后缓冲最多 8 事件／32 KiB；单个超大完整事件可独占空缓冲。
-只合并已有积压，不增加固定延时，不改变心跳、发送超时、真实结束条件或已发布后禁止重放
-的规则。心跳和合并都不能恢复机场切换后已经断开的连接，也不提高模型自身生成速度。
-`browser_request_started` 表示浏览器初始化脚本已返回启动回执，仍不证明 Google 已收到请求。
-无片段期间，服务端每 20 秒进行一次只读状态检查，每次不超过两秒，记录
-`transport_wait_phase`、`transport_wait_ms`、`transport_probes` 和 `transport_repair_attempts`。
-`fetch_pending` / `read_pending` 区分等待响应头与下一段正文，保留原上游空闲期限；
-检查不会重置或延长该期限，也不会因等待上游而提前重发请求。
-`awaiting_ack` 表示浏览器已有待确认片段。确认推送未送达时，可通过独立备用 binding
-重送该片段一次，序号去重，不重发模型请求，也不拆除其他活动流使用的通道。
-检查失败或恢复失败明确结束请求，不以空响应或已有部分正文报告成功。
-恢复尝试次数不证明生成成功，最终结果仍以完整协议结束及实际响应生命周期判定。
-这些字段只保存固定阶段、计数和时长，不保存浏览器事件、正文、思考或签名。
-在响应结束前已观察到的客户端断连始终记为取消；HTTP 中间件随后发送的空收尾不能将其改成成功。
-
-首段正文等待达到 10 秒（包括结束时仍无正文）的摘要标记 `slow_first_body` 并使用
-WARNING，即使请求最后成功也能在 WARNING 日志级别追查。该阈值仅用于诊断，
-不会中断生成、限制思考时间或改变客户端参数。
-
-长上下文排查还可对照 `request_body_bytes` 与 `prompt_tokens`：前者是应用实际收到的
-请求正文总字节数，只计长度，不复制或保存正文；后者采用首个提供 usage 的上游调用的
-最终输入 token 报告，不将重试或续写的重复历史相加。上游未报告时为 `null`，不靠正文
-内容估算，也不额外调用 token 计数或模型接口。它们是输入规模诊断，不代表完整计费统计。
-上游报告输入达到 64,000 token 的摘要标记 `large_input` 并使用 WARNING，即使首字低于
-10 秒也保留数字摘要，便于比较同等输入规模的快慢样本；该阈值不限制输入或改变推理。
-
-账号准备较慢时，还可对照 `browser_launch_started` / `browser_ready`、
-`browser_context_ready`、`browser_cookies_loaded`、`browser_navigation_ready`、
-`botguard_hooks_ready` / `botguard_prompt_filled` / `botguard_run_dispatched` /
-`botguard_template_ready` 和 `session_checkpoint_done`。它们同样只记录入口后的首次毫秒数；
-复用已有会话时不会伪造初始化阶段。编辑器已经存在时跳过重复导航及其固定等待，
-有效模板到达时立即唤醒捕获，仍须确认服务 hook、完成模板校验并执行原有清理。
-导航后的等待直接由编辑器就绪门控制，不再额外固定等待 800 毫秒；输入文字和 Run 控件
-均确认可用时可跳过 600 毫秒的输入等待，无法确认时保留原回退等待。
-
-管理页的“响应探测”显示输入 token、请求体大小、准备耗时、发送到上游首包的等待，
-以及首段思考/正文和准备里程碑。没有上游用量或旧版本缺少阶段时显示“未知/未记录”。
-上游首包等待不能进一步区分排队、输入处理和模型内部思考。
-`session_preparation_reason` 区分首次启动、热复用、空闲回收、切号、凭据变化和恢复路径；
-`browser_idle_timeout_s` 为本次实际生效的回收秒数，0 表示禁用。首次准备决策记录后，
-同一请求随后对快照等步骤的复用不会覆盖它。空闲计时从请求活动更新，不把正在推理算成空闲。
-
-摘要还包含原生思考 Part 数、已报告思考 token 数，以及请求是否显式提供思考配置。
-`thinking_mode` / `thinking_level` 只记录规范化覆盖配置中的已知枚举；`null` 表示未观测到
-该覆盖值，不推断最终 wire 默认值。`thought_tokens` 使用每次上游调用最后报告的累计值
-再跨调用相加，包含失败尝试已报告的用量；缺失为 `null`，明确的零保留为 `0`。
-部分轮次缺失 usage 时只累计已观测到的用量，不把缺失部分推断为零或完整实际消耗。
-这些计数帮助区分上游未提供思考与输出中途失败，不保存正文、思考、签名或原始配置数组。
-
-身份判断仅采用当前账号控件中的明确邮箱，不使用提示词、整页文本、未选中的账号菜单、
-Cookie 或任意全局 JSON 中出现的邮箱证明身份。页面尚未就绪与明确身份不符分别记录，
-实时错误详情提供固定错误码、请求 ID 和安全堆栈位置。流式请求若已发送 HTTP 200，
-之后的 SSE 错误仍按实际错误分类记录，并单独保留传输状态。
+常规发布保留新版本的数据和凭据。镜像校验或健康检查失败时保留先前镜像配置；首次替换旧程序的清理须在新容器、公网健康和鉴权检查全部通过后单独执行。

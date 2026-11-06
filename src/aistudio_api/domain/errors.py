@@ -13,26 +13,8 @@ class AuthError(AistudioError):
     pass
 
 
-class BrowserTransportError(AistudioError):
-    """The browser could not safely deliver the original generation request."""
-
-
 class SessionExpiredError(AuthError):
     """明确被 Google 重定向至登录页（Cookie 真正失效）。"""
-
-
-class AccountIdentityMismatchError(AuthError):
-    """The verified Google identity differs from the selected account."""
-
-    code = "upstream_account_mismatch"
-    status = 503
-
-
-class AccountIdentityUnavailableError(AuthError):
-    """The active Google identity could not be verified safely."""
-
-    code = "upstream_account_unavailable"
-    status = 503
 
 
 class UsageLimitExceeded(AistudioError):
@@ -45,11 +27,8 @@ class RequestError(AistudioError):
         super().__init__(f"HTTP {status}: {message}" if message else f"HTTP {status}")
 
 
-class IncompleteResponseError(RequestError):
-    """A response reached EOF before protocol completion was confirmed."""
-
-    def __init__(self) -> None:
-        super().__init__(502, "Upstream response ended before completion")
+class TransportError(RuntimeError):
+    """Upstream HTTP or WAA proof transport failure before completion."""
 
 
 GRPC_CODE_TO_HTTP: dict[int, int] = {
@@ -85,6 +64,7 @@ def parse_upstream_grpc_error(raw_response: str) -> tuple[int | None, str]:
     try:
         data = json.loads(normalized)
         if isinstance(data, list):
+
             def _find_grpc(obj: object) -> tuple[int | None, str] | None:
                 if isinstance(obj, list):
                     if (
@@ -102,7 +82,9 @@ def parse_upstream_grpc_error(raw_response: str) -> tuple[int | None, str]:
                     err = obj.get("error")
                     if isinstance(err, dict) and "message" in err:
                         code = err.get("code")
-                        return (int(code) if isinstance(code, (int, float)) else None), str(err["message"])
+                        return (
+                            int(code) if isinstance(code, (int, float)) else None
+                        ), str(err["message"])
                 return None
 
             found = _find_grpc(data)
@@ -125,6 +107,8 @@ def classify_error(status: int, body: str) -> AistudioError:
         return AuthError(f"禁止访问: {clean_msg}")
     effective_status = GRPC_CODE_TO_HTTP.get(grpc_code, status) if grpc_code else status
     return RequestError(effective_status, clean_msg)
+
+
 def is_transient_rpc_error(exc: Exception) -> bool:
     """识别 Google 上游偶发且完全随机的 RPC 路由 404 (Ambiguous request for service)。"""
     if isinstance(exc, RequestError) and exc.status == 404:
@@ -133,21 +117,20 @@ def is_transient_rpc_error(exc: Exception) -> bool:
     return False
 
 
-def is_browser_session_hang_error(exc: Exception) -> bool:
-    """识别由于 CDP 断开、模板捕获超时或 BotGuard 握手未就绪引起的会话挂起异常。"""
-    if isinstance(exc, BrowserTransportError):
+def is_transport_error(exc: Exception) -> bool:
+    """识别由于传输中断、签名超时或连接异常引起的网关传输故障。"""
+    if isinstance(exc, TransportError):
         return True
     if isinstance(exc, (RuntimeError, TimeoutError)):
         err = str(exc).lower()
         return any(
             k in err
             for k in (
-                "template capture",
-                "botguard",
                 "timeout",
-                "cdp",
                 "closed",
                 "aborted",
+                "snapshot",
+                "connection",
             )
         )
     return False

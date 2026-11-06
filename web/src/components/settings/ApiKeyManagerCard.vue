@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { ref, onMounted } from 'vue'
 import { systemApi } from '@/api/system.ts'
 import { useToastStore } from '@/stores/toast.ts'
 import type { ApiKeyItem } from '@/types'
@@ -36,43 +36,16 @@ const customKeyValue = ref('')
 const editModalOpen = ref(false)
 const editingKey = ref<ApiKeyItem | null>(null)
 const editKeyNameInput = ref('')
-const savingName = ref(false)
-let mounted = true
-let listRequest = 0
-let listController: AbortController | undefined
-let createRevision = 0
-let editRevision = 0
-
-watch(createModalOpen, () => { createRevision++ }, { flush: 'sync' })
-watch(editModalOpen, () => { editRevision++ }, { flush: 'sync' })
-
-onUnmounted(() => {
-  mounted = false
-  listRequest++
-  listController?.abort()
-})
 
 async function loadApiKeys() {
-  if (!mounted) return
-  const request = ++listRequest
-  listController?.abort()
-  const controller = new AbortController()
-  listController = controller
   loading.value = true
   try {
-    const result = await systemApi.listApiKeys(controller.signal)
-    if (!mounted || request !== listRequest) return
-    apiKeys.value = result
-    visibleKeys.value = new Set(result.filter(item => visibleKeys.value.has(item.key)).map(item => item.key))
+    apiKeys.value = await systemApi.listApiKeys()
   } catch (err: unknown) {
-    if (!mounted || request !== listRequest) return
     const msg = err instanceof Error ? err.message : '获取 API Key 列表失败'
     toast.error(msg)
   } finally {
-    if (mounted && request === listRequest) {
-      loading.value = false
-      listController = undefined
-    }
+    loading.value = false
   }
 }
 
@@ -98,68 +71,48 @@ function handleCopy(key: string) {
 }
 
 function openCreateModal() {
-  createRevision++
   newKeyName.value = ''
   customKeyValue.value = ''
   createModalOpen.value = true
 }
 
 async function handleCreateKey() {
-  if (!mounted || creating.value) return
-  const name = newKeyName.value.trim()
-  const key = customKeyValue.value.trim()
-  const revision = createRevision
   creating.value = true
   try {
     const created = await systemApi.createApiKey({
-      name: name || 'API Key',
-      key: key || undefined,
+      name: newKeyName.value.trim() || 'API Key',
+      key: customKeyValue.value.trim() || undefined,
     })
-    if (!mounted) return
     toast.success(`成功创建 API Key: ${created.name}`)
-    if (createRevision === revision && newKeyName.value.trim() === name && customKeyValue.value.trim() === key) {
-      customKeyValue.value = ''
-      createModalOpen.value = false
-    }
+    createModalOpen.value = false
     await loadApiKeys()
   } catch (err: unknown) {
-    if (!mounted) return
     const msg = err instanceof Error ? err.message : '创建 API Key 失败'
     toast.error(msg)
   } finally {
-    if (mounted) creating.value = false
+    creating.value = false
   }
 }
 
 function openEditModal(item: ApiKeyItem) {
-  editRevision++
   editingKey.value = item
   editKeyNameInput.value = item.name
   editModalOpen.value = true
 }
 
 async function handleSaveEditName() {
-  if (!mounted || !editingKey.value || savingName.value) return
+  if (!editingKey.value) return
   const name = editKeyNameInput.value.trim()
   if (!name) return
-  const key = editingKey.value.key
-  const revision = editRevision
-  savingName.value = true
 
   try {
-    await systemApi.updateApiKeyName(key, { name })
-    if (!mounted) return
+    await systemApi.updateApiKeyName(editingKey.value.key, { name })
     toast.success('API Key 备注名已更新')
-    if (editRevision === revision && editingKey.value?.key === key && editKeyNameInput.value.trim() === name) {
-      editModalOpen.value = false
-    }
+    editModalOpen.value = false
     await loadApiKeys()
   } catch (err: unknown) {
-    if (!mounted) return
     const msg = err instanceof Error ? err.message : '更新备注失败'
     toast.error(msg)
-  } finally {
-    if (mounted) savingName.value = false
   }
 }
 
@@ -167,11 +120,9 @@ async function handleDeleteKey(item: ApiKeyItem) {
   if (confirm(`确定要删除 API Key "${item.name}" 吗？删除后使用该 Key 的客户端将无法访问。`)) {
     try {
       await systemApi.deleteApiKey(item.key)
-      if (!mounted) return
       toast.success('API Key 已删除')
       await loadApiKeys()
     } catch (err: unknown) {
-      if (!mounted) return
       const msg = err instanceof Error ? err.message : '删除失败'
       toast.error(msg)
     }
@@ -206,12 +157,12 @@ async function handleDeleteKey(item: ApiKeyItem) {
 
     <!-- Status Banner -->
     <div
-      v-if="!loading && !apiKeys.length"
+      v-if="!apiKeys.length"
       class="p-4 bg-amber-50/70 border border-amber-200/80 rounded-xl text-xs text-amber-900 flex items-start gap-3"
     >
       <AlertTriangle class="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
       <div>
-        未配置 API Key 时接口拒绝调用。请创建调用密钥；网站登录密码不能用于 API 请求。
+        未配置 API Key 时接口开放访问。添加密钥后将对入站请求进行校验。
       </div>
     </div>
     <!-- Key List Table -->
@@ -400,7 +351,6 @@ async function handleDeleteKey(item: ApiKeyItem) {
         <Button
           variant="primary"
           size="sm"
-          :loading="savingName"
           :disabled="!editKeyNameInput.trim()"
           @click="handleSaveEditName"
         >

@@ -4,11 +4,12 @@ const LoginView = () => import('@/views/LoginView.vue')
 const DashboardView = () => import('@/views/DashboardView.vue')
 const AccountsView = () => import('@/views/AccountsView.vue')
 const SettingsView = () => import('@/views/SettingsView.vue')
-const ErrorRecordsView = () => import('@/views/ErrorRecordsView.vue')
-const UsageView = () => import('@/views/UsageView.vue')
+const RequestsView = () => import('@/views/RequestsView.vue')
+const LogsView = () => import('@/views/LogsView.vue')
 
 const routes: RouteRecordRaw[] = [
-  { path: '/usage', name: 'usage', component: UsageView, meta: { title: '用量与请求' } },
+  { path: '/requests', name: 'requests', component: RequestsView, meta: { title: '请求' } },
+  { path: '/logs', name: 'logs', component: LogsView, meta: { title: '日志' } },
   {
     path: '/login',
     name: 'login',
@@ -26,12 +27,6 @@ const routes: RouteRecordRaw[] = [
     name: 'accounts',
     component: AccountsView,
     meta: { title: '账号管理' },
-  },
-  {
-    path: '/error-records',
-    name: 'error-records',
-    component: ErrorRecordsView,
-    meta: { title: '实时错误' },
   },
   {
     path: '/settings',

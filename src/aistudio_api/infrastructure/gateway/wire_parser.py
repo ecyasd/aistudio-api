@@ -6,27 +6,15 @@ docs/WIRE_SPECIFICATION.md
 
 from __future__ import annotations
 
-import base64
-import binascii
 import json
-import re
 
-from aistudio_api.domain.errors import IncompleteResponseError, RequestError
-from aistudio_api.domain.models import (
-    Candidate,
-    ContentPart,
-    GeneratedImage,
-    ModelOutput,
+from aistudio_api.domain.models import Candidate, GeneratedImage, ModelOutput
+from aistudio_api.infrastructure.utils.common import (
+    decode_base64_images,
+    extract_outer_json,
 )
-from aistudio_api.infrastructure.gateway.terminal_body_replay import (
-    TerminalBodyReplayGuard,
-)
-from aistudio_api.infrastructure.utils.common import decode_base64_images
-from aistudio_api.infrastructure.utils.response_diagnostics import (
-    observe_candidate,
-    observe_prompt_tokens,
-    observe_reasoning_tokens,
-)
+
+_ROLE_NAMES = frozenset({"model", "user", "system", "assistant"})
 
 # ==============================================================================
 # Google Protobuf-over-JSON Wire Array Specifications (docs/WIRE_SPECIFICATION.md)
@@ -66,97 +54,37 @@ WIRE_USAGE_REASONING_TOKENS = 9  # Field 10 thinking/reasoning token count
 # Candidate indexes inside chunk[0][0] (WIRE_SPECIFICATION.md §7.2)
 WIRE_CANDIDATE_CONTENT = 0  # Field 1 [parts, role]
 WIRE_CANDIDATE_FINISH_REASON = 1  # Field 2 finish reason enum code
-WIRE_CANDIDATE_INDEX = 2  # Field 3 candidate index (only candidate zero supported)
 WIRE_CANDIDATE_FINISH_MESSAGE = 3  # Field 4 finish message string
 WIRE_CANDIDATE_SAFETY_RATINGS = 4  # Field 5 safety ratings array
 
 
-_PARTIAL_JSON_VALUES = frozenset(
-    {"n", "nu", "nul", "t", "tr", "tru", "f", "fa", "fal", "fals", "-"}
-)
-_PARTIAL_JSON_NUMBER = re.compile(
-    r"(?:-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?[eE][+-]?"
-    r"|-?(?:0|[1-9][0-9]*)\.)\Z"
-)
-_MAX_PARTIAL_NUMBER_PREFIX_CHARS = 128
-
-
-def is_incomplete_json_error(text: str, exc: json.JSONDecodeError) -> bool:
-    """Recognize unfinished JSON tails while retaining definite syntax errors.
-
-    The decoder already validated the preceding JSON. Only inspect its error
-    position and a bounded number suffix; do not parse arbitrary malformed JSON
-    again or treat every invalid response as a retryable transport failure.
-    """
-    if exc.pos >= len(text) or exc.msg.startswith("Unterminated string"):
-        return True
-    if exc.msg == "Invalid \\uXXXX escape":
-        # CPython reports this even when all four hex digits arrived but the
-        # closing quote did not. Inspect only that final, bounded escape tail.
-        return (
-            exc.pos > 0
-            and text[exc.pos - 1] == "\\"
-            and 1 <= len(text) - exc.pos <= 5
-            and text[exc.pos] == "u"
-            and all(char in "0123456789abcdefABCDEF" for char in text[exc.pos + 1:])
-        )
-    if len(text) - exc.pos > 4:
-        return False
-    tail = text[exc.pos:]
-    if exc.msg == "Expecting value" and tail in _PARTIAL_JSON_VALUES:
-        return True
-    if exc.msg not in {"Expecting ',' delimiter", "Extra data"}:
-        return False
-    if text[exc.pos] not in ".eE":
-        return False
-    start = max(0, exc.pos - _MAX_PARTIAL_NUMBER_PREFIX_CHARS)
-    match = _PARTIAL_JSON_NUMBER.search(text[start:])
-    if match is None:
-        return False
-    number_start = start + match.start()
-    # The decoder must have consumed a valid numeric stem. A second value after
-    # a missing comma must not be mistaken for a truncated exponent or decimal.
-    return number_start < exc.pos and (
-        number_start == 0 or text[number_start - 1] in "[,: \t\r\n"
-    )
-
-
-def is_response_chunk(value: object) -> bool:
-    """Recognize a generation chunk, including finish-only and usage trailers."""
-    if not isinstance(value, list) or not value or not isinstance(value[0], list):
-        return False
-    candidates = value[0]
-    if not candidates:
-        return len(value) >= 3  # An independent usage/response-ID trailer.
-    if not all(isinstance(item, list) for item in candidates):
-        return False
-    candidate = candidates[0]
-    if len(candidate) > 1 and type(candidate[1]) is int:
-        return True  # Includes a blocked generation with no content.
-    content = candidate[0] if candidate else None
-    return (
-        isinstance(content, list)
-        and len(content) > 1
-        and isinstance(content[0], list)
-        and isinstance(content[1], str)
-    )
+def _looks_like_response_chunk(value: object) -> bool:
+    return isinstance(value, list) and len(value) > 0 and isinstance(value[0], list)
 
 
 def _iter_response_chunks(outer: object) -> list[list[object]]:
-    def collect(value: object) -> list[list[object]] | None:
-        if is_response_chunk(value) and isinstance(value, list):
-            return [value]
-        if not isinstance(value, list):
-            return None
-        chunks: list[list[object]] = []
-        for child in value:
-            nested = collect(child)
-            if nested is None:
-                return None  # Do not silently drop a malformed sibling.
-            chunks.extend(nested)
-        return chunks
+    if isinstance(outer, list) and outer:
+        if len(outer) == 1 and isinstance(outer[0], list):
+            inner = outer[0]
+            nested_chunks = [
+                item
+                for item in inner
+                if _looks_like_response_chunk(item) and isinstance(item, list)
+            ]
+            if nested_chunks:
+                return nested_chunks
+        top_level_chunks = [
+            item
+            for item in outer
+            if _looks_like_response_chunk(item) and isinstance(item, list)
+        ]
+        if len(top_level_chunks) > 1:
+            return top_level_chunks
 
-    return collect(outer) or []
+    if _looks_like_response_chunk(outer) and isinstance(outer, list):
+        return [outer]
+
+    return []
 
 
 def _coerce_int(value: object) -> int | None:
@@ -207,15 +135,17 @@ def parse_response_part(raw_part: object) -> ResponsePart:
     if len(raw_part) > 0 and isinstance(raw_part[0], list):
         return ResponsePart()
 
-    # A compact text Part is [None/bool-thought, text]. Its text may itself be
-    # a role word; only reject role tuples with an invalid leading payload.
+    # Guard against role name in 2-element structure where index 1 is role.
+    # Only treat as a content block when index 0 is a parts list or role name;
+    # `[None, "model"]` is a valid text part whose text happens to be "model".
     if (
         len(raw_part) == 2
-        and raw_part[1] in ("model", "user", "system", "assistant")
-        and raw_part[0] is not None
-        and type(raw_part[0]) is not bool
+        and isinstance(raw_part[1], str)
+        and raw_part[1] in _ROLE_NAMES
     ):
-        return ResponsePart()
+        first = raw_part[0]
+        if isinstance(first, list) or (isinstance(first, str) and first in _ROLE_NAMES):
+            return ResponsePart()
 
     thought = False
     if len(raw_part) > WIRE_PART_THOUGHT_FLAG_INDEX and isinstance(
@@ -241,14 +171,14 @@ def parse_response_part(raw_part: object) -> ResponsePart:
         raw_inline = raw_part[WIRE_PART_INLINE_DATA_INDEX]
         inline_data = (str(raw_inline[0]), str(raw_inline[1]))
 
-    function_call = _coerce_wire_payload(
+    function_call = _coerce_structural_payload(
         raw_part[WIRE_PART_FUNCTION_CALL_INDEX]
         if len(raw_part) > WIRE_PART_FUNCTION_CALL_INDEX
         else None,
         "functionCall",
     )
     if function_call is None and len(raw_part) > WIRE_PART_FUNCTION_CALL_ALT_INDEX:
-        function_call = _coerce_wire_payload(
+        function_call = _coerce_structural_payload(
             raw_part[WIRE_PART_FUNCTION_CALL_ALT_INDEX], "functionCall"
         )
     thought_signature = (
@@ -264,7 +194,7 @@ def parse_response_part(raw_part: object) -> ResponsePart:
         if isinstance(raw, list) and len(raw) > 2 and isinstance(raw[2], str):
             function_call["call_id"] = raw[2]
 
-    function_response = _coerce_wire_payload(
+    function_response = _coerce_structural_payload(
         raw_part[WIRE_PART_FUNCTION_RESPONSE_INDEX]
         if len(raw_part) > WIRE_PART_FUNCTION_RESPONSE_INDEX
         else None,
@@ -274,7 +204,7 @@ def parse_response_part(raw_part: object) -> ResponsePart:
         function_response is None
         and len(raw_part) > WIRE_PART_FUNCTION_RESPONSE_ALT_INDEX
     ):
-        function_response = _coerce_wire_payload(
+        function_response = _coerce_structural_payload(
             raw_part[WIRE_PART_FUNCTION_RESPONSE_ALT_INDEX], "functionResponse"
         )
 
@@ -337,9 +267,20 @@ def _coerce_wire_payload(
         if len(raw_value) > 2 and isinstance(raw_value[2], str):
             list_payload["call_id"] = raw_value[2]
         return list_payload
-    # Alternative tool-call slots also carry scalar flags (for example the
-    # boolean thought flag). They are not function payloads.
-    return None
+    return {"type": payload_type, "raw": raw_value}
+
+
+def _coerce_structural_payload(
+    raw_value: object, payload_type: str
+) -> dict[str, object] | None:
+    """Only accept structured (list/dict) payloads for functionCall/functionResponse.
+
+    Index 10 is shared with WIRE_PART_THOUGHT_FLAG_INDEX (boolean True); scalar flags
+    at index 10/11 must not be misinterpreted as function calls or responses.
+    """
+    if not isinstance(raw_value, (list, dict)):
+        return None
+    return _coerce_wire_payload(raw_value, payload_type)
 
 
 def _is_wire_value(val: object) -> bool:
@@ -357,17 +298,13 @@ def _decode_wire_struct(raw_struct: object) -> dict[str, object]:
     # Single unboxed key-value pair [key, wire_value]
     if len(raw_struct) >= 2 and isinstance(raw_struct[0], str):
         return {raw_struct[0]: _decode_wire_value(raw_struct[1])}
-    entries: object = raw_struct
+    entries: list[object] = raw_struct
     while (
-        isinstance(entries, list)
-        and len(entries) == 1
+        len(entries) == 1
         and isinstance(entries[0], list)
         and not (len(entries[0]) >= 2 and isinstance(entries[0][0], str))
     ):
         entries = entries[0]
-
-    if not isinstance(entries, list):
-        return {}
 
     result: dict[str, object] = {}
     for item in entries:
@@ -449,8 +386,6 @@ def parse_usage_metadata(raw_usage: object) -> dict[str, object]:
         if len(raw_usage) > WIRE_USAGE_REASONING_TOKENS
         else None
     )
-    observe_reasoning_tokens(reasoning_tokens)
-    observe_prompt_tokens(prompt_tokens)
     completion_tokens = visible_completion_tokens
     if isinstance(visible_completion_tokens, int) and isinstance(reasoning_tokens, int):
         completion_tokens = visible_completion_tokens + reasoning_tokens
@@ -462,7 +397,15 @@ def parse_usage_metadata(raw_usage: object) -> dict[str, object]:
         and isinstance(completion_tokens, int)
     ):
         total_tokens = prompt_tokens + completion_tokens
-    usage: dict[str, object] = {
+    if (
+        prompt_tokens is None
+        and visible_completion_tokens is None
+        and total_tokens is None
+        and cached_tokens is None
+        and reasoning_tokens is None
+    ):
+        return {}
+    return {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
@@ -477,11 +420,6 @@ def parse_usage_metadata(raw_usage: object) -> dict[str, object]:
             "visible_tokens": visible_completion_tokens or 0,
         },
     }
-    from aistudio_api.infrastructure.utils.response_diagnostics import (
-        observe_call_usage,
-    )
-    observe_call_usage(usage)
-    return usage
 
 
 def parse_chunk_usage(chunk: object) -> dict[str, object]:
@@ -490,114 +428,6 @@ def parse_chunk_usage(chunk: object) -> dict[str, object]:
     return parse_usage_metadata(
         chunk[WIRE_CHUNK_USAGE_INDEX] if len(chunk) > WIRE_CHUNK_USAGE_INDEX else None
     )
-
-
-def _has_unreplayable_part(raw: object) -> bool:
-    """Refuse continuation when decoding would omit any original payload."""
-    if not isinstance(raw, list):
-        return True
-    text_fields = {WIRE_PART_TEXT_INDEX, WIRE_PART_THOUGHT_SIGNATURE_INDEX}
-    boolean_thought_fields = {
-        WIRE_PART_THOUGHT_LEAD_INDEX,
-        WIRE_PART_THOUGHT_FLAG_INDEX,
-    }
-    for index, value in enumerate(raw):
-        if value is None:
-            continue
-        if index in text_fields and isinstance(value, str):
-            continue
-        if index in boolean_thought_fields and type(value) is bool:
-            continue
-        if index == WIRE_PART_THOUGHT_ALT_FLAG_INDEX and (
-            type(value) is bool or (type(value) is int and value in (0, 1))
-        ):
-            continue
-        return True
-    return False
-
-
-def _validate_content(raw_candidate: list[object]) -> None:
-    """Reject nonempty content that would otherwise disappear behind STOP.
-
-    Absent/empty protobuf messages and repeated fields are valid finish-only
-    metadata. A present content/Part container must retain its array shape, and
-    a present text field must be a string, even after an earlier finish marker.
-    """
-    content = raw_candidate[WIRE_CANDIDATE_CONTENT] if raw_candidate else None
-    if content is None:
-        return
-    if not isinstance(content, list):
-        raise RequestError(502, "Upstream response contains malformed content")
-    parts = content[0] if content else None
-    if parts is None:
-        return
-    if not isinstance(parts, list):
-        raise RequestError(502, "Upstream response contains malformed content")
-    for part in parts:
-        if (
-            not isinstance(part, list)
-            or (part and isinstance(part[WIRE_PART_THOUGHT_LEAD_INDEX], list))
-            or (
-                len(part) > WIRE_PART_TEXT_INDEX
-                and part[WIRE_PART_TEXT_INDEX] is not None
-                and not isinstance(part[WIRE_PART_TEXT_INDEX], str)
-            )
-        ):
-            raise RequestError(502, "Upstream response contains a malformed Part")
-        signature = (
-            part[WIRE_PART_THOUGHT_SIGNATURE_INDEX]
-            if len(part) > WIRE_PART_THOUGHT_SIGNATURE_INDEX else None
-        )
-        if signature is not None and not isinstance(signature, str):
-            raise RequestError(502, "Upstream response contains a malformed signature Part")
-        inline = part[WIRE_PART_INLINE_DATA_INDEX] if len(part) > WIRE_PART_INLINE_DATA_INDEX else None
-        if inline is not None:
-            if (
-                not isinstance(inline, list) or len(inline) < 2
-                or not isinstance(inline[0], str) or not inline[0]
-                or not isinstance(inline[1], str)
-            ):
-                raise RequestError(502, "Upstream response contains a malformed inline data Part")
-            try:
-                base64.b64decode(inline[1], validate=True)
-            except (ValueError, binascii.Error) as exc:
-                raise RequestError(502, "Upstream response contains a malformed inline data Part") from exc
-        for index in (
-            WIRE_PART_FUNCTION_CALL_INDEX, WIRE_PART_FUNCTION_RESPONSE_INDEX,
-            WIRE_PART_FUNCTION_CALL_ALT_INDEX, WIRE_PART_FUNCTION_RESPONSE_ALT_INDEX,
-        ):
-            payload = part[index] if len(part) > index else None
-            if index == WIRE_PART_THOUGHT_FLAG_INDEX and (
-                type(payload) is bool or (type(payload) is int and payload in (0, 1))
-            ):
-                continue
-            if payload is not None and not isinstance(payload, (list, dict)):
-                raise RequestError(502, "Upstream response contains a malformed function Part")
-
-
-def _code_payload(raw: object, *, result: bool = False) -> dict[str, object] | None:
-    """Retain native enum/text code messages and the older scalar variant."""
-    if result:
-        enum_key, text_key = "outcome", "output"
-        enums = {
-            0: "OUTCOME_UNSPECIFIED",
-            1: "OUTCOME_OK",
-            2: "OUTCOME_FAILED",
-            3: "OUTCOME_DEADLINE_EXCEEDED",
-        }
-    else:
-        enum_key, text_key = "language", "code"
-        enums = {0: "LANGUAGE_UNSPECIFIED", 1: "PYTHON"}
-    if raw is None:
-        return None
-    if isinstance(raw, str):
-        return {enum_key: enums[0], text_key: raw}
-    if isinstance(raw, list):
-        enum = raw[0] if raw and raw[0] is not None else 0
-        text = raw[1] if len(raw) > 1 and raw[1] is not None else ""
-        if type(enum) in (int, str) and isinstance(text, str):
-            return {enum_key: enums.get(enum, enum), text_key: text}
-    raise RequestError(502, "Upstream response contains a malformed code Part")
 
 
 def parse_response_chunk(chunk: list[object]) -> Candidate:
@@ -616,27 +446,6 @@ def parse_response_chunk(chunk: list[object]) -> Candidate:
     raw_candidate = candidates_container[0]
     if not isinstance(raw_candidate, list):
         return candidate
-    for sibling in candidates_container:
-        if not isinstance(sibling, list):
-            raise RequestError(502, "Upstream response contains a malformed candidate")
-        _validate_content(sibling)
-
-    known_candidate_fields = {
-        WIRE_CANDIDATE_CONTENT,
-        WIRE_CANDIDATE_FINISH_REASON,
-        WIRE_CANDIDATE_FINISH_MESSAGE,
-        WIRE_CANDIDATE_SAFETY_RATINGS,
-    }
-    # Unknown grounding/citation metadata cannot safely be reconstructed as text
-    # history. Preserve normal responses, but do not initiate another generation.
-    candidate.continuation_unsafe = len(candidates_container) != 1 or any(
-        (
-            value is not None and not (type(value) is int and value == 0)
-            if index == WIRE_CANDIDATE_INDEX
-            else index not in known_candidate_fields and value not in (None, [], "")
-        )
-        for index, value in enumerate(raw_candidate)
-    )
 
     raw_content = (
         raw_candidate[WIRE_CANDIDATE_CONTENT]
@@ -645,13 +454,6 @@ def parse_response_chunk(chunk: list[object]) -> Candidate:
     )
     raw_parts = (
         raw_content[0] if isinstance(raw_content, list) and len(raw_content) > 0 else []
-    )
-    candidate.continuation_unsafe |= raw_content is not None and (
-        not isinstance(raw_content, list)
-        or len(raw_content) < 2
-        or raw_content[1] != "model"
-        or not isinstance(raw_parts, list)
-        or any(value is not None for value in raw_content[2:])
     )
 
     text_parts: list[str] = []
@@ -664,23 +466,7 @@ def parse_response_chunk(chunk: list[object]) -> Candidate:
     code_outputs: list[str] = []
 
     for raw_part in raw_parts if isinstance(raw_parts, list) else []:
-        candidate.continuation_unsafe |= _has_unreplayable_part(raw_part)
         part = parse_response_part(raw_part)
-        content_part = ContentPart(
-            text=(
-                part.text
-                if isinstance(raw_part, list)
-                and len(raw_part) > WIRE_PART_TEXT_INDEX
-                and isinstance(raw_part[WIRE_PART_TEXT_INDEX], str)
-                else None
-            ),
-            thought=part.thought,
-            function_call=part.function_call,
-            function_response=part.function_response,
-            executable_code=_code_payload(part.executable_code),
-            code_execution_result=_code_payload(part.code_execution_result, result=True),
-            thought_signature=part.thought_signature,
-        )
         if part.inline_data:
             decoded = decode_base64_images(
                 [{"mime": part.inline_data[0], "data": part.inline_data[1]}]
@@ -705,23 +491,11 @@ def parse_response_chunk(chunk: list[object]) -> Candidate:
                 reasoning_images.extend(decoded_images)
             else:
                 images.extend(decoded_images)
-            if decoded_images:
-                content_part.image = decoded_images[0]
-        if (
-            content_part.text is not None
-            or content_part.thought
-            or content_part.image is not None
-            or content_part.function_call is not None
-            or content_part.function_response is not None
-            or content_part.executable_code is not None
-            or content_part.code_execution_result is not None
-            or content_part.thought_signature
-        ):
-            candidate.parts.append(content_part)
-        if part.executable_code:
-            code_outputs.append(str(part.executable_code))
-        if part.code_execution_result:
-            code_outputs.append(str(part.code_execution_result))
+        for code in (part.executable_code, part.code_execution_result):
+            if isinstance(code, list) and len(code) > 1 and isinstance(code[1], str):
+                code_outputs.append(code[1])
+            elif isinstance(code, str) and code:
+                code_outputs.append(code)
         if part.function_call:
             function_calls.append(part.function_call)
         if part.function_response:
@@ -745,7 +519,7 @@ def parse_response_chunk(chunk: list[object]) -> Candidate:
     candidate.finish_reason = (
         raw_candidate[WIRE_CANDIDATE_FINISH_REASON]
         if len(raw_candidate) > WIRE_CANDIDATE_FINISH_REASON
-        and type(raw_candidate[WIRE_CANDIDATE_FINISH_REASON]) is int
+        and isinstance(raw_candidate[WIRE_CANDIDATE_FINISH_REASON], int)
         else None
     )
     candidate.finish_message = (
@@ -760,46 +534,35 @@ def parse_response_chunk(chunk: list[object]) -> Candidate:
         else None
     )
     candidate.safety_ratings = raw_ratings if isinstance(raw_ratings, list) else []
-    observe_candidate(candidate)
     return candidate
 
 
 def parse_text_output(raw: str) -> ModelOutput:
     output = ModelOutput(raw_response=raw)
 
-    # Keep trailing whitespace: whitespace after an unfinished scalar makes
-    # that scalar malformed, whereas whitespace after complete JSON is valid.
-    text = raw.lstrip()
-    if text.startswith(")]}'"):
-        text = text[4:].lstrip()
-    try:
-        outer = json.loads(text)
-    except json.JSONDecodeError as exc:
-        # Only an otherwise unfinished JSON prefix is eligible for recovery.
-        # Invalid tokens, separators, escapes and trailing data remain ordinary
-        # protocol errors instead of repeatedly submitting the same request.
-        if is_incomplete_json_error(text, exc):
-            raise IncompleteResponseError from exc
-        raise RequestError(502, "Upstream response is malformed or truncated") from exc
-    except RecursionError as exc:
-        raise RequestError(502, "Upstream response is malformed or truncated") from exc
+    parts = extract_outer_json(raw)
+    if not parts:
+        return output
+
+    outer = parts[0]
     chunks = _iter_response_chunks(outer)
     if not chunks:
-        raise RequestError(502, "Upstream response contains no generation chunks")
+        return output
 
     merged = Candidate()
-    replay_guard = TerminalBodyReplayGuard()
-    text_fragments: list[str] = []
-    thought_fragments: list[str] = []
-    code_fragments: list[str] = []
     for chunk in chunks:
-        parsed = replay_guard.accept(parse_response_chunk(chunk))
-        merged.continuation_unsafe |= parsed.continuation_unsafe
-        merged.parts.extend(parsed.parts)
+        usage = parse_chunk_usage(chunk)
+        if usage:
+            output.usage = usage
+        if len(chunk) > WIRE_RESPONSE_ID_INDEX:
+            raw_rid = chunk[WIRE_RESPONSE_ID_INDEX]
+            if isinstance(raw_rid, str) and raw_rid:
+                output.response_id = raw_rid
+        parsed = parse_response_chunk(chunk)
         if parsed.text:
-            text_fragments.append(parsed.text)
+            merged.text += parsed.text
         if parsed.thinking:
-            thought_fragments.append(parsed.thinking)
+            merged.thinking += parsed.thinking
         if parsed.images:
             merged.images.extend(parsed.images)
         if parsed.reasoning_images:
@@ -811,37 +574,18 @@ def parse_text_output(raw: str) -> ModelOutput:
         if parsed.thought_signature:
             merged.thought_signature = parsed.thought_signature
         if parsed.code_output:
-            code_fragments.append(parsed.code_output)
-        # Unspecified/default markers in later metadata chunks must not erase
-        # a completed generation. Match the streaming gateway's positive marker
-        # rule while still requiring completion before accepting EOF.
-        if parsed.finish_reason is not None and parsed.finish_reason > 0:
+            merged.code_output = "\n".join(
+                filter(None, [merged.code_output, parsed.code_output])
+            )
+        if parsed.finish_reason is not None:
             merged.finish_reason = parsed.finish_reason
         if parsed.finish_message:
             merged.finish_message = parsed.finish_message
         if parsed.safety_ratings:
             merged.safety_ratings = parsed.safety_ratings
-        usage = parse_chunk_usage(chunk)
-        if usage:
-            output.usage = usage
-        raw_rid = (
-            chunk[WIRE_RESPONSE_ID_INDEX]
-            if len(chunk) > WIRE_RESPONSE_ID_INDEX
-            else None
-        )
-        if isinstance(raw_rid, str) and raw_rid:
-            output.response_id = raw_rid
-    merged.text = "".join(text_fragments)
-    merged.thinking = "".join(thought_fragments)
-    merged.code_output = "\n".join(code_fragments)
-    if merged.finish_reason is None or merged.finish_reason <= 0:
-        raise IncompleteResponseError
+
     output.candidates = [merged]
     return output
-
-
-def parse_image_output(raw: str) -> ModelOutput:
-    return parse_text_output(raw)
 
 
 __all__ = [
@@ -872,9 +616,7 @@ __all__ = [
     "WIRE_USAGE_TOTAL_TOKENS",
     "WIRE_USAGE_VISIBLE_COMPLETION",
     "ResponsePart",
-    "is_response_chunk",
     "parse_chunk_usage",
-    "parse_image_output",
     "parse_response_chunk",
     "parse_response_part",
     "parse_text_output",

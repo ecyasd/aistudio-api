@@ -1,11 +1,10 @@
 services:
   aistudio-api:
-    # Compatibility entry: build this maintained checkout, keeping its named volume.
-    build: .
+    image: ghcr.io/deconstructedcube/aistudio-api:latest
     container_name: aistudio-api
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8080:8080"
+      - "8080:8080"
     volumes:
       - aistudio-api-data:/app/data
     environment:
@@ -14,7 +13,6 @@ services:
       - AISTUDIO_STATS_FILE=/app/data/stats.json
       - AISTUDIO_ROTATOR_STATE_FILE=/app/data/rotator_state.json
       - AISTUDIO_CONFIG_FILE=/app/data/config.yaml
-      - AISTUDIO_BROWSER_EXECUTABLE=/opt/cloakbrowser/chrome
 
 volumes:
   aistudio-api-data:

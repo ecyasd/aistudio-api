@@ -51,15 +51,13 @@ export async function request<T>(url: string, options: RequestInit = {}): Promis
     headers.set('Accept', 'application/json')
   }
 
-  const authorization = headers.get('Authorization')
   const response = await fetch(url, {
     ...options,
     headers,
   })
 
   if (!response.ok) {
-    const currentToken = getToken()
-    if (response.status === 401 && authorization === (currentToken ? `Bearer ${currentToken}` : null)) {
+    if (response.status === 401) {
       clearToken()
       if (onUnauthorizedHandler) {
         onUnauthorizedHandler()

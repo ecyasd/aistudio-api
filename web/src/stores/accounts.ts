@@ -9,6 +9,7 @@ import type {
   ImportCookiesRequest,
   ProbeAndImportRequest,
   ImportBundleRequest,
+  AccountPreset,
 } from '@/types'
 import { useToastStore } from './toast.ts'
 
@@ -22,9 +23,9 @@ export const useAccountsStore = defineStore('accounts', () => {
   const loading = ref(false)
   const activatingId = ref<string | null>(null)
   const importing = ref(false)
-  let refreshRequest = 0
-  let activationRequest = 0
-
+  const presets = ref<AccountPreset[]>([])
+  const groups = ref<string[]>([])
+  const applyingPresetId = ref<string | null>(null)
   const activeId = computed(() => activeAccount.value?.id || '')
 
   const accountRows = computed<AccountWithStats[]>(() => {
@@ -38,15 +39,13 @@ export const useAccountsStore = defineStore('accounts', () => {
   })
 
   async function fetchAll() {
-    const request = ++refreshRequest
     loading.value = true
     try {
-      const [accsRes, activeRes, rotationRes] = await Promise.allSettled([
+      const [accsRes, activeRes] = await Promise.allSettled([
         accountsApi.list(),
         accountsApi.getActive(),
         systemStore.fetchRotation(),
       ])
-      if (request !== refreshRequest) return false
 
       if (accsRes.status === 'fulfilled') {
         accounts.value = accsRes.value
@@ -58,35 +57,118 @@ export const useAccountsStore = defineStore('accounts', () => {
 
       if (activeRes.status === 'fulfilled') {
         activeAccount.value = activeRes.value
-      } else if (accsRes.status === 'fulfilled' &&
-          !accounts.value.some(account => account.id === activeAccount.value?.id)) {
+      } else {
         activeAccount.value = null
       }
-      return accsRes.status === 'fulfilled' && activeRes.status === 'fulfilled'
-        && rotationRes.status === 'fulfilled' && rotationRes.value !== false
     } finally {
-      if (request === refreshRequest) loading.value = false
+      loading.value = false
+    }
+  }
+
+  async function fetchPresets() {
+    try {
+      presets.value = await accountsApi.listPresets()
+    } catch {
+      // ignore
+    }
+  }
+
+  async function fetchGroups() {
+    try {
+      groups.value = await accountsApi.listGroups()
+    } catch {
+      // ignore
+    }
+  }
+
+  async function toggleAccountEnabled(id: string, enabled?: boolean) {
+    const toast = useToastStore()
+    try {
+      const updated = await accountsApi.toggle(id, enabled)
+      toast.success(`账号已${updated.enabled ? '启用' : '停用'}`)
+      await fetchAll()
+      return updated
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '切换状态失败'
+      toast.error(msg)
+      return null
+    }
+  }
+
+  async function updateAccountGroup(id: string, group: string) {
+    const toast = useToastStore()
+    try {
+      const updated = await accountsApi.updateGroup(id, group)
+      toast.success('分组已更新')
+      await fetchAll()
+      await fetchGroups()
+      return updated
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '更新分组失败'
+      toast.error(msg)
+      return null
+    }
+  }
+
+  async function applyPreset(presetId: string) {
+    const toast = useToastStore()
+    applyingPresetId.value = presetId
+    try {
+      const res = await accountsApi.applyPreset(presetId)
+      toast.success(`已应用「${res.preset_name}」: 启用 ${res.enabled_count} 个`)
+      await fetchAll()
+      return true
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '应用方案失败'
+      toast.error(msg)
+      return false
+    } finally {
+      applyingPresetId.value = null
+    }
+  }
+
+  async function createSnapshotPreset(name: string, description = '') {
+    const toast = useToastStore()
+    try {
+      const created = await accountsApi.createSnapshotPreset({ name, description })
+      toast.success(`方案「${created.name}」已保存`)
+      await fetchPresets()
+      return created
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '保存方案失败'
+      toast.error(msg)
+      return null
+    }
+  }
+
+  async function deletePreset(presetId: string) {
+    const toast = useToastStore()
+    try {
+      await accountsApi.deletePreset(presetId)
+      toast.success('方案已删除')
+      await fetchPresets()
+      return true
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '删除方案失败'
+      toast.error(msg)
+      return false
     }
   }
 
   async function activateAccount(id: string) {
     const toast = useToastStore()
-    const request = ++activationRequest
-    ++refreshRequest
     activatingId.value = id
     try {
       const updated = await accountsApi.activate(id)
-      if (request !== activationRequest) return
       activeAccount.value = updated
       toast.success(`已成功激活账号: ${updated.name || updated.email || updated.id}`)
       await fetchAll()
     } catch (err: unknown) {
-      if (request !== activationRequest) return
       const msg = err instanceof Error ? err.message : '激活失败'
       toast.error(msg)
       await fetchAll()
     } finally {
-      if (request === activationRequest) activatingId.value = null
+      activatingId.value = null
     }
   }
 
@@ -120,11 +202,9 @@ export const useAccountsStore = defineStore('accounts', () => {
       await accountsApi.update(id, name)
       toast.success('账号名称已更新')
       await fetchAll()
-      return true
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '更新失败'
       toast.error(msg)
-      return false
     }
   }
 
@@ -183,15 +263,30 @@ export const useAccountsStore = defineStore('accounts', () => {
     const toast = useToastStore()
     try {
       const res = await accountsApi.detectEmail(id)
+      const tierSuffix = res.tier ? ` · 等级: ${res.tier}` : ''
       if (res.email) {
-        toast.success(`已成功识别账号邮箱: ${res.email}`)
+        toast.success(`已成功识别账号邮箱: ${res.email}${tierSuffix}`)
       } else {
-        toast.info('未在当前页面识别到有效邮箱')
+        toast.info(`未在当前页面识别到有效邮箱${tierSuffix}`)
       }
       await fetchAll()
       return res
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '识别邮箱失败'
+      toast.error(msg)
+      return null
+    }
+  }
+
+  async function detectAccountTier(id: string) {
+    const toast = useToastStore()
+    try {
+      const res = await accountsApi.detectTier(id)
+      toast.success(`已更新账号订阅等级: ${res.tier || 'Free'}`)
+      await fetchAll()
+      return res
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '探测订阅等级失败'
       toast.error(msg)
       return null
     }
@@ -215,5 +310,16 @@ export const useAccountsStore = defineStore('accounts', () => {
     probeAndImport,
     importBundle,
     detectAccountEmail,
+    detectAccountTier,
+    presets,
+    groups,
+    applyingPresetId,
+    fetchPresets,
+    fetchGroups,
+    toggleAccountEnabled,
+    updateAccountGroup,
+    applyPreset,
+    createSnapshotPreset,
+    deletePreset,
   }
 })

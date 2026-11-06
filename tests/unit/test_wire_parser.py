@@ -10,7 +10,6 @@ from aistudio_api.infrastructure.gateway.wire_parser import (
     _decode_wire_value,
     _iter_response_chunks,
     parse_chunk_usage,
-    parse_image_output,
     parse_response_chunk,
     parse_response_part,
     parse_text_output,
@@ -43,27 +42,24 @@ def test_decode_wire_value_and_struct():
     decoded = _decode_wire_struct(pairs)
     assert decoded == {"key1": "val1", "key2": "val2"}
 
+
 def test_iter_response_chunks():
     assert _iter_response_chunks([]) == []
     assert _iter_response_chunks(None) == []
 
-    candidate1 = [[[[None, "one"]], "model"], None]
-    candidate2 = [[[[None, "two"]], "model"], 1]
-    chunk1 = [[candidate1], None, [0, 1, 1]]
-    chunk2 = [[candidate2], None, [0, 2, 2]]
+    chunk1 = [["candidate1"]]
+    chunk2 = [["candidate2"]]
     top_level = [chunk1, chunk2]
     assert _iter_response_chunks(top_level) == [chunk1, chunk2]
 
     nested = [[chunk1, chunk2]]
     assert _iter_response_chunks(nested) == [chunk1, chunk2]
-    assert _iter_response_chunks([[chunk1], [chunk2]]) == [chunk1, chunk2]
-    assert _iter_response_chunks([[chunk1, 123]]) == []
 
 
 def test_parse_usage_metadata():
     assert parse_usage_metadata(None) == {}
     assert parse_usage_metadata("invalid") == {}
-
+    assert parse_usage_metadata([None, None, None, None]) == {}
     raw = [10, 20, 30, 5, {"prompt": "details"}, None, None, None, None, 15]
     parsed = parse_usage_metadata(raw)
     assert parsed["prompt_tokens"] == 10
@@ -101,7 +97,7 @@ def test_parse_response_part():
     parsed = parse_response_part(part_with_thought)
     assert parsed.text == "thinking text"
     assert parsed.thought is True
-
+    assert parsed.function_call is None
     # Part with thought at index 12 (AI Studio variant)
     part_variant = [
         None,
@@ -144,10 +140,12 @@ def test_parse_response_part():
     parsed_cb = parse_response_part(content_block)
     assert parsed_cb.text == ""
 
-    # Guard against 2-element role tuple
+    # Guard against 2-element role tuple, while preserving valid text parts whose text is a role word
     role_part = [["nested"], "model"]
     assert parse_response_part(role_part).text == ""
     assert parse_response_part(["user", "user"]).text == ""
+    assert parse_response_part([None, "model"]).text == "model"
+    assert parse_response_part([None, "user"]).text == "user"
 
 
 def test_parse_response_chunk_empty():
@@ -157,21 +155,14 @@ def test_parse_response_chunk_empty():
 
 
 def test_parse_text_output_fallback():
-    import pytest
-
-    from aistudio_api.domain.errors import RequestError
-
-    with pytest.raises(RequestError, match="malformed or truncated"):
-        parse_text_output("invalid json")
-
-    # parse_image_output forwards to parse_text_output
-    with pytest.raises(RequestError, match="malformed or truncated"):
-        parse_image_output("invalid json")
+    output = parse_text_output("invalid json")
+    assert output.text == ""
+    assert output.candidates == []
 
 
 def test_parse_image_output_keeps_only_final_images_in_images_field():
     raw = (FIXTURES / "test_image_output.json").read_text()
-    output = parse_image_output(raw)
+    output = parse_text_output(raw)
 
     assert len(output.images) == 1
     assert len(output.reasoning_images) == 1
@@ -189,6 +180,7 @@ def test_decode_wire_struct_with_three_element_array():
     raw = [["city", "San Francisco", "extra_field"]]
     decoded = _decode_wire_struct(raw)
     assert decoded == {"city": "San Francisco"}
+
 
 def test_decode_wire_value_booleans_and_numbers():
     # Value booleans (JSPB boolean compression 0/1 and explicit bool)
@@ -306,16 +298,61 @@ def test_decode_wire_list_empty_list_returns_list_not_dict():
 
 
 def test_parse_response_chunk_with_ask_tool_payload():
-    # Use the real [candidates, metadata, usage] wrapper. The old fixture
-    # accidentally treated content and a finish enum as two candidates.
-    question = [None, None, None, None, [
-        ["id", [None, None, "storage"]],
-        ["multi", [None, None, None, 0]],
-        ["recommended", [None, 0]],
-    ]]
-    arguments = [["questions", [None, None, None, None, None, [[question]]]]]
-    part = [None, None, None, ["ask", arguments, "call_ask_123"]]
-    chunk: list[object] = [[[[[part], "model"], 1]], None, None]
+    # Full chunk containing ask tool call with single question dict
+    chunk: list[object] = [
+        [
+            [
+                [
+                    [
+                        [
+                            None,
+                            None,
+                            None,
+                            [
+                                "ask",
+                                [
+                                    [
+                                        "questions",
+                                        [
+                                            None,
+                                            None,
+                                            None,
+                                            None,
+                                            None,
+                                            [
+                                                [
+                                                    [
+                                                        None,
+                                                        None,
+                                                        None,
+                                                        None,
+                                                        [
+                                                            [
+                                                                "id",
+                                                                [None, None, "storage"],
+                                                            ],
+                                                            [
+                                                                "multi",
+                                                                [None, None, None, 0],
+                                                            ],
+                                                            ["recommended", [None, 0]],
+                                                        ],
+                                                    ]
+                                                ]
+                                            ],
+                                        ],
+                                    ]
+                                ],
+                                "call_ask_123",
+                            ],
+                        ]
+                    ]
+                ],
+                "model",
+            ],
+            1,
+        ]
+    ]
     candidate = parse_response_chunk(chunk)
     assert len(candidate.function_calls) == 1
     fc = candidate.function_calls[0]

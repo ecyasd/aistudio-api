@@ -9,7 +9,6 @@ if TYPE_CHECKING:
 
 from dataclasses import dataclass
 
-from aistudio_api.application.model_selection import parse_model_selection
 from aistudio_api.infrastructure.gateway.model_defaults import resolve_model_defaults
 from aistudio_api.infrastructure.gateway.wire_codec import build_tools_from_names
 from aistudio_api.infrastructure.gateway.wire_spec import JspbArray, SchemaIndex
@@ -20,9 +19,6 @@ from aistudio_api.infrastructure.gateway.wire_types import (
     AistudioThinkingConfig,
     ThinkingLevel,
 )
-from aistudio_api.infrastructure.utils.response_diagnostics import (
-    note_thinking_configuration,
-)
 
 
 @dataclass
@@ -32,8 +28,6 @@ class NormalizedGeminiRequest:
     system_instruction: AistudioContent | None
     tools: list[list[object]] | None
     safety_settings: list[list[object]] | None
-    capture_prompt: str
-    capture_images: list[str | tuple[str, str]] | None
     tool_config: list[object] | None = None
     temperature: float | None = None
     top_p: float | None = None
@@ -54,9 +48,6 @@ SCHEMA_TYPE_CODES = {
     "object": 6,
     "null": 7,
 }
-
-
-
 
 
 def _resolve_schema_type_code(schema: dict[str, object]) -> tuple[int, str, bool]:
@@ -239,15 +230,11 @@ def encode_schema_to_wire(
     if include_required and isinstance(required, (list, tuple, set)):
         wire[SchemaIndex.REQUIRED] = [str(x) for x in required]
 
-    min_props = schema.get("minProperties")
-    if min_props is None:
-        min_props = schema.get("min_properties")
+    min_props = schema.get("minProperties", schema.get("min_properties"))
     if isinstance(min_props, int):
         wire[SchemaIndex.MIN_PROPERTIES] = min_props
 
-    max_props = schema.get("maxProperties")
-    if max_props is None:
-        max_props = schema.get("max_properties")
+    max_props = schema.get("maxProperties", schema.get("max_properties"))
     if isinstance(max_props, int):
         wire[SchemaIndex.MAX_PROPERTIES] = max_props
 
@@ -259,15 +246,11 @@ def encode_schema_to_wire(
     if isinstance(maximum, (int, float)) and not isinstance(maximum, bool):
         wire[SchemaIndex.MAXIMUM] = maximum
 
-    min_len = schema.get("minLength")
-    if min_len is None:
-        min_len = schema.get("min_length")
+    min_len = schema.get("minLength", schema.get("min_length"))
     if isinstance(min_len, int):
         wire[SchemaIndex.MIN_LENGTH] = min_len
 
-    max_len = schema.get("maxLength")
-    if max_len is None:
-        max_len = schema.get("max_length")
+    max_len = schema.get("maxLength", schema.get("max_length"))
     if isinstance(max_len, int):
         wire[SchemaIndex.MAX_LENGTH] = max_len
 
@@ -277,15 +260,11 @@ def encode_schema_to_wire(
 
     _encode_schema_combiners(schema, wire, include_required)
 
-    max_items = schema.get("maxItems")
-    if max_items is None:
-        max_items = schema.get("max_items")
+    max_items = schema.get("maxItems", schema.get("max_items"))
     if isinstance(max_items, int):
         wire[SchemaIndex.MAX_ITEMS] = max_items
 
-    min_items = schema.get("minItems")
-    if min_items is None:
-        min_items = schema.get("min_items")
+    min_items = schema.get("minItems", schema.get("min_items"))
     if isinstance(min_items, int):
         wire[SchemaIndex.MIN_ITEMS] = min_items
 
@@ -351,9 +330,32 @@ def _normalize_gemini_modalities(
     return AistudioImageOutputMode.image_only()
 
 
+_REASONING_EFFORT_TO_LEVEL: dict[str, ThinkingLevel] = {
+    "MINIMAL": ThinkingLevel.MINIMAL,
+    "LOW": ThinkingLevel.LOW,
+    "MEDIUM": ThinkingLevel.MEDIUM,
+    "HIGH": ThinkingLevel.HIGH,
+}
+
+
+def _parse_thinking_level(raw_level: object) -> ThinkingLevel | None:
+    if raw_level is None:
+        return None
+    if isinstance(raw_level, ThinkingLevel):
+        return raw_level
+    if isinstance(raw_level, int) and not isinstance(raw_level, bool):
+        return ThinkingLevel(raw_level)
+    label = str(raw_level).strip().upper()
+    if not label or label in ("NONE", "OFF", "DISABLE", "DISABLED", "0"):
+        return None
+    if label in _REASONING_EFFORT_TO_LEVEL:
+        return _REASONING_EFFORT_TO_LEVEL[label]
+    return ThinkingLevel[label]
+
+
 def _normalize_gemini_thinking_config(
     value: object,
-) -> list[object] | dict[str, object] | None:
+) -> list[object] | None:
     if value is None or isinstance(value, list):
         return value
     if not isinstance(value, dict):
@@ -361,35 +363,46 @@ def _normalize_gemini_thinking_config(
             "generationConfig.thinkingConfig must be an object or wire array"
         )
 
-    unsupported = {
-        "thinkingBudget", "thinking_budget", "includeThoughts", "include_thoughts"
-    }.intersection(value)
-    if unsupported:
-        # Only thinking levels have a verified AI Studio wire mapping. Do not
-        # pretend a token budget or summary preference has been applied.
-        raise ValueError(
-            "generationConfig.thinkingConfig does not support "
-            + ", ".join(sorted(unsupported))
-            + "; omit these fields and use thinkingLevel instead"
-        )
-    raw_level = value.get("thinkingLevel", value.get("level", ThinkingLevel.HIGH))
-    raw_mode = value.get("mode", 1)
-    try:
-        if isinstance(raw_level, bool) or isinstance(raw_mode, bool):
-            raise ValueError("Boolean thinking levels and modes are invalid")
-        if isinstance(raw_level, ThinkingLevel):
-            level = raw_level
-        elif isinstance(raw_level, int):
-            level = ThinkingLevel(raw_level)
-        else:
-            level = ThinkingLevel[str(raw_level).strip().upper()]
-        mode = int(raw_mode)
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError(
-            "generationConfig.thinkingConfig requires a valid thinkingLevel "
-            "(MINIMAL, LOW, MEDIUM or HIGH) and integer mode"
-        ) from exc
-    return AistudioThinkingConfig(level=level, mode=mode).to_wire()
+    raw_level = value.get(
+        "thinkingLevel", value.get("thinking_level", value.get("level"))
+    )
+    raw_budget = value.get(
+        "thinkingBudget", value.get("thinking_budget", value.get("budget"))
+    )
+    raw_mode = value.get("mode")
+    raw_include = value.get("includeThoughts", value.get("include_thoughts"))
+
+    if isinstance(raw_level, str) and raw_level.strip().upper() in (
+        "NONE",
+        "OFF",
+        "DISABLE",
+        "DISABLED",
+    ):
+        return None
+    if (
+        raw_include is False
+        and raw_level is None
+        and raw_budget is None
+        and raw_mode is None
+    ):
+        return None
+
+    level = _parse_thinking_level(raw_level)
+    budget: int | None = None
+    if raw_budget is not None and not isinstance(raw_budget, bool):
+        budget = int(str(raw_budget))
+        if budget == 0 and level is None and raw_mode is None:
+            return None
+
+    if level is None and budget is None and raw_mode is None:
+        return None
+
+    mode = (
+        int(str(raw_mode))
+        if raw_mode is not None and not isinstance(raw_mode, bool)
+        else 1
+    )
+    return AistudioThinkingConfig(level=level, mode=mode, budget=budget).to_wire()
 
 
 def _normalize_gemini_image_config(
@@ -587,16 +600,16 @@ def normalize_gemini_request(
     if not req.contents:
         raise ValueError("contents is required")
 
-    model = parse_model_selection(requested_model).base_model
+    model = (
+        requested_model
+        if requested_model.startswith("models/")
+        else f"models/{requested_model}"
+    )
     contents: list[AistudioContent] = []
-    capture_prompt = "你好"
-    capture_images: list[str | tuple[str, str]] = []
 
-    for content_index, content in enumerate(req.contents):
+    for content in req.contents:
         role = content.role or "user"
         parts: list[AistudioPart] = []
-        content_images: list[str | tuple[str, str]] = []
-
         for part in content.parts:
             if part.text is not None:
                 is_thought = bool(part.thought)
@@ -613,11 +626,9 @@ def normalize_gemini_request(
                 parts.append(
                     AistudioPart(
                         inline_data=img_data,
-                        thought=bool(part.thought),
                         thought_signature=part.thoughtSignature,
                     )
                 )
-                content_images.append(img_data)
                 continue
             if part.functionCall is not None:
                 fc = part.functionCall
@@ -627,7 +638,6 @@ def normalize_gemini_request(
                         function_call=(fc.name, args_payload, fc.id)
                         if fc.id
                         else (fc.name, args_payload),
-                        thought=bool(part.thought),
                         thought_signature=part.thoughtSignature,
                     )
                 )
@@ -640,8 +650,6 @@ def normalize_gemini_request(
                         function_response=(fr.name, resp_payload, fr.id)
                         if fr.id
                         else (fr.name, resp_payload),
-                        thought=bool(part.thought),
-                        thought_signature=part.thoughtSignature,
                     )
                 )
                 if fr.parts:
@@ -654,26 +662,17 @@ def normalize_gemini_request(
                             parts.append(
                                 AistudioPart(
                                     inline_data=img_data,
-                                    thought=bool(subpart.thought),
                                     thought_signature=subpart.thoughtSignature,
                                 )
                             )
-                            content_images.append(img_data)
                         elif subpart.text is not None:
-                            parts.append(
-                                AistudioPart(
-                                    text=subpart.text,
-                                    thought=bool(subpart.thought),
-                                    thought_signature=subpart.thoughtSignature,
-                                )
-                            )
+                            parts.append(AistudioPart(text=subpart.text))
                 continue
             if part.executableCode is not None:
                 ec = part.executableCode
                 parts.append(
                     AistudioPart(
                         executable_code=(ec.language, ec.code),
-                        thought=bool(part.thought),
                         thought_signature=part.thoughtSignature,
                     )
                 )
@@ -683,34 +682,13 @@ def normalize_gemini_request(
                 parts.append(
                     AistudioPart(
                         code_execution_result=(cer.outcome, cer.output),
-                        thought=bool(part.thought),
                         thought_signature=part.thoughtSignature,
                     )
                 )
                 continue
             if part.fileData is not None:
                 raise ValueError("fileData is not supported yet")
-            if part.thoughtSignature is not None:
-                # A native signature can occupy its own Part without text.
-                # Keep that position and thought ownership when clients replay
-                # a response rather than silently dropping the signed Part.
-                parts.append(
-                    AistudioPart(
-                        thought=bool(part.thought),
-                        thought_signature=part.thoughtSignature,
-                    )
-                )
-        if not parts:
-            if content_index == len(req.contents) - 1:
-                raise ValueError("Last content must contain at least one supported Part")
-            continue
         contents.append(AistudioContent(role=role, parts=parts))
-
-        # Typed contents carry the actual input. Browser template capture
-        # uses its fixed bootstrap prompt, so don't duplicate long text.
-        if role == "user" and content_images:
-            capture_images = content_images
-
     system_instruction = None
     if req.systemInstruction is not None:
         system_instruction = AistudioContent(
@@ -718,24 +696,17 @@ def normalize_gemini_request(
             parts=[
                 AistudioPart(
                     text=part.text,
-                    thought=bool(part.thought),
                     thought_signature=part.thoughtSignature,
                 )
                 if part.text is not None
                 else AistudioPart(
-                    inline_data=(part.inlineData.mimeType, part.inlineData.data),
-                    thought=bool(part.thought),
-                    thought_signature=part.thoughtSignature,
-                )
-                if part.inlineData is not None
-                else AistudioPart(
-                    thought=bool(part.thought),
+                    inline_data=(part.inlineData.mimeType, part.inlineData.data)
+                    if part.inlineData
+                    else ("", ""),
                     thought_signature=part.thoughtSignature,
                 )
                 for part in req.systemInstruction.parts
-                if part.text is not None
-                or part.inlineData is not None
-                or part.thoughtSignature is not None
+                if part.text is not None or part.inlineData is not None
             ],
         )
 
@@ -817,9 +788,10 @@ def normalize_gemini_request(
         isinstance(tool_config, list)
         and len(tool_config) > 1
         and isinstance(tool_config[1], list)
+        and tool_config[1]
+        and tool_config[1][0] == 3
     ):
-        if tool_config[1] and tool_config[1][0] == 3:
-            is_mode_none = True
+        is_mode_none = True
 
     if is_mode_none:
         tools = None
@@ -871,14 +843,20 @@ def normalize_gemini_request(
             )
         if generation_config.logprobs is not None:
             generation_config_overrides["logprobs"] = generation_config.logprobs
+        if generation_config.seed is not None:
+            generation_config_overrides["seed"] = generation_config.seed
         if generation_config.mediaResolution is not None:
             generation_config_overrides["media_resolution"] = (
                 generation_config.mediaResolution
             )
         if generation_config.thinkingConfig is not None:
-            generation_config_overrides["thinking_config"] = (
-                _normalize_gemini_thinking_config(generation_config.thinkingConfig)
+            normalized_thinking = _normalize_gemini_thinking_config(
+                generation_config.thinkingConfig
             )
+            if normalized_thinking is not None:
+                generation_config_overrides["thinking_config"] = normalized_thinking
+            elif "thinking_config" in generation_config_overrides:
+                generation_config_overrides["thinking_config"] = None
         if generation_config.responseModalities is not None:
             image_output_mode = _normalize_gemini_modalities(
                 generation_config.responseModalities,
@@ -893,10 +871,26 @@ def normalize_gemini_request(
                     drop_unsupported=model_defaults.drop_unsupported_params,
                 )
             )
-    note_thinking_configuration(
-        explicit=generation_config is not None and generation_config.thinkingConfig is not None,
-        thinking_config=(generation_config_overrides or {}).get("thinking_config"),
-    )
+
+    effective_effort = (
+        generation_config.reasoningEffort if generation_config else None
+    ) or req.reasoningEffort
+    if effective_effort is not None and (
+        generation_config is None or generation_config.thinkingConfig is None
+    ):
+        level = _parse_thinking_level(effective_effort)
+        if level is not None:
+            if generation_config_overrides is None:
+                generation_config_overrides = {}
+            generation_config_overrides["thinking_config"] = AistudioThinkingConfig(
+                level=level, mode=1
+            ).to_wire()
+        elif (
+            generation_config_overrides is not None
+            and "thinking_config" in generation_config_overrides
+        ):
+            generation_config_overrides["thinking_config"] = None
+
     return NormalizedGeminiRequest(
         model=model,
         contents=contents,
@@ -909,8 +903,6 @@ def normalize_gemini_request(
         )
         if req.safetySettings is not None
         else None,
-        capture_prompt=capture_prompt,
-        capture_images=capture_images or None,
         temperature=generation_config.temperature if generation_config else None,
         top_p=generation_config.topP if generation_config else None,
         top_k=generation_config.topK if generation_config else None,

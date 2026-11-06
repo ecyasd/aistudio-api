@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import math
 import os
-from collections import OrderedDict
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 import yaml
 
-from aistudio_api.config import get_config_file_path, resolve_config_file
-from aistudio_api.infrastructure.utils.config_store import api_key_items, mutate_config
+from aistudio_api.config import resolve_config_file
+from aistudio_api.infrastructure.utils.common import atomic_write_text
 
 from .wire_types import (
     AistudioImageOutputMode,
@@ -128,8 +127,12 @@ class ModelProfile:
         )
 
 
-def _normalize_model_name(model: str) -> str:
-    return model.removeprefix("models/").lower()
+def normalize_model_name(model: str) -> str:
+    """Normalize model string (strip, lowercase, remove 'models/' prefix)."""
+    return model.strip().removeprefix("models/").lower()
+
+
+_normalize_model_name = normalize_model_name
 
 
 def _coerce_thinking_level(value: object) -> ThinkingLevel:
@@ -173,16 +176,39 @@ def _coerce_generation_defaults(raw: dict[str, object] | None) -> dict[str, obje
     raw = raw or {}
     coerced: dict[str, object] = {}
     for key, value in raw.items():
-        if value is None:
-            coerced[key] = None
-        elif key == "thinking_config" and isinstance(value, dict):
-            level = _coerce_thinking_level(value.get("level", ThinkingLevel.HIGH))
-            mode = int(value.get("mode", 1))
-            coerced[key] = AistudioThinkingConfig(level=level, mode=mode).to_wire()
+        if key == "thinking_config" and isinstance(value, dict):
+            raw_level = value.get(
+                "level", value.get("thinkingLevel", value.get("thinking_level"))
+            )
+            raw_budget = value.get(
+                "budget", value.get("thinkingBudget", value.get("thinking_budget"))
+            )
+            raw_mode = value.get("mode")
+            level = _coerce_thinking_level(raw_level) if raw_level is not None else None
+            budget = (
+                int(str(raw_budget))
+                if raw_budget is not None and not isinstance(raw_budget, bool)
+                else None
+            )
+            if level is not None or budget is not None or raw_mode is not None:
+                mode = (
+                    int(str(raw_mode))
+                    if raw_mode is not None and not isinstance(raw_mode, bool)
+                    else 1
+                )
+                coerced[key] = AistudioThinkingConfig(
+                    level=level, mode=mode, budget=budget
+                ).to_wire()
+            else:
+                coerced[key] = None
         elif key == "image_output_mode":
-            coerced[key] = _coerce_image_output_mode(value)
+            coerced[key] = (
+                _coerce_image_output_mode(value) if value is not None else None
+            )
         elif key == "media_resolution":
-            coerced[key] = _coerce_media_resolution(value)
+            coerced[key] = (
+                _coerce_media_resolution(value) if value is not None else None
+            )
         else:
             coerced[key] = value
     return coerced
@@ -274,6 +300,31 @@ def _profile_from_mapping(raw: dict[str, object]) -> ModelProfile:
 
 def _default_config() -> dict[str, object]:
     return {
+        "waa": {
+            "active_server": "local_spidermonkey",
+            "servers": [
+                {
+                    "id": "local_spidermonkey",
+                    "name": "本地原生引擎 (SpiderMonkey 152)",
+                    "description": "本地独立纯静态 Go 服务，毫秒级快速生成官方原生高精度快照 Proof",
+                    "url": "http://127.0.0.1:8081",
+                    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0",
+                    "headers": {
+                        "X-User-Agent": "grpc-web-javascript/0.1",
+                    },
+                },
+                {
+                    "id": "remote_spinsnow",
+                    "name": "远程公共服务 (spinsnow / NodeVM)",
+                    "description": "远程 Node.js VM 沙箱证明签名服务，绑定 Chromium 模拟特征环境",
+                    "url": "https://waa.spinsnow.fun",
+                    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+                    "headers": {
+                        "X-User-Agent": "grpc-web-javascript/0.1",
+                    },
+                },
+            ],
+        },
         "logging": {
             "level": "INFO",
             "dump_requests": False,
@@ -283,20 +334,18 @@ def _default_config() -> dict[str, object]:
             "profiles": [
                 {
                     "name": "image_models",
-                    "match": {"contains": ["image"]},
+                    "match": {"contains": ["image", "imagen"]},
                     "is_image_model": True,
-                    "generation_config_defaults": {
-                        "response_mime_type": None,
-                        "image_output_mode": "image_only",
-                        "thinking_config": {"level": "MINIMAL", "mode": 1},
-                    },
-                    "clear_generation_config_indexes": [7, 13, 17],
+                    "disable_safety_settings": True,
+                },
+                {
+                    "name": "video_models",
+                    "match": {"prefixes": ["veo-"], "contains": ["veo"]},
                     "disable_safety_settings": True,
                 },
                 {
                     "name": "gemma_models",
                     "match": {"prefixes": ["gemma-"]},
-                    "default_tools": ["google_search"],
                     "safety_settings": {
                         "Harassment": 5,
                         "Hate": 5,
@@ -313,106 +362,148 @@ def _default_config() -> dict[str, object]:
                         "Sexually Explicit": 5,
                         "Dangerous Content": 5,
                     },
+                    "drop_unsupported_params": True,
                 },
             ],
             "models": {},
         },
+        "rotator": {
+            "max_retries": 5,
+            "strategy": "sticky",
+            "stickiness_bonus": 400.0,
+            "stickiness_threshold": 0.8,
+            "drip_penalty": 500.0,
+            "tier_weights": {
+                "Free": 0.0,
+                "Plus": 0.5,
+                "Pro": 1.0,
+                "Ultra": 2.0,
+                "Ultra_20X": 3.0,
+            },
+            "cooldowns": {
+                "rate_limited_short": 60,
+                "rate_limited_drip": 300,
+                "rate_limited_drip_extended": 600,
+            },
+        },
+        "paid_model_rules": {
+            "ultra_required": {
+                "contains": ["veo", "ultra"],
+                "required_tiers": ["Ultra", "Ultra_20X"],
+            },
+            "pro_required": {
+                "contains": ["argon", "gemini-4", "image", "imagen"],
+                "required_tiers": ["Pro", "Ultra", "Ultra_20X"],
+            },
+        },
+        "tier_quotas": {
+            "Free": {
+                "flash_models": {"match": {"contains": ["flash"]}, "daily_limit": 100},
+                "pro_models": {"match": {"contains": ["pro"]}, "daily_limit": 10},
+                "default_limit": 20,
+            },
+            "Plus": {
+                "flash_models": {"match": {"contains": ["flash"]}, "daily_limit": 300},
+                "pro_models": {"match": {"contains": ["pro"]}, "daily_limit": 30},
+                "default_limit": 50,
+            },
+            "Pro": {
+                "argon_models": {
+                    "match": {"contains": ["argon", "gemini-4"]},
+                    "daily_limit": 50,
+                },
+                "flash_models": {"match": {"contains": ["flash"]}, "daily_limit": 150},
+                "pro_models": {"match": {"contains": ["pro"]}, "daily_limit": 50},
+                "image_models": {
+                    "match": {"contains": ["image", "imagen"]},
+                    "daily_limit": 50,
+                },
+                "default_limit": 50,
+            },
+            "Ultra": {
+                "argon_models": {
+                    "match": {"contains": ["argon", "gemini-4"]},
+                    "daily_limit": 250,
+                },
+                "flash_models": {"match": {"contains": ["flash"]}, "daily_limit": 1500},
+                "pro_models": {"match": {"contains": ["pro"]}, "daily_limit": 250},
+                "image_models": {
+                    "match": {"contains": ["image", "imagen"]},
+                    "daily_limit": 250,
+                },
+                "video_models": {"match": {"contains": ["veo"]}, "daily_limit": 50},
+                "default_limit": 250,
+            },
+            "Ultra_20X": {
+                "argon_models": {
+                    "match": {"contains": ["argon", "gemini-4"]},
+                    "daily_limit": 1000,
+                },
+                "flash_models": {"match": {"contains": ["flash"]}, "daily_limit": 5000},
+                "pro_models": {"match": {"contains": ["pro"]}, "daily_limit": 1000},
+                "image_models": {
+                    "match": {"contains": ["image", "imagen"]},
+                    "daily_limit": 1000,
+                },
+                "video_models": {"match": {"contains": ["veo"]}, "daily_limit": 200},
+                "default_limit": 1000,
+            },
+            "overrides": {},
+        },
+        "account_presets": [
+            {
+                "id": "preset_all",
+                "name": "全部启用 (最大并发)",
+                "description": "激活所有可用账号，提供最充沛的并发与负载池",
+                "action": "enable_all",
+                "is_system": True,
+            },
+            {
+                "id": "preset_paid_only",
+                "name": "纯高阶付费池 (Plus/Pro/Ultra)",
+                "description": "仅激活具有付费权益的账号，全力保障高阶模型调用",
+                "action": "filter_tier",
+                "target_tiers": ["Plus", "Pro", "Ultra", "Ultra_20X"],
+                "is_system": True,
+            },
+            {
+                "id": "preset_ultra_only",
+                "name": "旗舰专属池 (Ultra 独占)",
+                "description": "仅激活 Ultra 顶级算力账号，保障最顶尖模型调用",
+                "action": "filter_tier",
+                "target_tiers": ["Ultra", "Ultra_20X"],
+                "is_system": True,
+            },
+            {
+                "id": "preset_free_only",
+                "name": "纯免费节能池 (Free)",
+                "description": "仅激活 Free 等级账号，用于日常普通模型测试",
+                "action": "filter_tier",
+                "target_tiers": ["Free"],
+                "is_system": True,
+            },
+            {
+                "id": "preset_production",
+                "name": "生产专属集群 (Production)",
+                "description": "仅激活 group 标记为 production 的核心业务账号",
+                "action": "filter_group",
+                "target_groups": ["production"],
+                "is_system": True,
+            },
+        ],
     }
 
 
-def validate_model_config(config: dict[str, object]) -> None:
-    """Validate known model fields before saving; retain extension fields.
-
-    Reuse the runtime compiler for enums and supported legacy wire forms so a
-    profile that does not match the current model cannot poison every request.
-    """
-    defaults = config.get("model_defaults")
-    if defaults is None:
-        return
-    if not isinstance(defaults, dict):
-        raise ValueError("model_defaults must be a mapping")
-
-    def validate_rule(rule: object) -> None:
-        if not isinstance(rule, dict):
-            raise ValueError("model rule must be a mapping")
-        for key in ("default_tools", "clear_generation_config_indexes"):
-            if rule.get(key) is not None and not isinstance(rule[key], (list, tuple)):
-                raise ValueError("model rule list field must be a list")
-        match = rule.get("match")
-        if match is not None:
-            if not isinstance(match, dict):
-                raise ValueError("match must be a mapping")
-            for key in ("exact", "prefixes", "contains"):
-                if match.get(key) is not None and not isinstance(match[key], (list, tuple)):
-                    raise ValueError("match rule must be a list")
-        generation = rule.get("generation_config_defaults")
-        if generation is not None:
-            if not isinstance(generation, dict):
-                raise ValueError("generation defaults must be a mapping")
-            for key in ("temperature", "top_p", "top_k", "max_tokens", "max_output_tokens"):
-                value = generation.get(key)
-                if value is not None and (
-                    type(value) not in (int, float) or not math.isfinite(value)
-                    or (key in ("top_k", "max_tokens", "max_output_tokens") and type(value) is not int)
-                ):
-                    raise ValueError("generation numeric field is invalid")
-            thinking = generation.get("thinking_config")
-            if thinking is not None and not isinstance(thinking, (dict, list)):
-                raise ValueError("thinking config must be a mapping or wire list")
-            if isinstance(thinking, list):
-                if len(thinking) < 4 or type(thinking[0]) is not int:
-                    raise ValueError("thinking config wire list is invalid")
-                _coerce_thinking_level(thinking[3])
-        compiled = _defaults_from_mapping(rule)
-        if any(index < 0 for index in compiled.clear_generation_config_indexes):
-            raise ValueError("generation config indexes must be nonnegative")
-
-    profiles = defaults.get("profiles")
-    if profiles is not None:
-        if not isinstance(profiles, list):
-            raise ValueError("profiles must be a list")
-        for profile in profiles:
-            validate_rule(profile)
-    models = defaults.get("models")
-    if models is not None:
-        if not isinstance(models, dict):
-            raise ValueError("models must be a mapping")
-        for rule in models.values():
-            # Null overrides have always meant an empty rule.
-            if rule is not None:
-                validate_rule(rule)
-
-
-ConfigStamp = tuple[int, int, int, int] | None
-_CONFIG_CACHE: dict[str, tuple[ConfigStamp, dict[str, object]]] = {}
-_API_KEYS_CACHE: dict[str, tuple[ConfigStamp, frozenset[str], list[dict[str, str]]]] = {}
-_COMPILED_RULES_CACHE: OrderedDict[
-    str, tuple[dict[str, object], tuple[ModelProfile, ...], dict[str, ModelDefaults]]
-] = OrderedDict()
-
-
-def _config_stamp(path: Path) -> ConfigStamp:
-    try:
-        info = path.stat()
-        return info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
-    except OSError:
-        return None
+_CONFIG_CACHE: dict[str, tuple[float, dict[str, object]]] = {}
+_API_KEYS_CACHE: dict[str, tuple[float, frozenset[str], list[dict[str, str]]]] = {}
 
 
 def invalidate_config_cache() -> None:
     """Clear in-memory configuration and API keys cache."""
     _CONFIG_CACHE.clear()
     _API_KEYS_CACHE.clear()
-    _COMPILED_RULES_CACHE.clear()
-
-
-def _read_yaml_config(config_path: Path) -> dict[str, object]:
-    """Pure file read for both runtime snapshots and uncached previews."""
-    try:
-        loaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    except FileNotFoundError:
-        return _default_config()
-    return _with_builtin_defaults(loaded if isinstance(loaded, dict) else {})
+    _compiled_profiles.cache_clear()
+    _compiled_model_overrides.cache_clear()
 
 
 def _load_yaml_config(config_path: Path) -> dict[str, object]:
@@ -420,86 +511,65 @@ def _load_yaml_config(config_path: Path) -> dict[str, object]:
         return _default_config()
 
     path_key = str(config_path.resolve())
-    mtime = _config_stamp(config_path)
+    try:
+        mtime = config_path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
 
     cached = _CONFIG_CACHE.get(path_key)
     if cached is not None and cached[0] == mtime:
         return cached[1]
 
-    merged = _read_yaml_config(config_path)
+    loaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(loaded, dict):
+        loaded = {}
+    merged: dict[str, object] = _default_config()
+    merged.update(loaded)
+    raw_merged_defaults = merged.get("model_defaults")
+    raw_loaded_defaults = loaded.get("model_defaults")
+    if isinstance(raw_merged_defaults, dict) and isinstance(raw_loaded_defaults, dict):
+        def_config = _default_config()
+        def_md = def_config.get("model_defaults")
+        merged_model_defaults = dict(def_md if isinstance(def_md, dict) else {})
+        merged_model_defaults.update(raw_loaded_defaults)
+        merged["model_defaults"] = merged_model_defaults
     _CONFIG_CACHE[path_key] = (mtime, merged)
     return merged
 
 
-def _with_builtin_defaults(loaded: dict[str, object]) -> dict[str, object]:
-    merged = _default_config()
-    raw_defaults = merged["model_defaults"]
-    raw_loaded = loaded.get("model_defaults")
-    merged.update(loaded)
-    if isinstance(raw_defaults, dict) and isinstance(raw_loaded, dict):
-        merged["model_defaults"] = {**raw_defaults, **raw_loaded}
-    return merged
-
-
-def _profiles(config: dict[str, object]) -> tuple[ModelProfile, ...]:
+@lru_cache(maxsize=8)
+def _compiled_profiles(config_path: str) -> tuple[ModelProfile, ...]:
+    config = _load_yaml_config(Path(config_path))
     raw_md = config.get("model_defaults")
-    raw_profiles = raw_md.get("profiles") if isinstance(raw_md, dict) else None
+    model_defaults = raw_md if isinstance(raw_md, dict) else {}
+    raw_profiles = model_defaults.get("profiles")
+    profiles_list = raw_profiles if isinstance(raw_profiles, list) else []
     return tuple(
-        _profile_from_mapping(item) for item in (raw_profiles or []) if isinstance(item, dict)
-    ) if isinstance(raw_profiles, list) else ()
+        _profile_from_mapping(item) for item in profiles_list if isinstance(item, dict)
+    )
 
 
-def _overrides(config: dict[str, object]) -> dict[str, ModelDefaults]:
+@lru_cache(maxsize=8)
+def _compiled_model_overrides(config_path: str) -> dict[str, ModelDefaults]:
+    config = _load_yaml_config(Path(config_path))
     raw_md = config.get("model_defaults")
-    raw_models = raw_md.get("models") if isinstance(raw_md, dict) else None
-    return {
-        _normalize_model_name(str(name)): _defaults_from_mapping(
-            rule if isinstance(rule, dict) else {}
-        ) for name, rule in raw_models.items()
-    } if isinstance(raw_models, dict) else {}
-
-
-def _compiled_rules(
-    config_path: str, config: dict[str, object],
-) -> tuple[tuple[ModelProfile, ...], dict[str, ModelDefaults]]:
-    cached = _COMPILED_RULES_CACHE.get(config_path)
-    if cached is not None and cached[0] is config:
-        _COMPILED_RULES_CACHE.move_to_end(config_path)
-        return cached[1], cached[2]
-    # Compile both collections from the exact document already read by the
-    # caller. A file replacement between these steps cannot mix generations.
-    profiles, overrides = _profiles(config), _overrides(config)
-    _COMPILED_RULES_CACHE[config_path] = config, profiles, overrides
-    _COMPILED_RULES_CACHE.move_to_end(config_path)
-    if len(_COMPILED_RULES_CACHE) > 8:
-        _COMPILED_RULES_CACHE.popitem(last=False)
-    return profiles, overrides
+    model_defaults = raw_md if isinstance(raw_md, dict) else {}
+    raw_models = model_defaults.get("models")
+    models_dict = raw_models if isinstance(raw_models, dict) else {}
+    overrides: dict[str, ModelDefaults] = {}
+    for model_name, raw_defaults in models_dict.items():
+        overrides[_normalize_model_name(str(model_name))] = _defaults_from_mapping(
+            raw_defaults if isinstance(raw_defaults, dict) else {}
+        )
+    return overrides
 
 
 def resolve_model_defaults(
     model: str, *, config_path: str | os.PathLike[str] | None = None
 ) -> ModelDefaults:
+    normalized = _normalize_model_name(model)
     resolved_path = str(_resolve_config_path(config_path))
     config = _load_yaml_config(Path(resolved_path))
-    profiles, overrides = _compiled_rules(resolved_path, config)
-    return _resolve_rules(model, config, profiles, overrides)[0]
-
-
-def preview_model_defaults(
-    model: str, *, config: dict[str, object] | None = None,
-) -> tuple[ModelDefaults, list[dict[str, object]]]:
-    """Resolve a draft without writing files or changing the runtime cache."""
-    document = (_read_yaml_config(get_config_file_path()) if config is None
-                else _with_builtin_defaults(config))
-    validate_model_config(document)
-    return _resolve_rules(model, document, _profiles(document), _overrides(document))
-
-
-def _resolve_rules(
-    model: str, config: dict[str, object], profiles: tuple[ModelProfile, ...],
-    overrides: dict[str, ModelDefaults],
-) -> tuple[ModelDefaults, list[dict[str, object]]]:
-    normalized = _normalize_model_name(model)
     raw_md = config.get("model_defaults")
     global_drop = False
     if isinstance(raw_md, dict) and "drop_unsupported_params" in raw_md:
@@ -507,16 +577,14 @@ def _resolve_rules(
     elif "drop_unsupported_params" in config:
         global_drop = bool(config["drop_unsupported_params"])
 
-    matched: list[dict[str, object]] = []
+    profiles = _compiled_profiles(resolved_path)
     resolved = ModelDefaults(drop_unsupported_params=global_drop)
-    for index, profile in enumerate(profiles):
+    for profile in profiles:
         if profile.matches(normalized):
             resolved = resolved.merged(profile.defaults)
-            matched.append({"kind": "profile", "name": profile.name, "index": index})
-    override = overrides.get(normalized)
+    override = _compiled_model_overrides(resolved_path).get(normalized)
     if override is not None:
         resolved = resolved.overridden(override)
-        matched.append({"kind": "model", "name": normalized})
 
     if resolved.is_image_model:
         allowed = {"google_search", "image_search", "google_search_and_image_search"}
@@ -526,7 +594,7 @@ def _resolve_rules(
 
             resolved = replace(resolved, default_tools=filtered)
 
-    return resolved, matched
+    return resolved
 
 
 def get_configured_api_key_items(
@@ -535,14 +603,36 @@ def get_configured_api_key_items(
     """获取 config.yaml 中配置的结构化 API Key 列表（含备注名与创建时间）。"""
     resolved_path = _resolve_config_path(config_path)
     path_key = str(resolved_path.resolve())
-    mtime = _config_stamp(resolved_path)
+    try:
+        mtime = resolved_path.stat().st_mtime if resolved_path.exists() else 0.0
+    except OSError:
+        mtime = 0.0
 
     cached = _API_KEYS_CACHE.get(path_key)
     if cached is not None and cached[0] == mtime:
         return list(cached[2])
 
     config = _load_yaml_config(resolved_path)
-    items = api_key_items(config.get("api_keys"))
+    raw_keys = config.get("api_keys")
+    items: list[dict[str, str]] = []
+    if isinstance(raw_keys, list):
+        for k in raw_keys:
+            if isinstance(k, dict):
+                key_val = str(k.get("key") or "").strip()
+                name_val = str(k.get("name") or "API Key").strip()
+                created_val = str(k.get("created_at") or "").strip()
+                if key_val:
+                    items.append(
+                        {"key": key_val, "name": name_val, "created_at": created_val}
+                    )
+            elif isinstance(k, str) and k.strip():
+                items.append({"key": k.strip(), "name": "API Key", "created_at": ""})
+    elif isinstance(raw_keys, str):
+        for line in raw_keys.splitlines():
+            for part in line.split(","):
+                s = part.strip()
+                if s:
+                    items.append({"key": s, "name": "API Key", "created_at": ""})
 
     keys_set = frozenset(item["key"] for item in items if item.get("key"))
     _API_KEYS_CACHE[path_key] = (mtime, keys_set, items)
@@ -555,7 +645,10 @@ def get_configured_api_keys(
     """获取 config.yaml 中配置的所有有效 API Key 集合。"""
     resolved_path = _resolve_config_path(config_path)
     path_key = str(resolved_path.resolve())
-    mtime = _config_stamp(resolved_path)
+    try:
+        mtime = resolved_path.stat().st_mtime if resolved_path.exists() else 0.0
+    except OSError:
+        mtime = 0.0
 
     cached = _API_KEYS_CACHE.get(path_key)
     if cached is not None and cached[0] == mtime:
@@ -575,8 +668,8 @@ def get_configured_logging_settings(
     if isinstance(raw_logging, dict):
         return {
             "level": str(raw_logging.get("level") or "INFO").strip().upper(),
-            "dump_requests": raw_logging.get("dump_requests") is True,
-            "dump_to_file": raw_logging.get("dump_to_file") is True,
+            "dump_requests": bool(raw_logging.get("dump_requests", False)),
+            "dump_to_file": bool(raw_logging.get("dump_to_file", False)),
             "dump_dir": str(raw_logging.get("dump_dir") or "").strip(),
         }
     return {
@@ -589,28 +682,319 @@ def get_configured_logging_settings(
 
 def update_configured_logging_settings(
     level: str | None = None,
-    dump_requests: bool | None = None,
-    dump_to_file: bool | None = None,
-    dump_dir: str | None = None,
     config_path: str | os.PathLike[str] | None = None,
 ) -> dict[str, object]:
     """更新 config.yaml 中的 logging 设置并刷新缓存。"""
     resolved_path = _resolve_config_path(config_path)
-    def update_logging(parsed: dict[str, object]) -> dict[str, object]:
-        raw_logging = parsed.get("logging")
-        logging_dict = dict(raw_logging) if isinstance(raw_logging, dict) else {}
-        if level is not None:
-            logging_dict["level"] = level.strip().upper()
-        if dump_requests is not None:
-            logging_dict["dump_requests"] = dump_requests
-        if dump_to_file is not None:
-            logging_dict["dump_to_file"] = dump_to_file
-        if dump_dir is not None:
-            logging_dict["dump_dir"] = dump_dir
-        parsed["logging"] = logging_dict
-        return parsed
+    content = (
+        resolved_path.read_text(encoding="utf-8") if resolved_path.exists() else ""
+    )
+    parsed = yaml.safe_load(content) or {}
+    if not isinstance(parsed, dict):
+        parsed = {}
 
-    stored = mutate_config(resolved_path, update_logging)
+    raw_logging = parsed.get("logging")
+    logging_dict = dict(raw_logging) if isinstance(raw_logging, dict) else {}
+    if level is not None:
+        logging_dict["level"] = level.strip().upper()
+    parsed["logging"] = logging_dict
+    atomic_write_text(
+        resolved_path,
+        yaml.dump(parsed, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
     invalidate_config_cache()
-    raw_logging = stored["logging"]
-    return dict(raw_logging) if isinstance(raw_logging, dict) else {}
+    return logging_dict
+
+
+# ─── 订阅层级每日软额度 (Tier Quotas) 与预设方案 (Presets) ───
+def get_configured_tier_quotas(
+    config_path: str | os.PathLike[str] | None = None,
+) -> dict[str, object]:
+    """获取 config.yaml 中配置的订阅层级软额度规则，若缺失则安全回退至系统默认配置。"""
+    resolved_path = _resolve_config_path(config_path)
+    config = _load_yaml_config(resolved_path)
+    raw_quotas = config.get("tier_quotas")
+    if isinstance(raw_quotas, dict):
+        return raw_quotas
+    def_quotas = _default_config().get("tier_quotas")
+    if isinstance(def_quotas, dict):
+        return def_quotas
+    return {}
+
+
+def resolve_tier_quota(
+    tier: str | None,
+    model: str | None,
+    config_path: str | os.PathLike[str] | None = None,
+) -> int:
+    """计算指定账号层级在目标模型上的每日软额度限制（仅用于轮询打分权重，超额绝不禁用账号）。"""
+    normalized_model = _normalize_model_name(model) if model else ""
+    quotas = get_configured_tier_quotas(config_path)
+
+    # 1. 精确模型覆盖 overrides (优先级最高)
+    raw_overrides = quotas.get("overrides")
+    if isinstance(raw_overrides, dict):
+        for m_key, val in raw_overrides.items():
+            if _normalize_model_name(str(m_key)) == normalized_model:
+                try:
+                    return int(str(val))
+                except (ValueError, TypeError):
+                    pass
+
+    # 2. 匹配对应层级规则
+    clean_tier = (tier or "Free").strip()
+    if clean_tier not in quotas:
+        matched_key = None
+        for k in quotas:
+            if k.lower() == clean_tier.lower():
+                matched_key = k
+                break
+        if matched_key:
+            clean_tier = matched_key
+        elif "Free" in quotas:
+            clean_tier = "Free"
+        else:
+            clean_tier = next(iter(quotas), "Free")
+
+    tier_rules = quotas.get(clean_tier)
+    if not isinstance(tier_rules, dict):
+        return 20
+
+    default_limit = int(str(tier_rules.get("default_limit", 20)))
+    if not normalized_model:
+        return default_limit
+
+    for rule_key, rule_data in tier_rules.items():
+        if rule_key == "default_limit" or not isinstance(rule_data, dict):
+            continue
+        raw_match = rule_data.get("match")
+        if isinstance(raw_match, dict):
+            contains = [
+                str(c).lower()
+                for c in (raw_match.get("contains") or [])
+                if isinstance(c, str)
+            ]
+            prefixes = [
+                str(p).lower()
+                for p in (raw_match.get("prefixes") or [])
+                if isinstance(p, str)
+            ]
+            exact = [
+                _normalize_model_name(str(e))
+                for e in (raw_match.get("exact") or [])
+                if isinstance(e, str)
+            ]
+            if (
+                (exact and normalized_model in exact)
+                or any(normalized_model.startswith(p) for p in prefixes)
+                or any(c in normalized_model for c in contains)
+            ):
+                return int(str(rule_data.get("daily_limit", default_limit)))
+
+    return default_limit
+
+
+def get_configured_presets(
+    config_path: str | os.PathLike[str] | None = None,
+) -> list[dict[str, object]]:
+    """获取 config.yaml 中配置的预设方案列表。"""
+    resolved_path = _resolve_config_path(config_path)
+    config = _load_yaml_config(resolved_path)
+    raw_presets = config.get("account_presets")
+    if isinstance(raw_presets, list):
+        return [p for p in raw_presets if isinstance(p, dict)]
+    def_presets = _default_config().get("account_presets")
+    if isinstance(def_presets, list):
+        return [p for p in def_presets if isinstance(p, dict)]
+    return []
+
+
+def get_configured_rotator_settings(
+    config_path: str | os.PathLike[str] | None = None,
+) -> dict[str, object]:
+    """获取 config.yaml 中配置的 rotator 调度策略、打分权重与冷却时间，若缺失安全回退至系统默认配置。"""
+    resolved_path = _resolve_config_path(config_path)
+    config = _load_yaml_config(resolved_path)
+    raw_rotator = config.get("rotator")
+    if isinstance(raw_rotator, dict):
+        return raw_rotator
+    def_rotator = _default_config().get("rotator")
+    if isinstance(def_rotator, dict):
+        return def_rotator
+    return {}
+
+
+def get_configured_paid_model_rules(
+    config_path: str | os.PathLike[str] | None = None,
+) -> dict[str, object]:
+    """获取 config.yaml 中配置的 paid_model_rules 付费模型判定与准入规则，若缺失安全回退至系统默认配置。"""
+    resolved_path = _resolve_config_path(config_path)
+    config = _load_yaml_config(resolved_path)
+    raw_rules = config.get("paid_model_rules")
+    if isinstance(raw_rules, dict):
+        return raw_rules
+    def_rules = _default_config().get("paid_model_rules")
+    if isinstance(def_rules, dict):
+        return def_rules
+    return {}
+
+
+# ─── WAA 签名服务多节点管理与特征绑定 (纯手动切换，不轮询) ───
+
+
+def get_configured_waa_settings(
+    config_path: str | os.PathLike[str] | None = None,
+) -> dict[str, object]:
+    """获取 config.yaml 中配置的 WAA 签名服务与特征设置。"""
+    resolved_path = _resolve_config_path(config_path)
+    config = _load_yaml_config(resolved_path)
+    raw_waa = config.get("waa")
+    if isinstance(raw_waa, dict):
+        return raw_waa
+    def_waa = _default_config().get("waa")
+    if isinstance(def_waa, dict):
+        return def_waa
+    return {}
+
+
+def get_active_waa_server(
+    config_path: str | os.PathLike[str] | None = None,
+) -> dict[str, object]:
+    """获取当前激活的 WAA 签名服务器配置及其绑定的特征信息。"""
+    waa = get_configured_waa_settings(config_path)
+    active_id = str(waa.get("active_server") or "local_spidermonkey").strip()
+    raw_servers = waa.get("servers")
+    servers = raw_servers if isinstance(raw_servers, list) else []
+
+    for item in servers:
+        if isinstance(item, dict) and str(item.get("id") or "").strip() == active_id:
+            return dict(item)
+
+    if servers and isinstance(servers[0], dict):
+        return dict(servers[0])
+
+    return {
+        "id": "local_spidermonkey",
+        "name": "本地原生引擎 (SpiderMonkey 152)",
+        "url": "http://127.0.0.1:8081",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0",
+        "headers": {"X-User-Agent": "grpc-web-javascript/0.1"},
+    }
+
+
+def switch_active_waa_server(
+    server_id: str,
+    config_path: str | os.PathLike[str] | None = None,
+) -> dict[str, object]:
+    """纯手动切换当前激活的 WAA 签名服务器，并持久化保存到 config.yaml。"""
+    resolved_path = _resolve_config_path(config_path)
+    content = (
+        resolved_path.read_text(encoding="utf-8") if resolved_path.exists() else ""
+    )
+    parsed = yaml.safe_load(content) or {}
+    if not isinstance(parsed, dict):
+        parsed = {}
+
+    raw_waa = parsed.get("waa")
+    waa_dict = dict(raw_waa) if isinstance(raw_waa, dict) else {}
+    target_id = server_id.strip()
+    waa_dict["active_server"] = target_id
+    parsed["waa"] = waa_dict
+
+    atomic_write_text(
+        resolved_path,
+        yaml.dump(parsed, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    invalidate_config_cache()
+    return get_active_waa_server(config_path)
+
+
+def upsert_waa_server(
+    server_data: dict[str, object],
+    config_path: str | os.PathLike[str] | None = None,
+) -> dict[str, object]:
+    """新增或更新指定 WAA 签名服务器配置。"""
+    import uuid
+
+    resolved_path = _resolve_config_path(config_path)
+    content = (
+        resolved_path.read_text(encoding="utf-8") if resolved_path.exists() else ""
+    )
+    parsed = yaml.safe_load(content) or {}
+    if not isinstance(parsed, dict):
+        parsed = {}
+
+    raw_waa = parsed.get("waa")
+    waa_dict = dict(raw_waa) if isinstance(raw_waa, dict) else {}
+    raw_servers = waa_dict.get("servers")
+    servers = list(raw_servers) if isinstance(raw_servers, list) else []
+
+    target_id = str(server_data.get("id") or "").strip()
+    if not target_id:
+        target_id = f"server_{uuid.uuid4().hex[:8]}"
+        server_data["id"] = target_id
+
+    updated = False
+    for idx, s in enumerate(servers):
+        if isinstance(s, dict) and str(s.get("id") or "").strip() == target_id:
+            servers[idx] = server_data
+            updated = True
+            break
+    if not updated:
+        servers.append(server_data)
+
+    waa_dict["servers"] = servers
+    parsed["waa"] = waa_dict
+    atomic_write_text(
+        resolved_path,
+        yaml.dump(parsed, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    invalidate_config_cache()
+    return server_data
+
+
+def delete_waa_server(
+    server_id: str,
+    config_path: str | os.PathLike[str] | None = None,
+) -> bool:
+    """删除指定 ID 的 WAA 签名服务器。"""
+    resolved_path = _resolve_config_path(config_path)
+    content = (
+        resolved_path.read_text(encoding="utf-8") if resolved_path.exists() else ""
+    )
+    parsed = yaml.safe_load(content) or {}
+    if not isinstance(parsed, dict):
+        return False
+
+    raw_waa = parsed.get("waa")
+    if not isinstance(raw_waa, dict):
+        return False
+
+    raw_servers = raw_waa.get("servers")
+    if not isinstance(raw_servers, list):
+        return False
+
+    target_id = server_id.strip()
+    new_servers = [
+        s
+        for s in raw_servers
+        if isinstance(s, dict) and str(s.get("id") or "").strip() != target_id
+    ]
+    if len(new_servers) == len(raw_servers):
+        return False
+
+    raw_waa["servers"] = new_servers
+    if str(raw_waa.get("active_server") or "").strip() == target_id and new_servers:
+        raw_waa["active_server"] = str(new_servers[0].get("id") or "")
+
+    parsed["waa"] = raw_waa
+    atomic_write_text(
+        resolved_path,
+        yaml.dump(parsed, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    invalidate_config_cache()
+    return True

@@ -1,51 +1,11 @@
-import json
-
-import pytest
-import yaml
-
 from aistudio_api.infrastructure.gateway.model_defaults import resolve_model_defaults
-from aistudio_api.infrastructure.gateway.wire_codec import AistudioWireCodec
-from aistudio_api.infrastructure.gateway.wire_types import (
-    AistudioImageOutputMode,
-    AistudioThinkingConfig,
-)
-
-
-@pytest.mark.parametrize("field", ["media_resolution", "image_output_mode", "thinking_config"])
-def test_explicit_null_model_override_clears_inherited_generation_value(tmp_path, monkeypatch, field):
-    inherited = {
-        "media_resolution": "HIGH", "image_output_mode": "image_only",
-        "thinking_config": {"level": "LOW", "mode": 1}, "temperature": 0.7,
-    }
-    path = tmp_path / "config.yaml"
-    path.write_text(yaml.safe_dump({"model_defaults": {
-        "profiles": [{"name": "synthetic", "match": {"prefixes": ["gemini-"]},
-                      "generation_config_defaults": inherited}],
-        "models": {"gemini-synthetic": {"generation_config_defaults": {field: None}}},
-    }}), encoding="utf-8")
-    monkeypatch.setenv("AISTUDIO_CONFIG_FILE", str(path))
-    defaults = resolve_model_defaults("gemini-synthetic")
-    assert defaults.generation_config_defaults[field] is None
-    assert defaults.generation_config_defaults["temperature"] == 0.7
-    codec = AistudioWireCodec()
-    wire = codec.rewrite(
-        json.dumps(["models/gemini-synthetic", []]), model="gemini-synthetic",
-        prompt="synthetic-only", sanitize_plain_text=False,
-    )
-    generated = codec.decode(wire).generation_config
-    if field == "thinking_config":
-        # Null clears the profile value and retains the gateway's established
-        # default reasoning policy, rather than disabling that policy.
-        assert generated.thinking_config == AistudioThinkingConfig.default().to_wire()
-    else:
-        assert getattr(generated, field) is None
-    assert generated.temperature == 0.7
+from aistudio_api.infrastructure.gateway.wire_types import AistudioImageOutputMode
 
 
 def test_resolve_model_defaults_uses_repo_config_for_gemma():
     defaults = resolve_model_defaults("models/gemma-4-31b-it")
 
-    assert defaults.default_tools == ("google_search",)
+    assert defaults.default_tools == ()
     assert defaults.is_image_model is False
     assert defaults.safety_settings == (
         (None, None, 7, 5),

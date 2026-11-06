@@ -5,7 +5,6 @@ import YAML from 'yaml'
 import type { ParsedConfigYaml, ModelProfileItem, ModelOverrideMap } from './types.ts'
 import ProfileCard from './ProfileCard.vue'
 import ModelOverrideCard from './ModelOverrideCard.vue'
-import ModelRulePreview from './ModelRulePreview.vue'
 import SchemaDictionaryModal from './SchemaDictionaryModal.vue'
 import ConfigSwitch from './ConfigSwitch.vue'
 import FieldHelpTip from './FieldHelpTip.vue'
@@ -35,14 +34,12 @@ const emit = defineEmits<{
 const toast = useToastStore()
 
 const activeTab = ref<'visual' | 'yaml'>('visual')
-const rawYaml = ref('')
+const rawYaml = ref(props.initialYaml || '')
 const parsedConfig = ref<ParsedConfigYaml>({})
-const savedYaml = ref(serializeConfig({}))
 const yamlParseError = ref<string | null>(null)
 const saving = ref(false)
 const dictModalOpen = ref(false)
 const filterKeyword = ref('')
-let pendingLoggingRefresh: { present: boolean; value: unknown } | undefined
 
 const filteredProfilesWithIndex = computed(() => {
   const list = parsedConfig.value.model_defaults?.profiles || []
@@ -51,7 +48,7 @@ const filteredProfilesWithIndex = computed(() => {
     .map((profile, originalIndex) => ({ profile, originalIndex }))
     .filter(({ profile }) => {
       if (!kw) return true
-      const inName = String(profile.name ?? '').toLowerCase().includes(kw)
+      const inName = profile.name.toLowerCase().includes(kw)
       const inContains = profile.match?.contains?.some((c) => c.toLowerCase().includes(kw))
       const inPrefix = profile.match?.prefixes?.some((p) => p.toLowerCase().includes(kw))
       const inExact = profile.match?.exact?.some((e) => e.toLowerCase().includes(kw))
@@ -59,89 +56,40 @@ const filteredProfilesWithIndex = computed(() => {
     })
 })
 
-const modelOverrides = computed(() => parsedConfig.value.model_defaults?.models || {})
-const previewYaml = computed(() => activeTab.value === 'yaml' ? rawYaml.value : serializeConfig(parsedConfig.value))
-
-// API keys belong to the key manager. Never retain or submit a cached copy
-// through the model editor, including when the user pastes an old config file.
-function readEditorYaml(content: string): { yaml: string; config: ParsedConfigYaml } {
-  const doc = YAML.parseDocument(content)
-  if (doc.errors.length) throw new Error(doc.errors[0]?.message || 'YAML 解析失败')
-  if (doc.contents !== null && !YAML.isMap(doc.contents)) {
-    throw new Error('YAML 顶层必须是字典结构')
-  }
-  if (doc.contents !== null) doc.delete('api_keys')
-  return { yaml: doc.toString(), config: (doc.toJS() || {}) as ParsedConfigYaml }
-}
-
-function serializeConfig(config: ParsedConfigYaml): string {
-  return YAML.stringify(config, { indent: 2 })
-}
-
-function validateVisualShape(config: ParsedConfigYaml) {
-  const isMap = (value: unknown): value is Record<string, unknown> =>
-    value !== null && typeof value === 'object' && !Array.isArray(value)
-  const fail = () => { throw new Error('模型规则结构不适用于可视化编辑，请在 YAML 中检查或编辑') }
-  const checkRule = (rule: unknown) => {
-    if (!isMap(rule)) return fail()
-    if (rule.name != null && typeof rule.name !== 'string') fail()
-    for (const key of ['default_tools', 'clear_generation_config_indexes']) {
-      if (rule[key] != null && !Array.isArray(rule[key])) fail()
-    }
-    if (rule.match != null) {
-      if (!isMap(rule.match)) return fail()
-      for (const key of ['contains', 'prefixes', 'exact']) {
-        const values = rule.match[key]
-        if (values != null && (!Array.isArray(values) || values.some(v => typeof v !== 'string'))) fail()
-      }
-    }
-    for (const key of ['generation_config_defaults', 'safety_settings']) {
-      if (rule[key] != null && !isMap(rule[key])) fail()
+const filteredModels = computed(() => {
+  const allModels = parsedConfig.value.model_defaults?.models || {}
+  const kw = filterKeyword.value.trim().toLowerCase()
+  if (!kw) return allModels
+  const result: ModelOverrideMap = {}
+  for (const [key, val] of Object.entries(allModels)) {
+    if (key.toLowerCase().includes(kw)) {
+      result[key] = val
     }
   }
-  const defaults = config.model_defaults
-  if (defaults == null) return
-  if (!isMap(defaults)) return fail()
-  if (defaults.profiles != null) {
-    if (!Array.isArray(defaults.profiles)) return fail()
-    defaults.profiles.forEach(checkRule)
-  }
-  if (defaults.models != null) {
-    if (!isMap(defaults.models)) return fail()
-    Object.values(defaults.models).forEach(checkRule)
-  }
-}
-
-const hasUnsavedChanges = computed(() => {
-  try {
-    const config = activeTab.value === 'visual'
-      ? parsedConfig.value
-      : readEditorYaml(rawYaml.value).config
-    return serializeConfig(config) !== savedYaml.value
-  } catch {
-    return true
-  }
+  return result
 })
 
 function parseYamlToState(content: string): boolean {
   try {
-    const editor = readEditorYaml(content)
-    rawYaml.value = editor.yaml
-    validateVisualShape(editor.config)
-    parsedConfig.value = editor.config
+    const doc = YAML.parse(content) || {}
+    if (typeof doc !== 'object' || doc === null) {
+      throw new Error('YAML 顶层必须是字典结构')
+    }
+    parsedConfig.value = doc as ParsedConfigYaml
     yamlParseError.value = null
     return true
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'YAML 解析失败'
     yamlParseError.value = msg
-    activeTab.value = 'yaml'
     return false
   }
 }
 
 function syncStateToYaml(): string {
   try {
-    const dumped = serializeConfig(parsedConfig.value)
+    const dumped = YAML.stringify(parsedConfig.value, {
+      indent: 2,
+    })
     rawYaml.value = dumped
     return dumped
   } catch (err) {
@@ -150,75 +98,18 @@ function syncStateToYaml(): string {
   }
 }
 
-function applyPendingLoggingRefresh() {
-  const refresh = pendingLoggingRefresh
-  if (!refresh) return
-  try {
-    const baseline = readEditorYaml(savedYaml.value).config
-    const draft = activeTab.value === 'visual'
-      ? parsedConfig.value
-      : readEditorYaml(rawYaml.value).config
-    // A model draft must not restore logging saved by the separate card.
-    // Explicit edits to logging in YAML remain the owner's local draft.
-    if (serializeConfig({ logging: draft.logging }) === serializeConfig({ logging: baseline.logging })) {
-      if (activeTab.value === 'yaml') {
-        const doc = YAML.parseDocument(readEditorYaml(rawYaml.value).yaml)
-        if (refresh.present) doc.set('logging', refresh.value)
-        else doc.delete('logging')
-        if (!parseYamlToState(doc.toString())) return
-      } else {
-        const updated = { ...draft }
-        if (refresh.present) updated.logging = refresh.value
-        else delete updated.logging
-        parsedConfig.value = updated
-      }
-      if (refresh.present) baseline.logging = refresh.value
-      else delete baseline.logging
-      savedYaml.value = serializeConfig(baseline)
-    }
-    // Explicit logging edits keep their original baseline. Advancing it here
-    // would hide a same-field conflict with the separately saved logging card.
-    pendingLoggingRefresh = undefined
-  } catch {
-    // Retain the refresh until the owner repairs the invalid YAML draft.
-  }
-}
-
 watch(
   () => props.initialYaml,
   (val) => {
-    // Refreshes from the other settings cards must not discard a model draft.
-    if (val === undefined) return
-    if (hasUnsavedChanges.value) {
-      try {
-        const incoming = readEditorYaml(val).config
-        pendingLoggingRefresh = { present: 'logging' in incoming, value: incoming.logging }
-        applyPendingLoggingRefresh()
-      } catch {
-        // Invalid YAML is still an unsaved draft; leave its text untouched.
-      }
-      return
-    }
-    if (parseYamlToState(val)) {
-      savedYaml.value = serializeConfig(parsedConfig.value)
-      pendingLoggingRefresh = undefined
-    } else {
-      // Keep a malformed loaded draft editable, including valid legacy rules
-      // that the visual form cannot represent. Never replace it with {}.
-      try {
-        const editor = readEditorYaml(val)
-        rawYaml.value = editor.yaml
-        savedYaml.value = serializeConfig(editor.config)
-      } catch {
-        rawYaml.value = val
-      }
+    if (val !== undefined) {
+      rawYaml.value = val
+      parseYamlToState(val)
     }
   },
   { immediate: true }
 )
 
 function switchTab(tab: 'visual' | 'yaml') {
-  if (tab === activeTab.value) return
   if (tab === 'yaml') {
     syncStateToYaml()
   } else {
@@ -229,7 +120,6 @@ function switchTab(tab: 'visual' | 'yaml') {
     }
   }
   activeTab.value = tab
-  applyPendingLoggingRefresh()
 }
 
 function handleAddProfile() {
@@ -239,7 +129,6 @@ function handleAddProfile() {
     match: {
       prefixes: ['gemini-'],
     },
-    default_tools: ['google_search'],
     safety_settings: {
       Harassment: 5,
       Hate: 5,
@@ -308,37 +197,25 @@ function updateGlobalDropUnsupported(val: boolean) {
 
 function handleResetDefaults() {
   if (confirm('确定要将所有模型规则重置为官方推荐默认预设吗？')) {
-    applyPendingLoggingRefresh()
-    let currentConfig: ParsedConfigYaml
-    try {
-      currentConfig = activeTab.value === 'yaml'
-        ? readEditorYaml(rawYaml.value).config
-        : parsedConfig.value
-    } catch (err) {
-      toast.error('请先修复 YAML 再重置模型规则: ' + (err instanceof Error ? err.message : '解析失败'))
-      return
-    }
-    const doc: ParsedConfigYaml = {
-      ...currentConfig,
+    const nextDoc: ParsedConfigYaml = {
+      ...parsedConfig.value,
       model_defaults: {
         drop_unsupported_params: false,
         profiles: [
           {
             name: 'image_models',
             match: {
-              contains: ['image'],
+              contains: ['image', 'imagen'],
             },
             is_image_model: true,
-            default_tools: ['google_search_and_image_search'],
-            generation_config_defaults: {
-              response_mime_type: null,
-              image_output_mode: 'image_only',
-              thinking_config: {
-                level: 'MINIMAL',
-                mode: 1,
-              },
+            disable_safety_settings: true,
+          },
+          {
+            name: 'video_models',
+            match: {
+              prefixes: ['veo-'],
+              contains: ['veo'],
             },
-            clear_generation_config_indexes: [7, 13, 17],
             disable_safety_settings: true,
           },
           {
@@ -346,7 +223,6 @@ function handleResetDefaults() {
             match: {
               prefixes: ['gemma-'],
             },
-            default_tools: ['google_search'],
             safety_settings: {
               Harassment: 5,
               Hate: 5,
@@ -359,7 +235,6 @@ function handleResetDefaults() {
             match: {
               prefixes: ['gemini-'],
             },
-            default_tools: ['google_search'],
             safety_settings: {
               Harassment: 5,
               Hate: 5,
@@ -372,33 +247,29 @@ function handleResetDefaults() {
         models: {},
       },
     }
-    parsedConfig.value = doc
+    parsedConfig.value = nextDoc
     syncStateToYaml()
-    toast.info('已载入默认规则（API Key 由上方独立管理，日志配置保留），请点击右上角保存并生效')
+    toast.info('已载入默认模型规则（保留现有 API Key、调度器与配额配置），请点击右上角保存并生效')
   }
 }
 
 async function handleSave() {
-  if (saving.value) return
-  applyPendingLoggingRefresh()
   saving.value = true
-  let contentToSave: string
+  let contentToSave = rawYaml.value
   if (activeTab.value === 'visual') {
     contentToSave = syncStateToYaml()
   } else {
-    try {
-      contentToSave = readEditorYaml(rawYaml.value).yaml
-      rawYaml.value = contentToSave
-    } catch (err) {
-      toast.error('YAML 格式错误: ' + (err instanceof Error ? err.message : '解析失败'))
+    // Check YAML validity
+    const ok = parseYamlToState(rawYaml.value)
+    if (!ok) {
+      toast.error('YAML 格式错误: ' + yamlParseError.value)
       saving.value = false
       return
     }
   }
 
   try {
-    await systemApi.updateConfigYaml(contentToSave, savedYaml.value)
-    savedYaml.value = serializeConfig(readEditorYaml(contentToSave).config)
+    await systemApi.updateConfigYaml(contentToSave)
     toast.success('模型规则配置已成功保存并完成热重载！')
     emit('saved')
   } catch (err: unknown) {
@@ -409,7 +280,7 @@ async function handleSave() {
   }
 }
 function handleYamlKeydown(e: KeyboardEvent) {
-  if (e.key === ']' && (e.ctrlKey || e.metaKey) && !e.altKey) {
+  if (e.key === 'Tab') {
     e.preventDefault()
     const target = e.target as HTMLTextAreaElement
     const start = target.selectionStart
@@ -421,6 +292,11 @@ function handleYamlKeydown(e: KeyboardEvent) {
     })
   }
 }
+
+const hasUnsavedChanges = computed(() => {
+  const current = activeTab.value === 'visual' ? syncStateToYaml() : rawYaml.value
+  return Boolean(props.initialYaml && current.trim() !== props.initialYaml.trim())
+})
 
 onBeforeRouteLeave((_to, _from, next) => {
   if (hasUnsavedChanges.value) {
@@ -446,9 +322,6 @@ onBeforeRouteLeave((_to, _from, next) => {
             模型规则与安全策略 (config.yaml)
           </h3>
         </div>
-        <p class="text-xs text-gray-500 mt-2">
-          API 密钥由上方密钥管理独立保存，导入或激活账号、保存模型规则均不会更换调用密钥。
-        </p>
       </div>
 
       <!-- Controls & Actions -->
@@ -506,8 +379,6 @@ onBeforeRouteLeave((_to, _from, next) => {
         </Button>
       </div>
     </div>
-
-    <ModelRulePreview :yaml-content="previewYaml" />
 
     <!-- Search Filter Bar in Visual Mode -->
     <div
@@ -614,8 +485,7 @@ onBeforeRouteLeave((_to, _from, next) => {
 
       <!-- Section 2: Specific Model Overrides -->
       <ModelOverrideCard
-        :models="modelOverrides"
-        :filter-keyword="filterKeyword"
+        :models="filteredModels"
         @update:models="updateModelsOverride"
       />
     </div>
@@ -631,16 +501,12 @@ onBeforeRouteLeave((_to, _from, next) => {
       </div>
       <textarea
         v-model="rawYaml"
-        aria-label="模型规则 YAML"
         rows="22"
         spellcheck="false"
         placeholder="正在加载 config.yaml..."
         class="w-full p-4 font-mono text-xs bg-gray-900 text-gray-100 rounded-xl outline-none focus:ring-2 focus:ring-brand-500 leading-relaxed shadow-inner border border-gray-800"
         @keydown="handleYamlKeydown"
       />
-      <p class="text-xs text-gray-500">
-        Tab / Shift+Tab 切换焦点；Ctrl+]（Mac 为 Command+]）插入两个空格。
-      </p>
     </div>
 
     <!-- Schema Specification Dictionary Modal -->

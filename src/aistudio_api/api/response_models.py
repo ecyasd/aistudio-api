@@ -12,6 +12,7 @@ class GeminiUsageMetadata(BaseModel):
     candidatesTokenCount: int = 0
     thoughtsTokenCount: int = 0
     totalTokenCount: int = 0
+    cachedContentTokenCount: int | None = None
 
 
 class GeminiFunctionCallPayload(BaseModel):
@@ -31,16 +32,6 @@ class GeminiInlineDataResponse(BaseModel):
     data: str
 
 
-class GeminiExecutableCodePayload(BaseModel):
-    language: str | int
-    code: str
-
-
-class GeminiCodeExecutionResultPayload(BaseModel):
-    outcome: str | int
-    output: str
-
-
 class GeminiPartResponse(BaseModel):
     text: str | None = None
     thought: bool | None = None
@@ -48,8 +39,6 @@ class GeminiPartResponse(BaseModel):
     thoughtSignature: str | None = None
     functionCall: GeminiFunctionCallPayload | None = None
     functionResponse: GeminiFunctionResponsePayload | None = None
-    executableCode: GeminiExecutableCodePayload | None = None
-    codeExecutionResult: GeminiCodeExecutionResultPayload | None = None
 
 
 class GeminiContentResponse(BaseModel):
@@ -72,7 +61,25 @@ class GeminiGenerateContentResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str
-    busy: bool
+
+
+class AccountBreakdownItem(BaseModel):
+    account_id: str
+    name: str
+    auth_user: str = "0"
+    email: str | None = None
+    tier: str = "Free"
+    group: str = "default"
+    enabled: bool = True
+    today_requests: int = 0
+    today_success: int = 0
+    today_rate_limited: int = 0
+    today_tokens: int = 0
+    today_reasoning_tokens: int = 0
+    configured_quota: int = 100
+    quota_used_percent: float = 0.0
+    is_available: bool = True
+    cooldown_remaining: int = 0
 
 
 class ModelStatsResponse(BaseModel):
@@ -82,8 +89,12 @@ class ModelStatsResponse(BaseModel):
     errors: int
     prompt_tokens: int
     completion_tokens: int
+    reasoning_tokens: int = 0
+    cached_tokens: int = 0
     total_tokens: int
+    finish_reasons: dict[str, int] = {}
     last_used: str | None = None
+    account_breakdown: list[AccountBreakdownItem] = []
 
 
 class StatsTotalsResponse(BaseModel):
@@ -93,6 +104,8 @@ class StatsTotalsResponse(BaseModel):
     errors: int
     prompt_tokens: int
     completion_tokens: int
+    reasoning_tokens: int = 0
+    cached_tokens: int = 0
     total_tokens: int
 
 
@@ -108,7 +121,11 @@ class GeminiModelResponse(BaseModel):
     description: str | None = None
     inputTokenLimit: int | None = None
     outputTokenLimit: int | None = None
-    supportedGenerationMethods: list[str] = ["generateContent"]
+    supportedGenerationMethods: list[str] = [
+        "generateContent",
+        "countTokens",
+        "createCachedContent",
+    ]
     temperature: float | None = None
     topP: float | None = None
     topK: int | None = None

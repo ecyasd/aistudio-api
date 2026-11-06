@@ -11,8 +11,8 @@ import {
   Users,
   Activity,
   AlertTriangle,
-  ArrowRight,
-  FileWarning,
+  Brain,
+  Database,
 } from 'lucide-vue-next'
 
 const accountsStore = useAccountsStore()
@@ -25,34 +25,49 @@ const activeAccountDisplay = computed(() => {
   return (acc.email || acc.name || acc.id) + sub
 })
 
+const activeAccountTierDisplay = computed(() => {
+  const acc = accountsStore.activeAccount
+  if (!acc) return undefined
+  return `订阅: ${acc.tier || 'Free'}`
+})
+
 const totalAccountsCount = computed(() => accountsStore.accountRows.length)
 
 const availableAccountsCount = computed(() => {
   const total = totalAccountsCount.value
   if (total === 0) return 0
-  const available = accountsStore.accountRows.filter((a) => a.is_available !== false).length
+  const available = accountsStore.accountRows.filter((a) => a.is_available !== false && a.enabled !== false).length
   return Math.min(available, total)
 })
 
+const reasoningTokensDisplay = computed(() => {
+  const tokens = systemStore.stats?.totals?.reasoning_tokens || 0
+  return tokens.toLocaleString()
+})
+
+const cachedTokensDisplay = computed(() => {
+  const tokens = systemStore.stats?.totals?.cached_tokens || 0
+  return tokens.toLocaleString()
+})
+
 async function loadData() {
-  const results = await Promise.all([
+  await Promise.all([
     accountsStore.fetchAll(),
     systemStore.fetchStats(),
   ])
-  return results.every(result => result !== false)
 }
 
-// 页面可见时每 10 秒自动轮询一次统计与账号状态
 usePolling(loadData, 10000)
 </script>
 
 <template>
   <div class="space-y-6">
     <!-- Stat Cards Grid -->
-    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
       <StatCard
         label="当前激活账号"
         :value="activeAccountDisplay"
+        :sub-value="activeAccountTierDisplay"
         :color="accountsStore.activeAccount ? 'green' : 'default'"
       >
         <template #icon>
@@ -82,7 +97,7 @@ usePolling(loadData, 10000)
       </StatCard>
 
       <StatCard
-        label="429 配额耗尽次数"
+        label="429 配额耗尽"
         :value="systemStore.totalRateLimited"
         :color="systemStore.totalRateLimited > 0 ? 'amber' : 'default'"
       >
@@ -90,27 +105,29 @@ usePolling(loadData, 10000)
           <AlertTriangle class="w-4 h-4 text-amber-500" />
         </template>
       </StatCard>
+
+      <StatCard
+        label="思考 Tokens"
+        :value="reasoningTokensDisplay"
+        color="default"
+      >
+        <template #icon>
+          <Brain class="w-4 h-4 text-purple-600" />
+        </template>
+      </StatCard>
+
+      <StatCard
+        label="缓存 Tokens"
+        :value="cachedTokensDisplay"
+        color="default"
+      >
+        <template #icon>
+          <Database class="w-4 h-4 text-teal-600" />
+        </template>
+      </StatCard>
     </div>
 
-    <RouterLink
-      to="/error-records"
-      class="flex items-center justify-between gap-4 p-4 sm:p-5 rounded-2xl border border-gray-200 bg-white hover:border-brand-300 hover:bg-brand-50/30 transition-colors"
-    >
-      <div class="flex items-center gap-3">
-        <FileWarning class="w-5 h-5 text-rose-500 shrink-0" />
-        <div>
-          <p class="text-sm font-semibold text-gray-900">
-            查看实时错误
-          </p>
-          <p class="text-xs text-gray-500 mt-1">
-            查看最近 10 分钟的 API 失败、流式中断、浏览器异常和自动重试
-          </p>
-        </div>
-      </div>
-      <ArrowRight class="w-4 h-4 text-gray-400 shrink-0" />
-    </RouterLink>
-
-    <!-- Model Statistics Table -->
+    <!-- Model Statistics Table with Account Breakdown Accordion -->
     <ModelStatsTable
       :stats="systemStore.stats?.models || {}"
     />

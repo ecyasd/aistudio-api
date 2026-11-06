@@ -1,34 +1,28 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { Code2, Terminal, Copy, Check } from 'lucide-vue-next'
 import { useClipboard } from '@/composables/useClipboard.ts'
 
 const { copied, copy } = useClipboard()
-const apiBaseUrl = typeof window === 'undefined' ? 'http://localhost:8080' : window.location.origin
 
-const codeSnippets = [
-  {
-    title: 'SillyTavern（酒馆）',
-    lang: 'text',
-    code: `API：聊天补全 → Google AI Studio
-反向代理 URL：${apiBaseUrl}
-代理密码：填写密钥管理中的 API 调用密钥
-模型：从连接后的模型列表选择
-可选续写：选择「抗截断/原模型名」
-流式传输：开启
+const baseUrl = computed(() => {
+  if (typeof window !== 'undefined' && window.location.origin) {
+    return window.location.origin
+  }
+  return 'http://localhost:8080'
+})
 
-反向代理 URL 填站点根地址，无需添加 /v1beta。
-长上下文等待：在「实时错误 → 响应探测」查看准备与上游首包耗时。`,
-  },
+const codeSnippets = computed(() => [
   {
-    title: 'cURL',
+    title: 'cURL (标准 HTTP)',
     lang: 'bash',
-    code: `curl ${apiBaseUrl}/v1beta/models/gemini-3.8-flash:generateContent \\
+    code: `curl ${baseUrl.value}/v1beta/models/gemini-3.8-flash:generateContent \\
   -H "x-goog-api-key: your-api-key" \\
   -H "Content-Type: application/json" \\
   -d '{"contents": [{"role": "user", "parts": [{"text": "Hello"}]}]}'`,
   },
   {
-    title: 'Python SDK',
+    title: 'Python (Google GenAI SDK)',
     lang: 'python',
     code: `from google import genai
 
@@ -36,7 +30,7 @@ client = genai.Client(
     api_key="your-api-key",
     http_options={
         "api_version": "v1beta",
-        "base_url": "${apiBaseUrl}",
+        "base_url": "${baseUrl.value}",
     },
 )
 
@@ -46,7 +40,7 @@ response = client.models.generate_content(
 )
 print(response.text)`,
   },
-]
+])
 
 function handleCopy(code: string, index: number) {
   void copy(code, index, '已复制调用示例到剪贴板')

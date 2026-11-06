@@ -1,12 +1,10 @@
 <script setup lang="ts">
-import { ref, computed, toRef, onMounted, watch } from 'vue'
+import { ref, computed, toRef, onMounted } from 'vue'
 import type { AccountWithStats } from '@/types/accounts.ts'
 import { useAccountsStore } from '@/stores/accounts.ts'
 import { useSystemStore } from '@/stores/system.ts'
 import { useToastStore } from '@/stores/toast.ts'
 import { systemApi } from '@/api/system.ts'
-import { usePolling } from '@/composables/usePolling.ts'
-import { millisecondsUntilPacificMidnight } from '@/utils/format.ts'
 import { useCookieGroups, type CookieGroup } from './useCookieGroups.ts'
 import CookieGroupBlock from './CookieGroupBlock.vue'
 import AccountRow from './AccountRow.vue'
@@ -22,7 +20,6 @@ import {
 const props = defineProps<{
   accounts: AccountWithStats[]
   activeId: string
-  focusAccount?: string
 }>()
 
 const emit = defineEmits<{
@@ -36,14 +33,10 @@ const toast = useToastStore()
 // 搜索与状态过滤
 const searchKeyword = ref('')
 const statusFilter = ref<'all' | 'ready' | 'limited' | 'expired'>('all')
-watch(() => props.focusAccount, value => {
-  if (value) { searchKeyword.value = ''; statusFilter.value = 'all' }
-}, { immediate: true })
 
 const filteredAccounts = computed<AccountWithStats[]>(() => {
   const kw = searchKeyword.value.trim().toLowerCase()
   return props.accounts.filter((acc) => {
-    if (props.focusAccount && acc.id !== props.focusAccount) return false
     // 状态过滤
     if (statusFilter.value === 'expired') {
       if (!acc.session_expired) return false
@@ -59,12 +52,12 @@ const filteredAccounts = computed<AccountWithStats[]>(() => {
     const inEmail = (acc.email || '').toLowerCase().includes(kw)
     const inId = acc.id.toLowerCase().includes(kw)
     const inAuthUser = `u/${acc.auth_user}`.toLowerCase().includes(kw) || acc.auth_user === kw
-    return inName || inEmail || inId || inAuthUser
+    const inTier = (acc.tier || 'free').toLowerCase().includes(kw)
+    return inName || inEmail || inId || inAuthUser || inTier
   })
 })
 
 const { cookieGroups } = useCookieGroups(filteredAccounts, toRef(props, 'activeId'))
-const { cookieGroups: completeCookieGroups } = useCookieGroups(toRef(props, 'accounts'), toRef(props, 'activeId'))
 
 // 折叠状态持久化
 const STORAGE_COLLAPSED_KEY = 'aistudio_collapsed_cookie_ids'
@@ -93,7 +86,7 @@ function saveCollapsedState(set: Set<string>) {
 }
 
 function isGroupCollapsed(cid: string): boolean {
-  return !props.focusAccount && collapsedCookieIds.value.has(cid)
+  return collapsedCookieIds.value.has(cid)
 }
 
 function toggleCookieGroup(cid: string) {
@@ -124,13 +117,24 @@ function toggleAllModels() {
   forceExpandAllModels.value = !forceExpandAllModels.value
 }
 
-const quotaClock = ref(Date.now())
-usePolling(async () => { quotaClock.value = Date.now() }, 60_000)
-
-// Use the actual Pacific offset at the next midnight, including DST changes.
+// 美西午夜刷新倒计时计算 (自动适配 PST/PDT 夏令时)
 const hoursUntilPacificMidnight = computed(() => {
-  const minutes = Math.ceil(millisecondsUntilPacificMidnight(new Date(quotaClock.value)) / 60_000)
-  return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`
+  const now = new Date()
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Los_Angeles',
+      hour: 'numeric',
+      minute: 'numeric',
+      hour12: false,
+    }).formatToParts(now)
+    const h = Number(parts.find((p) => p.type === 'hour')?.value ?? 0) % 24
+    const m = Number(parts.find((p) => p.type === 'minute')?.value ?? 0)
+    return `${23 - h} 小时 ${59 - m} 分`
+  } catch {
+    const utcNow = now.getTime() + now.getTimezoneOffset() * 60000
+    const pacificNow = new Date(utcNow - 8 * 3600000)
+    return `${23 - pacificNow.getHours()} 小时 ${59 - pacificNow.getMinutes()} 分`
+  }
 })
 
 // 清理幽灵残留状态
@@ -162,19 +166,14 @@ async function handleDeleteAccount(acc: AccountWithStats) {
 }
 
 async function handleDeleteCookieGroup(group: CookieGroup) {
-  const complete = completeCookieGroups.value.find(item => item.id === group.id)
-  if (!complete) return
-  const hiddenCount = complete.accounts.length - group.accounts.length
-  const scopeNote = hiddenCount > 0
-    ? `\n当前筛选只显示 ${group.accounts.length} 个，另外 ${hiddenCount} 个也会被删除。`
-    : ''
-  if (confirm(`确定要删除该 Cookie 凭据及其关联的全部 ${complete.accounts.length} 个子账号吗？${scopeNote}`)) {
+  if (confirm(`确定要删除该 Cookie 凭据及其关联的全部 ${group.accounts.length} 个子账号吗？`)) {
     await accountsStore.deleteCookieGroup(group.id)
   }
 }
 
-// 激活成功后由服务端解除登录态失效标记，并保留调用统计与配额冷却。
+// 针对登录态失效或受阻账号执行重新验证（解除禁用并重新激活会话）
 async function handleReverifyAccount(acc: AccountWithStats) {
+  await systemStore.clearCooldown({ account_id: acc.id })
   await accountsStore.activateAccount(acc.id)
 }
 
@@ -297,7 +296,7 @@ async function handleClearModelCooldown(accountId: string, model: string) {
         <!-- Quota Reset Functional Info -->
         <div class="flex items-center gap-1.5 text-xs text-gray-500 font-mono shrink-0">
           <Clock class="w-3.5 h-3.5 text-gray-400" />
-          <span>每日配额刷新（太平洋时间 00:00）：还剩 {{ hoursUntilPacificMidnight }}</span>
+          <span>每日配额刷新 (00:00 PST): 还剩 {{ hoursUntilPacificMidnight }}</span>
         </div>
       </div>
     </div>

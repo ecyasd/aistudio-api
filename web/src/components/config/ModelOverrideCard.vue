@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { ref } from 'vue'
 import type { ModelOverrideMap, ModelOverrideItem, ThinkingConfig } from './types.ts'
 import {
   TOOL_SUGGESTIONS,
@@ -17,7 +17,6 @@ import { Plus, Trash2, ChevronDown, ChevronRight, Layers, Cpu, Wrench } from 'lu
 
 const props = defineProps<{
   models: ModelOverrideMap
-  filterKeyword?: string
 }>()
 
 const emit = defineEmits<{
@@ -26,12 +25,6 @@ const emit = defineEmits<{
 
 const newModelName = ref('')
 const expandedMap = ref<Record<string, boolean>>({})
-const visibleModels = computed(() => {
-  const models = props.models || {}
-  const keyword = props.filterKeyword?.trim().toLowerCase()
-  if (!keyword) return models
-  return Object.fromEntries(Object.entries(models).filter(([name]) => name.toLowerCase().includes(keyword)))
-})
 
 function toggleExpand(modelKey: string) {
   expandedMap.value[modelKey] = !expandedMap.value[modelKey]
@@ -73,7 +66,7 @@ function updateModelGenField(modelKey: string, key: string, val: unknown) {
   const next: ModelOverrideMap = { ...(props.models || {}) }
   const current = next[modelKey] || {}
   const currentGen = { ...(current.generation_config_defaults || {}) }
-  if (val === undefined) {
+  if (val === null || val === undefined) {
     delete (currentGen as Record<string, unknown>)[key]
   } else {
     ;(currentGen as Record<string, unknown>)[key] = val
@@ -90,7 +83,7 @@ function updateModelThinkingConfig(modelKey: string, level: string | null) {
   const current = next[modelKey] || {}
   const currentGen = { ...(current.generation_config_defaults || {}) }
   if (level === null) {
-    currentGen.thinking_config = null
+    delete currentGen.thinking_config
   } else {
     const prevThinking = currentGen.thinking_config || { mode: 1 }
     currentGen.thinking_config = { ...prevThinking, level: level as ThinkingConfig['level'] }
@@ -136,11 +129,11 @@ function updateModelThinkingConfig(modelKey: string, level: string | null) {
 
     <!-- Override List -->
     <div
-      v-if="Object.keys(visibleModels).length"
+      v-if="Object.keys(models || {}).length"
       class="space-y-3"
     >
       <div
-        v-for="(override, modelKey) in visibleModels"
+        v-for="(override, modelKey) in models"
         :key="modelKey"
         class="bg-white border border-gray-200/90 rounded-2xl shadow-xs overflow-hidden"
       >
@@ -346,7 +339,7 @@ function updateModelThinkingConfig(modelKey: string, level: string | null) {
       v-else
       class="p-8 text-center text-gray-400 text-xs border border-dashed border-gray-200 rounded-2xl bg-gray-50/50"
     >
-      {{ Object.keys(models || {}).length ? '没有匹配的单模型覆盖配置。' : '暂无单模型覆盖配置，全部模型遵循上方 Profiles 分组规则。' }}
+      暂无单模型覆盖配置，全部模型遵循上方 Profiles 分组规则。
     </div>
   </div>
 </template>

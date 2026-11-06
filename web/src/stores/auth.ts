@@ -1,14 +1,13 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { authApi } from '@/api/auth.ts'
-import { ApiError, getToken, setToken, clearToken } from '@/api/client.ts'
+import { getToken, setToken, clearToken } from '@/api/client.ts'
 
 export const useAuthStore = defineStore('auth', () => {
   const authEnabled = ref(false)
   const token = ref(getToken())
   const checking = ref(false)
   const initialized = ref(false)
-  let authRevision = 0
 
   async function checkAuth(): Promise<boolean> {
     checking.value = true
@@ -23,16 +22,12 @@ export const useAuthStore = defineStore('auth', () => {
         return false
       }
 
-      const verifiedToken = token.value
-      const verificationRevision = authRevision
       try {
-        await authApi.verifyToken(verifiedToken)
-        return authRevision === verificationRevision && token.value === verifiedToken && getToken() === verifiedToken
-      } catch (error) {
-        if (error instanceof ApiError && error.status === 401 && authRevision === verificationRevision && token.value === verifiedToken) {
-          if (getToken() === verifiedToken) clearToken()
-          token.value = getToken()
-        }
+        await authApi.verifyToken(token.value)
+        return true
+      } catch {
+        clearToken()
+        token.value = ''
         return false
       }
     } catch {
@@ -46,12 +41,9 @@ export const useAuthStore = defineStore('auth', () => {
   async function login(newToken: string): Promise<boolean> {
     const trimmed = newToken.trim()
     if (!trimmed) return false
-    const loginRevision = ++authRevision
-    const previousToken = getToken()
 
     try {
       await authApi.verifyToken(trimmed)
-      if (authRevision !== loginRevision || getToken() !== previousToken) return false
       setToken(trimmed)
       token.value = trimmed
       return true
@@ -61,13 +53,11 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   function logout() {
-    authRevision++
     clearToken()
     token.value = ''
   }
 
   function updateToken(newToken: string) {
-    authRevision++
     const trimmed = newToken.trim()
     setToken(trimmed)
     token.value = trimmed

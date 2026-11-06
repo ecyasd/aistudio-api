@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, useId } from 'vue'
+import { ref } from 'vue'
 import { Plus, X } from 'lucide-vue-next'
 
 interface Props {
@@ -26,9 +26,6 @@ const emit = defineEmits<{
 }>()
 
 const inputVal = ref('')
-const inputError = ref<string | null>(null)
-const inputId = useId()
-const errorId = `${inputId}-error`
 
 function addTag(valToAdd?: string | number) {
   if (props.disabled) return
@@ -36,11 +33,7 @@ function addTag(valToAdd?: string | number) {
   if (!raw) return
 
   const item: string | number = props.isNumber ? Number(raw) : raw
-  if (props.isNumber && (typeof item !== 'number' || !Number.isSafeInteger(item) || item < 0)) {
-    inputError.value = '参数位置必须是大于或等于 0 的整数'
-    return
-  }
-  inputError.value = null
+  if (props.isNumber && Number.isNaN(item)) return
 
   const list = [...(props.modelValue || [])]
   if (!list.includes(item)) {
@@ -68,10 +61,7 @@ function handleKeydown(e: KeyboardEvent) {
 <template>
   <div class="space-y-2">
     <div class="flex items-center justify-between">
-      <label
-        :for="inputId"
-        class="block text-xs font-semibold text-gray-700"
-      >
+      <label class="block text-xs font-semibold text-gray-700">
         {{ label }}
       </label>
       <span
@@ -106,11 +96,8 @@ function handleKeydown(e: KeyboardEvent) {
         class="flex items-center gap-1 min-w-[120px] flex-1"
       >
         <input
-          :id="inputId"
           v-model="inputVal"
           type="text"
-          :aria-invalid="Boolean(inputError)"
-          :aria-describedby="inputError ? errorId : undefined"
           :placeholder="modelValue?.length ? '+ 继续添加' : placeholder"
           class="w-full px-2 py-1 text-xs bg-transparent outline-none font-mono text-gray-700 placeholder:text-gray-400"
           @keydown="handleKeydown"
@@ -132,15 +119,6 @@ function handleKeydown(e: KeyboardEvent) {
         未配置
       </span>
     </div>
-
-    <p
-      v-if="inputError"
-      :id="errorId"
-      role="alert"
-      class="text-xs text-rose-600"
-    >
-      {{ inputError }}
-    </p>
 
     <!-- Quick Suggestions -->
     <div

@@ -16,19 +16,19 @@ __pycache__
 dist
 build
 .pytest_cache
+.venv
+web/node_modules
+**/*.tsbuildinfo
+waa-signer/.deps
+waa-signer/bin
+data
+data2
+dumps
+private
 
 # Environment (use .env.example as reference, mount .env at runtime)
 .env
 .env.local
-config.yaml
-runtime-config/
-data/
-data2/
-accounts/
-node_modules/
-web/node_modules/
-web/*.tsbuildinfo
-src/aistudio_api/static/
 
 # Logs
 *.log
@@ -42,12 +42,6 @@ tests/
 # Temporary files
 /tmp
 snapshot_*.log
-
-# Chrome/Chromium profiles (not needed in container)
-chromium-profile/
-
-# Botguard fork (not needed for main service)
-botguard-fork/
 
 # Documentation
 docs/

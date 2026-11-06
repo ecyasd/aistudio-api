@@ -11,14 +11,6 @@ from pathlib import Path
 
 def main() -> int:
     repo = Path(__file__).resolve().parents[1]
-    platform_args = []
-    if os.name == "nt":
-        # These existing checks exercise Linux /opt paths and the POSIX `true`
-        # watchdog process. Ubuntu CI deliberately runs both without exclusions.
-        platform_args = [
-            "--deselect=tests/unit/test_browser_engine.py::test_find_chromium_executable_strictly_requires_cloakbrowser",
-            "--deselect=tests/unit/test_browser_engine.py::test_spawn_process_watchdog_creates_pipe_and_reaps",
-        ]
     with tempfile.TemporaryDirectory(prefix="aistudio-tests-") as temporary:
         isolated = Path(temporary)
         (isolated / "accounts").mkdir()
@@ -34,6 +26,7 @@ def main() -> int:
                 "PYTHONPATH": str(repo / "src"),
                 "PYTHONUTF8": "1",
                 "PYTHONDONTWRITEBYTECODE": "1",
+                "AISTUDIO_TELEMETRY_PERSIST": "0",
                 "PYTHON_DOTENV_DISABLED": "1",
                 "AISTUDIO_WEB_PASSWORD": "",
                 "AISTUDIO_WAA_BACKEND": "browser",
@@ -64,7 +57,6 @@ def main() -> int:
                 "-q",
                 "--basetemp",
                 str(isolated / "pytest"),
-                *platform_args,
                 *(sys.argv[1:] or ["tests/unit"]),
             ],
             cwd=repo,

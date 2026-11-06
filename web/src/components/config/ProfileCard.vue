@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import type { GenerationConfigDefaults, ModelProfileItem } from './types.ts'
+import type { ModelProfileItem } from './types.ts'
 import {
   TOOL_SUGGESTIONS,
   IMAGE_MODE_OPTIONS,
@@ -261,7 +261,7 @@ function updateThinkingConfig(level: 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH' | nul
                 :model-value="profile.generation_config_defaults?.media_resolution"
                 label="多模态输入分辨率"
                 :options="MEDIA_RESOLUTION_OPTIONS"
-                @update:model-value="updateGenerationConfig('media_resolution', $event as GenerationConfigDefaults['media_resolution'])"
+                @update:model-value="updateGenerationConfig('media_resolution', $event as any)"
               />
             </div>
             <FieldHelpTip

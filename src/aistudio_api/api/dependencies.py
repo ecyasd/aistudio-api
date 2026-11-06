@@ -7,18 +7,31 @@ from collections.abc import Iterable
 
 from fastapi import HTTPException, Request
 
-from aistudio_api.application.runtime import runtime_state
 from aistudio_api.config import settings
 from aistudio_api.infrastructure.gateway.client import AIStudioClient
 from aistudio_api.infrastructure.utils.logger import get_logger
 
+from .state import runtime_state
+
 logger = get_logger("auth")
 
-_SENSITIVE_QUERY_NAMES = frozenset({
-    "key", "api_key", "api-key", "apikey", "x-api-key", "x-goog-api-key",
-    "authorization", "token", "access_token", "password", "admin_password",
-    "web_password", "secret",
-})
+_SENSITIVE_QUERY_NAMES = frozenset(
+    {
+        "key",
+        "api_key",
+        "api-key",
+        "apikey",
+        "x-api-key",
+        "x-goog-api-key",
+        "authorization",
+        "token",
+        "access_token",
+        "password",
+        "admin_password",
+        "web_password",
+        "secret",
+    }
+)
 
 
 def _constant_match(token: str | None, candidates: Iterable[str]) -> bool:
@@ -27,7 +40,9 @@ def _constant_match(token: str | None, candidates: Iterable[str]) -> bool:
     matched = False
     for candidate in candidates:
         if candidate and len(candidate) <= 4096:
-            matched |= secrets.compare_digest(token.encode("utf-8"), candidate.encode("utf-8"))
+            matched |= secrets.compare_digest(
+                token.encode("utf-8"), candidate.encode("utf-8")
+            )
     return matched
 
 
@@ -141,6 +156,7 @@ def get_account_service():
             },
         )
     return runtime_state.account_service
+
 
 def get_runtime_state():
     return runtime_state

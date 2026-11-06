@@ -8,7 +8,6 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -16,10 +15,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DEFAULT_TEXT_MODEL = os.getenv("AISTUDIO_DEFAULT_TEXT_MODEL", "gemini-3.7-flash")
-DEFAULT_IMAGE_MODEL = os.getenv(
-    "AISTUDIO_DEFAULT_IMAGE_MODEL", "gemini-3.1-flash-image-preview"
-)
-DEFAULT_BROWSER_PORT = 9222
 
 
 def _load_env(*names: str) -> str | None:
@@ -37,54 +32,29 @@ def _load_bool_env(*names: str, default: bool) -> bool:
     return value not in ("0", "false", "False")
 
 
-def _load_int_env(*names: str, default: int) -> int:
-    value = _load_env(*names)
-    if value is None:
-        return default
-    return int(value)
-
 def _load_web_password() -> str | None:
     return os.getenv("AISTUDIO_WEB_PASSWORD") or os.getenv("AISTUDIO_ADMIN_PASSWORD")
 
-
-def _load_dump_requests_env() -> bool:
-    """检查 DEBUG / AISTUDIO_DEBUG 环境变量是否启用请求转储。
-
-    注意：此环境变量专用于触发请求详细信息转储 (Dump)，不影响日志输出级别。
-    """
-    val = _load_env("DEBUG", "AISTUDIO_DEBUG", "AISTUDIO_DUMP_REQUESTS")
-    if val is None:
-        return False
-    return val.strip().lower() in ("1", "true", "yes", "on", "dump", "y", "t")
-
-
-def _load_dump_to_file_env() -> bool:
-    """检查 AISTUDIO_DUMP_FILE / AISTUDIO_DUMP_TO_FILE 环境变量是否启用请求转储落盘。"""
-    val = _load_env("AISTUDIO_DUMP_FILE", "AISTUDIO_DUMP_TO_FILE")
-    if val is None:
-        return False
-    return val.strip().lower() in ("1", "true", "yes", "on", "dump", "y", "t")
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_DATA_DIR = _PROJECT_ROOT / "data"
 _DEFAULT_CONFIG_PATH = _PROJECT_ROOT / "config.yaml"
 _TEMPLATE_CONFIG_PATHS = (
-    _PROJECT_ROOT / "defaults" / "config.example.yaml",
-    _PROJECT_ROOT / "config.example.yaml",
+    _PROJECT_ROOT / "defaults" / "config.yaml",
+    _DEFAULT_CONFIG_PATH,
 )
 
 
-def get_config_file_path(config_path: str | os.PathLike[str] | None = None) -> Path:
-    """Return the configured path without initializing or modifying any file."""
-    if config_path is not None:
-        return Path(config_path)
-    override = os.getenv("AISTUDIO_CONFIG_FILE")
-    return Path(override) if override else _DEFAULT_CONFIG_PATH
-
-
 def resolve_config_file(config_path: str | os.PathLike[str] | None = None) -> Path:
-    """Resolve a runtime config, initializing a missing file from its template."""
-    target = get_config_file_path(config_path)
+    """解析配置文件路径（优先使用 AISTUDIO_CONFIG_FILE 环境变量）。
+
+    若目标路径配置文件不存在，则自动从内置配置模板初始化复制，绝不覆盖已有配置文件。
+    """
+    if config_path is not None:
+        target = Path(config_path)
+    else:
+        override = os.getenv("AISTUDIO_CONFIG_FILE")
+        target = Path(override) if override else _DEFAULT_CONFIG_PATH
 
     if not target.exists():
         for template in _TEMPLATE_CONFIG_PATHS:
@@ -159,19 +129,6 @@ def discover_auth_file() -> str | None:
                         return str(auth_path)
             except (json.JSONDecodeError, KeyError):
                 pass
-        # Legacy exports may have arbitrary names. Runtime JSON is not a
-        # browser storage state and must never become the selected credential.
-        for file in root.iterdir():
-            if not file.is_file() or file.suffix != ".json" or file.name in {
-                "stats.json", "rotator_state.json",
-            }:
-                continue
-            try:
-                state = json.loads(file.read_text(encoding="utf-8-sig"))
-            except (OSError, UnicodeError, json.JSONDecodeError):
-                continue
-            if isinstance(state, dict) and isinstance(state.get("cookies"), list):
-                return str(file)
     return None
 
 
@@ -199,26 +156,6 @@ def discover_proxy_url() -> str | None:
     return None
 
 
-def build_browser_proxy(proxy_url: str | None) -> dict[str, str] | None:
-    if not proxy_url:
-        return None
-
-    parsed = urlparse(proxy_url)
-    if not parsed.scheme or not parsed.hostname:
-        return None
-
-    proxy: dict[str, str] = {
-        "server": f"{parsed.scheme}://{parsed.hostname}",
-    }
-    if parsed.port:
-        proxy["server"] += f":{parsed.port}"
-    if parsed.username:
-        proxy["username"] = parsed.username
-    if parsed.password:
-        proxy["password"] = parsed.password
-    return proxy
-
-
 def resolve_timezone() -> str:
     """解析系统或配置时区（优先使用 AISTUDIO_TIMEZONE 环境变量）。"""
     override = os.getenv("AISTUDIO_TIMEZONE")
@@ -237,53 +174,18 @@ def resolve_timezone() -> str:
     return "America/Los_Angeles"
 
 
-def resolve_locale() -> str:
-    """解析系统或配置语言环境（优先使用 AISTUDIO_LOCALE 环境变量）。"""
-    override = os.getenv("AISTUDIO_LOCALE")
-    if override and override.strip():
-        return override.strip()
-    return "en-US"
-
-
-def _resolve_default_idle_timeout() -> int:
-    env_val = os.getenv("AISTUDIO_BROWSER_IDLE_TIMEOUT")
-    if env_val is not None and env_val.strip() != "":
-        return int(env_val)
-    if (
-        "com.termux" in os.getenv("PREFIX", "")
-        or "com.termux" in os.getenv("PATH", "")
-        or os.getenv("ANDROID_ROOT") is not None
-    ):
-        return 900
-    return 1800
-
-
 @dataclass(slots=True)
 class Settings:
     port: int = int(os.getenv("AISTUDIO_PORT", "8080"))
-    browser_port: int = _load_int_env(
-        "AISTUDIO_BROWSER_PORT", default=DEFAULT_BROWSER_PORT
+    proof_server_url: str = os.getenv(
+        "AISTUDIO_PROOF_SERVER_URL", "https://waa.spinsnow.fun"
     )
-    browser_headless: bool = _load_bool_env("AISTUDIO_BROWSER_HEADLESS", default=True)
-    browser_executable_path: str | None = os.getenv("AISTUDIO_BROWSER_EXECUTABLE")
-    browser_idle_timeout: int = _resolve_default_idle_timeout()
     auth_file: str | None = discover_auth_file()
     tmp_dir: str = os.getenv("AISTUDIO_TMP_DIR", tempfile.gettempdir())
     proxy_url: str | None = discover_proxy_url()
     web_password: str | None = _load_web_password()
     api_keys: frozenset[str] = frozenset()
-    timeout_replay: int = int(os.getenv("AISTUDIO_TIMEOUT_REPLAY", "120"))
-    timeout_stream: int = int(os.getenv("AISTUDIO_TIMEOUT_STREAM", "120"))
     timezone: str = resolve_timezone()
-    locale: str = resolve_locale()
-    dump_raw_response: bool = os.getenv("AISTUDIO_DUMP_RAW_RESPONSE", "0") in (
-        "1",
-        "true",
-        "True",
-    )
-    dump_raw_response_dir: str = os.getenv(
-        "AISTUDIO_DUMP_RAW_RESPONSE_DIR", tempfile.gettempdir()
-    )
     data_dir: str = str(resolve_data_dir())
     accounts_dir: str = os.getenv("AISTUDIO_ACCOUNTS_DIR", "")
     stats_file: str = str(resolve_stats_file())
@@ -291,9 +193,6 @@ class Settings:
     config_file: str = str(resolve_config_file())
     persist_stats: bool = _load_bool_env("AISTUDIO_PERSIST_STATS", default=True)
     persist_rotator: bool = _load_bool_env("AISTUDIO_PERSIST_ROTATOR", default=True)
-    dump_requests: bool = _load_dump_requests_env()
-    dump_to_file: bool = _load_dump_to_file_env()
-    dump_dir: str = os.getenv("AISTUDIO_DUMP_DIR", str(_PROJECT_ROOT / "dumps"))
     log_level: str = "INFO"
 
     @property

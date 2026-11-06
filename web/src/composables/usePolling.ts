@@ -19,13 +19,12 @@ export interface PollingHandle {
 }
 
 interface ActiveTask {
-  fn: () => void | boolean | Promise<void | boolean>
+  fn: () => void | Promise<void>
   intervalMs: number
   maxBackoffMs: number
   timer?: number
   paused: boolean
   running: boolean
-  disposed: boolean
   failureCount: number
 }
 
@@ -45,7 +44,8 @@ function setupGlobalVisibilityListener() {
       for (const task of activeTasks.values()) {
         if (!task.paused) {
           task.failureCount = 0
-          void runTask(task).then(() => scheduleNext(task))
+          void runTask(task)
+          scheduleNext(task)
         }
       }
     }
@@ -53,11 +53,11 @@ function setupGlobalVisibilityListener() {
 }
 
 async function runTask(task: ActiveTask) {
-  if (task.disposed || task.paused || task.running || (typeof document !== 'undefined' && document.hidden)) return
+  if (task.running || (typeof document !== 'undefined' && document.hidden)) return
   task.running = true
   try {
-    const succeeded = await task.fn()
-    task.failureCount = succeeded === false ? task.failureCount + 1 : 0
+    await task.fn()
+    task.failureCount = 0
   } catch (err) {
     task.failureCount++
     console.debug('[usePolling] task execution error (consecutive failures: %d):', task.failureCount, err)
@@ -67,7 +67,7 @@ async function runTask(task: ActiveTask) {
 }
 
 function scheduleNext(task: ActiveTask) {
-  if (task.disposed || task.timer || task.paused || (typeof document !== 'undefined' && document.hidden)) return
+  if (task.timer || task.paused || (typeof document !== 'undefined' && document.hidden)) return
 
   let delay = task.intervalMs
   if (task.failureCount > 1) {
@@ -94,10 +94,9 @@ let autoKeyCounter = 0
 /**
  * 页面可见时周期性调度的统一轮询管理。
  * 支持页面隐藏自动冻结、失败指数退避与销毁自动释放。
- * 回调可返回 false 表示已自行处理的读取失败，仍启用退避。
  */
 export function usePolling(
-  fn: () => void | boolean | Promise<void | boolean>,
+  fn: () => void | Promise<void>,
   intervalMs: number,
   options: PollingOptions = {}
 ): PollingHandle {
@@ -113,13 +112,7 @@ export function usePolling(
     maxBackoffMs,
     paused: false,
     running: false,
-    disposed: false,
     failureCount: 0,
-  }
-  const previous = activeTasks.get(taskId)
-  if (previous) {
-    previous.disposed = true
-    stopTaskTimer(previous)
   }
   activeTasks.set(taskId, task)
 
@@ -137,14 +130,13 @@ export function usePolling(
 
   const handle: PollingHandle = {
     run: () => {
-      void runTask(task).then(() => scheduleNext(task))
+      void runTask(task)
     },
     pause: () => {
       task.paused = true
       stopTaskTimer(task)
     },
     resume: () => {
-      if (task.disposed) return
       task.paused = false
       task.failureCount = 0
       scheduleNext(task)
@@ -152,9 +144,8 @@ export function usePolling(
   }
 
   onUnmounted(() => {
-    task.disposed = true
     stopTaskTimer(task)
-    if (activeTasks.get(taskId) === task) activeTasks.delete(taskId)
+    activeTasks.delete(taskId)
   })
 
   return handle

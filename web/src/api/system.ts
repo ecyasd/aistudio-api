@@ -10,21 +10,13 @@ import type {
   UpdateLoggingConfigRequest,
   UpdateLoggingConfigResponse,
   HealthCheckResponse,
-  BrowserStatusResponse,
-  ModelRulePreview,
+  SignerServerItem,
+  SignerServersResponse,
+  TestSignerServerResponse,
 } from '@/types'
 
 
 export const systemApi = {
-  previewModelRules(model: string, yamlContent: string, signal?: AbortSignal): Promise<ModelRulePreview> {
-    return request('/config/model-preview', {
-      method: 'POST', body: JSON.stringify({ model, yaml_content: yamlContent }), signal,
-    })
-  },
-  getBrowserStatus(signal?: AbortSignal): Promise<BrowserStatusResponse> {
-    return request<BrowserStatusResponse>('/browser/status', { signal })
-  },
-
   health(): Promise<HealthCheckResponse> {
     return request<HealthCheckResponse>('/health')
   },
@@ -56,14 +48,14 @@ export const systemApi = {
     })
   },
 
-  getConfig(signal?: AbortSignal): Promise<SystemConfig> {
-    return request<SystemConfig>('/config', { signal })
+  getConfig(): Promise<SystemConfig> {
+    return request<SystemConfig>('/config')
   },
 
-  updateConfigYaml(yamlContent: string, baselineYamlContent?: string): Promise<{ ok: boolean; message: string }> {
+  updateConfigYaml(yamlContent: string): Promise<{ ok: boolean; message: string }> {
     return request('/config/yaml', {
       method: 'PUT',
-      body: JSON.stringify({ yaml_content: yamlContent, baseline_yaml_content: baselineYamlContent }),
+      body: JSON.stringify({ yaml_content: yamlContent }),
     })
   },
 
@@ -74,8 +66,8 @@ export const systemApi = {
     })
   },
 
-  listApiKeys(signal?: AbortSignal): Promise<ApiKeyItem[]> {
-    return request<ApiKeyItem[]>('/api-keys', { signal })
+  listApiKeys(): Promise<ApiKeyItem[]> {
+    return request<ApiKeyItem[]>('/api-keys')
   },
 
   createApiKey(req: CreateApiKeyRequest): Promise<ApiKeyItem> {
@@ -86,16 +78,46 @@ export const systemApi = {
   },
 
   deleteApiKey(keyValue: string): Promise<{ ok: boolean }> {
-    return request<{ ok: boolean }>('/api-keys', {
+    return request<{ ok: boolean }>(`/api-keys/${encodeURIComponent(keyValue)}`, {
       method: 'DELETE',
-      body: JSON.stringify({ key: keyValue }),
     })
   },
 
   updateApiKeyName(keyValue: string, req: UpdateApiKeyRequest): Promise<ApiKeyItem> {
-    return request<ApiKeyItem>('/api-keys', {
+    return request<ApiKeyItem>(`/api-keys/${encodeURIComponent(keyValue)}`, {
       method: 'PUT',
-      body: JSON.stringify({ ...req, key: keyValue }),
+      body: JSON.stringify(req),
+    })
+  },
+
+  getSignerServers(): Promise<SignerServersResponse> {
+    return request<SignerServersResponse>('/config/signer-servers')
+  },
+
+  switchSignerServer(serverId: string): Promise<{ ok: boolean; active_server: SignerServerItem }> {
+    return request('/config/signer-servers/switch', {
+      method: 'POST',
+      body: JSON.stringify({ server_id: serverId }),
+    })
+  },
+
+  upsertSignerServer(server: Partial<SignerServerItem>): Promise<{ ok: boolean; server: SignerServerItem }> {
+    return request('/config/signer-servers', {
+      method: 'PUT',
+      body: JSON.stringify(server),
+    })
+  },
+
+  deleteSignerServer(serverId: string): Promise<{ ok: boolean }> {
+    return request(`/config/signer-servers/${encodeURIComponent(serverId)}`, {
+      method: 'DELETE',
+    })
+  },
+
+  testSignerServer(url: string): Promise<TestSignerServerResponse> {
+    return request('/config/signer-servers/test', {
+      method: 'POST',
+      body: JSON.stringify({ url }),
     })
   },
 }

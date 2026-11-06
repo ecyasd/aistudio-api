@@ -2,14 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import (
-    AliasChoices,
-    BaseModel,
-    Field,
-    StrictBool,
-    StrictInt,
-    field_validator,
-)
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 
 class GeminiInlineData(BaseModel):
@@ -44,30 +37,14 @@ class GeminiFunctionResponse(BaseModel):
 
 class GeminiExecutableCode(BaseModel):
     code: str
-    language: str | StrictInt = Field(default="PYTHON")
+    language: str = Field(default="PYTHON")
     id: str | None = None
-
-    @field_validator("language")
-    @classmethod
-    def valid_language(cls, value: str | int) -> str | int:
-        if isinstance(value, str) and value.upper() not in {"LANGUAGE_UNSPECIFIED", "PYTHON"}:
-            raise ValueError("Unsupported executableCode language")
-        return value
 
 
 class GeminiCodeExecutionResult(BaseModel):
-    outcome: str | StrictInt
+    outcome: str
     output: str
     id: str | None = None
-
-    @field_validator("outcome")
-    @classmethod
-    def valid_outcome(cls, value: str | int) -> str | int:
-        if isinstance(value, str) and value.upper() not in {
-            "OUTCOME_UNSPECIFIED", "OUTCOME_OK", "OUTCOME_FAILED", "OUTCOME_DEADLINE_EXCEEDED",
-        }:
-            raise ValueError("Unsupported codeExecutionResult outcome")
-        return value
 
 
 class GeminiPart(BaseModel):
@@ -184,12 +161,17 @@ class GeminiGenerationConfig(BaseModel):
         validation_alias=AliasChoices("responseLogprobs", "response_logprobs"),
     )
     logprobs: int | None = None
+    seed: int | None = None
     mediaResolution: list[object] | int | str | None = Field(
         default=None,
         validation_alias=AliasChoices("mediaResolution", "media_resolution"),
     )
     thinkingConfig: list[object] | dict[str, object] | None = Field(
         default=None, validation_alias=AliasChoices("thinkingConfig", "thinking_config")
+    )
+    reasoningEffort: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("reasoningEffort", "reasoning_effort"),
     )
     imageConfig: dict[str, object] | None = Field(
         default=None, validation_alias=AliasChoices("imageConfig", "image_config")
@@ -203,16 +185,6 @@ class GeminiSafetySetting(BaseModel):
 
 class GeminiGenerateContentRequest(BaseModel):
     contents: list[GeminiContent]
-    autoContinue: StrictBool = Field(
-        default=False,
-        validation_alias=AliasChoices("autoContinue", "auto_continue"),
-        description=(
-            "Opt in to at most two extra text generations after MAX_TOKENS, "
-            "preserving thinking and Part signatures. "
-            "maxOutputTokens applies per round, not to the combined answer. "
-            "Each round may consume additional upstream quota and tokens."
-        ),
-    )
     systemInstruction: GeminiContent | None = Field(
         default=None,
         validation_alias=AliasChoices("systemInstruction", "system_instruction"),
@@ -227,4 +199,8 @@ class GeminiGenerateContentRequest(BaseModel):
     )
     toolConfig: dict[str, object] | None = Field(
         default=None, validation_alias=AliasChoices("toolConfig", "tool_config")
+    )
+    reasoningEffort: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("reasoningEffort", "reasoning_effort"),
     )

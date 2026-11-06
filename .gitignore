@@ -3,11 +3,6 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.coverage
-.coverage.*
-htmlcov/
-coverage.xml
-*.tsbuildinfo
 .venv/
 venv/
 dist/
@@ -21,89 +16,28 @@ dumps/
 .vscode/
 !docs/BOTGUARD_VERIFICATION_CHAIN.md
 .env
-.env.*
-!.env.example
-!.env.*.example
-/config.yaml
-/runtime-config/
-/config.local.*
-!config.example.yaml
-**/secrets.json
-**/app-secrets
-**/credentials.json
-**/auth.json
-**/auth-*.json
-**/cookies*.json
-**/cookie*.txt
-**/storage-state*.json
-**/storage_state*.json
-**/Cookies
-**/Login Data
-**/Local State
-*.pem
-*.key
-*.p12
-*.pfx
-*.jks
 uv.toml
 .uv.toml
 uv.lock
 /test_*
-/capture_*
-chromium-profile/
-botguard-fork/
-# scripts/ (we now track scripts for bootstrap tools)
 data2/
 .ai_memory
 .antigravitycli
-chrome-headless
-.cloakbrowser/
 server-logs/
 /cache/
-/accounts/
-/secrets/
-/credentials/
-/backups/
-/local-evidence/
-/artifacts/
-/.protocol-test-env/
-/.review*-env/
-/reviewfix-work/
-/reviewfix-test-env/
-/project-review-*/
-/combined-review-fixes-*/
-/*-verification-*.json
-/*.tar.gz
-/*.zip
-/*.enc
-*.bak
-*.backup
-*.tmp
-*.orig
 db/
 *.log
 *.pid
 node_modules/
 web/node_modules/
 web/dist/
+*.tsbuildinfo
 
 # Repomix outputs
 repomix-output.*
 repomix.config.*
 
-# Android / Gradle
-.gradle/
-android/.gradle/
-android/build/
-android/app/build/
-android/local.properties
-android/**/.idea/
-android/**/*.iml
-*.apk
-*.aab
-
-# Reverse engineering dump outputs
-tools/reverse/output/
-tools/reverse/bundles/
-tools/reverse/wasm/
+# waa-signer binary & cache
+waa-signer/bin/
+waa-signer/.deps/
 

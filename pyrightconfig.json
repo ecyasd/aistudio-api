@@ -1,9 +1,8 @@
 {
-  "include": ["src", "deploy"],
   "venvPath": ".",
   "venv": ".venv",
   "extraPaths": ["src"],
-  "pythonVersion": "3.12",
+  "pythonVersion": "3.14",
   "pythonPlatform": "Linux",
   "typeCheckingMode": "standard",
   "reportMissingImports": "error",

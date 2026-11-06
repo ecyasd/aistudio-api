@@ -22,8 +22,6 @@ export default defineConfig({
       '/config': 'http://localhost:8080',
       '/api-keys': 'http://localhost:8080',
       '/health': 'http://localhost:8080',
-      '/errors': 'http://localhost:8080',
-      '/browser': 'http://localhost:8080',
     },
   },
   build: {

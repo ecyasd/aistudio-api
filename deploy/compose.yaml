@@ -1,0 +1,41 @@
+name: aistudio-console
+services:
+  api:
+    image: ${AISTUDIO_IMAGE:?AISTUDIO_IMAGE must reference a verified release}
+    container_name: aistudio-console
+    init: true
+    network_mode: host
+    restart: unless-stopped
+    env_file:
+      - /etc/aistudio-console/runtime.env
+    environment:
+      AISTUDIO_DATA_DIR: /data
+      AISTUDIO_CONFIG_FILE: /data/config.yaml
+      AISTUDIO_ACCOUNTS_DIR: /data/accounts
+      AISTUDIO_STATS_FILE: /data/stats.json
+      AISTUDIO_ROTATOR_STATE_FILE: /data/rotator_state.json
+      AISTUDIO_LOG_DIR: /logs
+      AISTUDIO_TELEMETRY_DB: /data/telemetry.sqlite3
+      AISTUDIO_TELEMETRY_PERSIST: '1'
+      AISTUDIO_TELEMETRY_RETENTION_DAYS: '7'
+      AISTUDIO_PERSIST_STATS: '1'
+      AISTUDIO_PERSIST_ROTATOR: '1'
+      WAA_STATE_DIR: /data/waa
+      AISTUDIO_BIND_HOST: 127.0.0.1
+      PYTHON_DOTENV_DISABLED: '1'
+    volumes:
+      - /var/lib/aistudio-console:/data
+      - /var/log/aistudio-console:/logs
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 45s
+    mem_limit: 1200m
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: '3'
+        compress: 'true'

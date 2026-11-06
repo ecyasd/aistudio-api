@@ -8,7 +8,7 @@
 
 - [1. 系统架构与交互拓扑](#1-系统架构与交互拓扑)
 - [2. 阶段一：页面加载与服务初始化](#2-阶段一页面加载与服务初始化)
-- [3. 阶段二：WAA 挑战握手与 Wasm 运行时加载](#3-阶段二waa-挑战握手与-wasm-运行时加载)
+- [3. 阶段二：WAA 挑战握手与虚拟机加载](#3-阶段二waa-挑战握手与虚拟机加载)
 - [4. 阶段三：请求内容哈希与快照签名](#4-阶段三请求内容哈希与快照签名)
 - [5. 阶段四：Wire 协议组包与浏览器 Fetch/XHR 重放](#5-阶段四wire-协议组包与浏览器-fetchxhr-重放)
 - [6. 阶段五：服务端校验与统一报错响应](#6-阶段五服务端校验与统一报错响应)
@@ -26,9 +26,9 @@ flowchart TD
     subgraph Browser ["用户浏览器环境 (Client Browser)"]
         UI["Google AI Studio UI<br/>(Angular SPA)"]
         BGSvc["BotGuardService<br/>(WAA 前端容器)"]
-        BGWasm["BotGuard Wasm Runtime<br/>(动态加载的沙箱虚拟机)"]
+        BGVM["BotGuard Bitstream VM<br/>(动态加载的 JS 字节码虚拟机)"]
         UI <--> BGSvc
-        BGSvc <--> BGWasm
+        BGSvc <--> BGVM
     end
 
     subgraph GoogleInfra ["Google 后端服务集群 (Google Infrastructure)"]
@@ -38,8 +38,8 @@ flowchart TD
     end
 
     UI -- "(1) 页面资源 & GenerateContent RPC" --> MakerSuite
-    BGSvc -- "(2) 挑战初始化握手 (/Waa/Ping)" --> WaaServer
-    BGWasm -- "(3) 下载与执行专属 Wasm 字节码" --> StaticCDN
+    BGSvc -- "(2) 挑战初始化握手 (/Waa/Create)" --> WaaServer
+    BGVM -- "(3) 下载并执行多态 JS 解释器" --> StaticCDN
 ```
 
 ### 完整交互时序
@@ -58,22 +58,22 @@ sequenceDiagram
     User->>Browser: 访问 aistudio.google.com/u/0/prompts/new_chat
     Browser->>Browser: Angular 初始化并实例化 BotGuardService
     Browser->>WaaClient: initialize()
-    WaaClient->>WaaServer: POST /Waa/Ping (携带 X-Goog-AuthUser 与 SAPISIDHASH)
-    WaaServer-->>WaaClient: 下发会话挑战 Nonce 与 Wasm 资源文件名
-    WaaClient->>StaticCDN: GET /js/bg/{hash}.js
-    StaticCDN-->>WaaClient: 返回动态 BotGuard 虚拟机代码 (绑定 u/0 身份)
+    WaaClient->>WaaServer: POST /Waa/Create (携带 X-Goog-AuthUser 与 SAPISIDHASH)
+    WaaServer-->>WaaClient: 下发挑战字节码 (Program) 与解释器脚本哈希 (interpreterHash)
+    WaaClient->>StaticCDN: GET /js/bg/{interpreterHash}.js
+    StaticCDN-->>WaaClient: 返回多态 JS 字节码解释器
 
     Note over User,Gateway: 【阶段三 & 四：用户提问与动态签名】
     User->>Browser: 输入 Prompt 并点击 Run
     Browser->>Browser: 计算 content_hash = SHA256(Prompt + Images)
     Browser->>WaaClient: snapshot(content_hash)
-    WaaClient->>WaaClient: 收集环境/时钟指纹 + HMAC(内容哈希 + 凭据)
+    WaaClient->>WaaClient: 采集 DOM/环境特征 + Lookup3(挑战盐值 + "0" + content_hash)
     WaaClient-->>Browser: 返回加密快照 Token (!dXaldhL...)
     Browser->>Browser: 组装 Wire 数据包 (body[4] = snapshot)
     Browser->>Gateway: POST /GenerateContent (Fetch credentials='include')
     Note over Gateway: 【阶段五：服务端校验与响应】
-    Gateway->>Gateway: 解密 Body[4] 快照，比对 HMAC 内容指纹
-    Gateway->>Gateway: 校验快照内嵌 GAIA ID 与请求头 X-Goog-AuthUser
+    Gateway->>Gateway: 解密 Body[4] 快照，校验 Tag 22 内容哈希签名与 Tag 59 会话令牌
+    Gateway->>Gateway: 校验外层 User-Agent / X-Goog-AuthUser 与快照内部声明是否一致
     Gateway-->>Browser: 校验通过，分块流式返回推理响应 (200 OK)
     Browser-->>User: 实时渲染并展示模型生成结果
 ```
@@ -107,7 +107,7 @@ sequenceDiagram
 
 ---
 
-## 3. 阶段二：WAA 挑战握手与 Wasm 运行时加载
+## 3. 阶段二：WAA 挑战握手与虚拟机加载
 
 在 `BotGuardService.initialize()` 中，前端与 Google WAA 服务完成握手：
 
@@ -119,7 +119,7 @@ initialize() {
         a.A = new LUa({
             fetcher: new ura(b, () => a.getMetadata())
         });
-        yield a.A.u6a; // 等待 Wasm 运行时握手完成并就绪
+        yield a.A.u6a; // 等待 BotGuard 虚拟机握手并初始化完成
     });
 }
 getMetadata() {
@@ -131,29 +131,29 @@ getMetadata() {
     };
 }
 ```
-### 3.1 握手信令交互 (`/Waa/Ping`)
+### 3.1 挑战握手交互 (`/Waa/Create`)
 
-请求发往 `https://waa-pa.clients6.google.com/$rpc/google.internal.waa.v1.Waa/Ping`：
+请求发往 `https://waa-pa.clients6.google.com/$rpc/google.internal.waa.v1.Waa/Create`（保活探测为 `/Waa/Ping`）：
 
-- **请求头示例**：
+- **请求头**：
   ```http
   X-Goog-Api-Key: AIzaSyBGb5fGAyC-pRcRU6MUHb__b_vKha71HRE
   Authorization: SAPISIDHASH <timestamp>_<sha1_hash> ...
   X-Goog-AuthUser: 0
   Content-Type: application/json+protobuf
   ```
-- **请求负载**：包含客户端接入 ID（如 `client: "lmnUSbltwc5ULv48iKLX"`）与环境参数。
-- **响应载荷**：WAA 服务返回会话挑战 Nonce 与专属 JS/Wasm 资源哈希。
+- **请求负载**：`["lmnUSbltwc5ULv48iKLX"]`。
+- **响应载荷**：外层为二元 JSON 数组，其中 `outer[1]` Base64 解码后每个字节加 `97` (`(b + 97) & 0xFF`) 得到内层 JSON 数组 `[messageId, null, null, interpreterHash, programBytecode, globalName]`。
 
-### 3.2 动态加载 Wasm 虚拟机
+### 3.2 加载多态 JS 虚拟机与字节码
 
-前端向 Google CDN 请求对应哈希的脚本：
+前端根据 `interpreterHash` 从 Google 静态 CDN 拉取对应解释器脚本：
 
 ```http
-GET https://www.google.com/js/bg/gBetl7I-09yp6c3Nmm4ajwTxhDHStoNbVEOK3L3hfg4.js
+GET https://www.google.com/js/bg/<interpreterHash>.js
 ```
 
-脚本执行并实例化核心虚拟机。此时虚拟机内部已绑定当前会话的 GAIA ID、Nonce 与 `auth_user` 凭据。
+脚本在隐藏 `<iframe>` 中解码并执行 `programBytecode`（约 25.8 KB 的加密比特流程序）。字节码内嵌了服务端签发的 64 字节会话上下文 Token（`Tag 59`）与 217 字节认证 Blob（`Tag 1`），与当前 `auth_user` 及挑战盐值绑定。
 
 ---
 
@@ -201,37 +201,42 @@ _.l(requestProto, 5, t);             // 3. 将 Token 注入 Protobuf 字段 5 (W
    };
    ```
 
-2. **生成 BotGuard 快照 (`_.jp` / `_.Dp` / `snapKey`)**：
+2. **生成 BotGuard 快照 (`_.Pn` / `_.jp` / `_.Dp` / `snapKey`)**：
    前端调用被检测到的专属签名函数（在 `default_MakerSuite` 中动态匹配注册）：
    ```javascript
-   // 实测最新版本 (2026-09-28 live 验证):
-   _.jp = function(a, b) {
+   // 实测最新版本 (2026-10-27 live AST 验证 - live_m=_b.js):
+   _.Pn = function(a, b) {
        return _.y(function*() {
            yield a.H; // 等待 BotGuardService 初始化 Promise
            return a.A
-               ? (yield Vqb(a.A), a.A.snapshot({ Bcc: { content: b } }))
+               ? (yield Fxb(a.A), a.A.snapshot({ BFc: { content: b } }))
                : "";
+       });
+   };
+   _.gD = function(a) {
+       return _.y(function*() {
+           var b = _.Ck(a, _.au, 2).flatMap(c => c.Rg()).map(_.jn);
+           return _.VC(b.join(" "));
        });
    };
    // 历史版本混淆符号参考:
-   _.Dp = function(service, contentHash) {
-       return _.z(function*() {
-           yield service.H;
-           return service.A
-               ? (yield JUa(service.A), service.A.snapshot({ e9b: { content: contentHash } }))
-               : "";
-       });
-   };
+   // 2026-09-28: _.jp = (a, b) => a.A.snapshot({ Bcc: { content: b } })
+   // 更早版本:   _.Dp = (a, b) => a.A.snapshot({ e9b: { content: b } })
    ```
-   > **符号混淆与动态匹配**：Google 构建版本更新时会重置混淆名（如类名 `_.QC`、签名函数 `_.jp`、参数键 `Bcc` 等），因此系统通过源码特征（`.snapshot`、`content`、`yield`）动态定位函数，避免硬编码混淆符号。
+   > **关键事实说明（严格对齐网页源码 AST 分析）**：
+   > 1. `_.Ck(a, _.au, 2)` 仅访问请求 Protobuf 的字段 2（即 `contents` 消息体），**绝不包含**字段 6（`system_instruction`）。
+   > 2. `_.jn` 仅对文本 (tag 2)、内联数据 (tag 3)、文件 (tag 6) 提取字符串，其余非文本 Part（函数调用、执行结果等）**统一返回空字符串 `""`**。
+   > 3. 数组所有元素以单空格 `" "` 进行 `join`，**不作过滤**，随后计算 SHA-256 Hex 摘要。
+   >
+   > **符号混淆与动态匹配**：Google 构建版本更新时会重置混淆名（如类名 `_.QC`/`_.nC`、签名函数 `_.Pn`/`_.jp`、参数键 `BFc`/`Bcc` 等），远程 WAA 签名服务（`aistudio-pg-bridge`）会在握手阶段动态适配对应方法。
    >
    > **生命周期与状态**：
    > - 快照 Token 与单次请求内容及时间戳绑定，不跨请求复用。
    > - 会话凭据与 Nonce 由服务端动态下发，账号切换时重新初始化。
 3. **虚拟机内部处理**：
-   - 采集浏览器指纹（屏幕分辨率、语言列表、时钟精度、WebGL 上下文特征等）；
-   - 使用握手会话秘钥对 `contentHash` 与环境特征进行加密并计算 HMAC 签名；
-   - 生成以 `!` 开头、长度约为 1500~1650 字符的 Base64 快照 Token（例如 `!dXaldhLNAAa1dSU5lXVCmOax...`）。
+   - 执行五阶段 ARX 流密码自解密，采集浏览器 DOM、屏幕、时区、WebIDL 原型链与交互事件特征写入 `ENV_OUT`；
+   - 使用挑战专属 6 字符盐值计算 `Lookup3_IV(salt + "0" + contentHash)[2]`，以 4 字节大端整数写入 `ENV_OUT` 的 `Tag 22`；
+   - 对 `ENV_OUT` 与 `TRACE2` 执行 64-bit CFB 加密，封装进 `MAIN_OUT` 并生成以 `!` 开头的 Base64URL 快照 Token（长约 1500~1650 字符）。
 
 ## 5. 阶段四：Wire 协议组包与浏览器 Fetch/XHR 重放
 
@@ -272,8 +277,8 @@ _.l(requestProto, 5, t);             // 3. 将 Token 注入 Protobuf 字段 5 (W
 | **`6`** | `Field 7` | `tools` | 工具声明列表（Google 搜索、代码执行、Google Maps 等） |
 | **`7`** | `Field 8` | `evergreen_model_uri` | 动态常青模型 URI（如 `"models/gemini-..."`） |
 | **`10`** | `Field 11` | `request_flag` | 请求行为标记（固定值 `1`） |
-| **`11`** | `Field 12` | `cached_content` | 上下文缓存资源名称 |
-| **`13`** | `Field 14` | `location` | 用户位置与时区声明（如 `[[null, null, "Asia/Tokyo"]]`） |
+| **`11`** | `Field 12` | `session_token` | 会话续接令牌（如 `"v1_..."`） |
+| **`13`** | `Field 14` | `request_context` | 请求上下文与时区声明（如 `[[null, null, "Asia/Tokyo"]]`） |
 ### 浏览器内 Fetch/XHR 发送
 
 ```http
@@ -302,10 +307,10 @@ flowchart TD
     Req["GenerateContent 请求<br/>(Header + Body)"] --> Step1
 
     subgraph GatewayValidation ["服务端校验流程"]
-        Step1["1. 解密 Body[4] 快照载荷"]
-        Step2["2. 校验 HMAC(Body[1] Contents 哈希)"]
-        Step3["3. 比对快照 GAIA ID 与 X-Goog-AuthUser 会话"]
-        Step4["4. 校验环境与时钟指纹"]
+        Step1["1. 解密 Body[4] 快照载荷 (Tag 126 / Tag 153)"]
+        Step2["2. 校验 Tag 22: Lookup3(salt + '0' + content_hash)"]
+        Step3["3. 校验 Tag 59 会话 Token 与 X-Goog-AuthUser 一致性"]
+        Step4["4. 校验外层 User-Agent 与 ENV_OUT 环境指纹"]
 
         Step1 -->|解密成功| Step2
         Step2 -->|哈希匹配| Step3
@@ -323,17 +328,32 @@ flowchart TD
 
 当 BotGuard 校验失败（快照缺失、快照过期、内容哈希不一致或身份冲突）时，服务端返回 **HTTP 403**，响应体为 JSON 数组 `[,[7,"The caller does not have permission"]]`（对应 gRPC 状态码 7 `PERMISSION_DENIED`）。
 
-网关针对该报错建立两级自愈机制：
-1. **多账号故障转移（Failover）**：网关自动对触发 403 的故障账号设置 300 秒短时隔离（`auth_cooldown`），优先调度下一个健康账号，避免在受限账号上无效重试。
-2. **单账号在位重建（In-Place Recovery）**：当无备用账号可用时，网关清空请求模板缓存，重载 Cookie 并通过 `ensure_botguard_service(force_refresh=True)` 重新执行页面导航与 WAA 挑战握手，恢复服务可用性。
+> [!NOTE]
+> **上游偶发 403 / 404 说明**：
+> 在上游风控抽查或连接抖动时，即使 Cookie、SAPISIDHASH 与 `!proof` 签名均合法，上游仍可能偶发返回 403 `The caller does not have permission` 或 404 `Ambiguous request for service`。此类响应并非账号封禁，通常通过重放、在位重签或切换账号即可恢复。
 
+网关针对该报错建立两级自愈机制：
+1. **多账号故障转移（Failover）**：网关自动对触发 403 的故障账号增加调度惩罚分（`auth_errors * 200.0`），优先调度下一个健康账号，同时不加硬冷却锁，允许同账号重新请求签名自愈。
+2. **单账号在位重签（In-Place Recovery）**：当首次遭遇 403 或无备用账号可用时，网关自动重新加载账号凭据并请求 `WaaSigner` 生成全新证明令牌进行重试，恢复服务可用性。
+
+### 6.2 外层 HTTP 请求头与签名特征环境一致性约束 (403 权限异常根源)
+
+BotGuard 在前端或签名服务沙箱执行时，会调用 `navigator.userAgent` 提取当前宿主现场特征，并将此特征作为签名载荷的一部分加密到 Proof Token 中。
+
+**不同底层签名方案的特征环境差异**：
+1. **SpiderMonkey 152 原生方案 (`waa-signer`)**：底层基于 SpiderMonkey 152 纯 C++ 引擎与 Firefox 152 宿主环境，Token 内部加密绑定的是 Firefox 152 的 User-Agent 与特征指纹；
+2. **NodeVM 沙箱方案 (`spinsnow` / `aistudio-pg-bridge`)**：底层基于 Node.js VM 模拟环境，Token 内部加密绑定的是特定版本的 Chromium / Chrome User-Agent。
+
+**一致性校验约束**：
+当客户端向上游发送 `GenerateContent` 时，Google 上游会解密 Token 并严格比对外层 HTTP 头的 `User-Agent` 与 Token 内部声明的客户端特征。若外层为 Chrome UA 而 Token 内绑定为 Firefox（或反之），上游将判定为环境篡改并直接返回 **HTTP 403 `The caller does not have permission`**。
+因此网关层实现了**签名服务特征动态绑定与纯手动切换机制**，严格保证外层请求头与签名服务底层环境事实一致。
 ---
 
 ## 7. 生命周期与会话约束
 
 1. **时效性与内容绑定**：快照 Token 内包含时间戳与挑战 Nonce，且与特定请求的内容哈希强绑定。内容修改后需重新计算哈希并生成新快照。
 2. **后台休眠与保活**：当标签页处于后台时，虚拟机可能进入休眠。页面重新切回前台时，`visibilitychange` 事件会触发恢复（`service.A.CE()`）；若已失效则重新执行握手。
-3. **多账号身份隔离**：每个子账号（`u/0`, `u/1`...）对应独立的身份上下文与 Wasm 实例，切换账号需通过 `/u/{auth_user}/` 专属路由切换并加载对应账号上下文。
+3. **多账号身份隔离**：每个子账号（`u/0`, `u/1`...）对应独立的身份上下文与 VM 实例，切换账号需通过 `/u/{auth_user}/` 路由加载对应账号上下文。
 
 ## 8. 核心报文结构参考
 
@@ -347,6 +367,7 @@ Authorization: SAPISIDHASH <TS>_<HASH1> SAPISID1PHASH <TS>_<HASH2> SAPISID3PHASH
 ```text
 HASH = SHA1(timestamp + " " + SAPISID_VALUE + " https://aistudio.google.com")
 ```
+必须严格生成完整的三段（`SAPISIDHASH`、`SAPISID1PHASH` 与 `SAPISID3PHASH`），即使 `__Secure-3PAPISID` 与 `SAPISID` 值相同也必须包含第三段，缺失任意段会导致偶发 403 鉴权失败。
 
 ### 8.2 快照签名 Token 特征
 
@@ -355,4 +376,6 @@ HASH = SHA1(timestamp + " " + SAPISID_VALUE + " https://aistudio.google.com")
 | **前缀** | 固定以感叹号 `!` 开头 |
 | **编码** | URL-Safe Base64 |
 | **长度** | 约 1500 ~ 1650 字符 |
-| **内容** | 包含硬件与环境指纹、内容哈希 HMAC 与会话 Nonce |
+| **内容** | 包含硬件与环境指纹、内容哈希 Lookup3 签名（`Tag 22`）与会话 Nonce |
+
+> 关于 WAA 字节码虚拟机的 32+16 条多态指令集、五阶段 ARX 流密钥派生管线、完整 TLV 标签字典与静态反汇编工具链，详见 [WAA 虚拟机内部架构与签名协议规范 (`docs/WAA_VM_ARCHITECTURE.md`)](./WAA_VM_ARCHITECTURE.md)。

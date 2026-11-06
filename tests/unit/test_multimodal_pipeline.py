@@ -2,20 +2,12 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
-
-import pytest
-
 from aistudio_api.api.schemas import (
     GeminiContent,
     GeminiGenerateContentRequest,
     GeminiPart,
 )
 from aistudio_api.application.chat_service import normalize_gemini_request
-from aistudio_api.infrastructure.browser.cdp_client import CDPPage
-from aistudio_api.infrastructure.gateway.capture import CapturedRequest
-from aistudio_api.infrastructure.gateway.client import AIStudioClient
-from aistudio_api.infrastructure.gateway.session_state import SessionContext
 
 
 def test_multimodal_zero_disk_io_pipeline():
@@ -39,66 +31,6 @@ def test_multimodal_zero_disk_io_pipeline():
     assert part0.inline_data == ("image/png", fake_base64)
     wire_part = part0.to_wire()
     assert wire_part == [None, None, ["image/png", fake_base64]]
-
-
-@pytest.mark.asyncio
-async def test_generate_image_tools_selection():
-    """Verify tool override precedence and use_default_tools handling."""
-    client = AIStudioClient(port=9222)
-    page = MagicMock(spec=CDPPage)
-    page.is_closed.return_value = False
-    client.session.set_ready_context(
-        SessionContext(
-            page=page,
-            snap_key="synthetic-image-test-snapshot",
-            auth_user="0",
-            auth_file=None,
-            base_template={},
-        )
-    )
-    captured_tools = []
-
-    async def mock_capture_request(*args, **kwargs):
-        captured_tools.append(kwargs.get("tools"))
-        return CapturedRequest(
-            url="http://example.com",
-            headers={},
-            body='["models/imagen-3.0-generate-002",[]]',
-        )
-
-    client.capture_request = mock_capture_request  # type: ignore[method-assign]
-    # A syntactically valid completed wire response keeps this tool-selection
-    # fixture independent from the parser's malformed-response rejection.
-    client._replay_service.replay = AsyncMock(return_value=(200, b'[[[[[[[], "model"], 1]], null, [0, 0, 0]]]]'))  # type: ignore[method-assign]
-
-    # Explicit google_search=True
-    await client.generate_image(
-        prompt="draw a cat",
-        model="models/gemini-3.1-flash-image-preview",
-        google_search=True,
-        image_search=False,
-    )
-    assert captured_tools[-1] == [[None, None, None, [None, [[]]]]]
-
-    # use_default_tools=False -> tools must be None
-    await client.generate_image(
-        prompt="draw a cat",
-        model="models/gemini-3.1-flash-image-preview",
-        google_search=False,
-        image_search=False,
-        use_default_tools=False,
-    )
-    assert captured_tools[-1] is None
-
-    # use_default_tools=True -> default tools loaded
-    await client.generate_image(
-        prompt="draw a cat",
-        model="models/gemini-3.1-flash-image-preview",
-        google_search=False,
-        image_search=False,
-        use_default_tools=True,
-    )
-    assert captured_tools[-1] == [[None, None, None, [None, [[], []]]]]
 
 
 def test_chat_service_does_not_guess_thought_for_multi_parts():
@@ -180,9 +112,6 @@ def test_multimodal_function_response_unpacks_inline_data():
     assert part_fr.function_response[2] == "call_12345"
     part_img = content.parts[1]
     assert part_img.inline_data == ("image/webp", fake_base64)
-
-    # 验证 capture_images 获取到了解包的图片
-    assert normalized.capture_images == [("image/webp", fake_base64)]
 
     # 验证 Wire 编码
     wire = content.to_wire()

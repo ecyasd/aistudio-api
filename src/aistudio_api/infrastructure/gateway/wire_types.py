@@ -27,15 +27,17 @@ class ImageOutputType(IntEnum):
 
 @dataclass(frozen=True)
 class AistudioThinkingConfig:
-    level: ThinkingLevel = ThinkingLevel.HIGH
+    level: ThinkingLevel | None = None
     mode: int = 1
+    budget: int | None = None
 
-    def to_wire(self) -> list:
-        return [self.mode, None, None, int(self.level)]
-
-    @classmethod
-    def default(cls) -> AistudioThinkingConfig:
-        return cls()
+    def to_wire(self) -> list[object]:
+        wire = JspbArray([self.mode])
+        if self.budget is not None:
+            wire[1] = int(self.budget)
+        if self.level is not None:
+            wire[3] = int(self.level)
+        return wire.compact()
 
 
 @dataclass(frozen=True)
@@ -68,9 +70,7 @@ class AistudioGenerationConfig:
 
     @stop_sequences.setter
     def stop_sequences(self, value):
-        idx = GenerationConfigIndex.STOP_SEQUENCES
-        self._ensure_len(idx + 1)
-        self.values[idx] = value
+        self._set_slot(GenerationConfigIndex.STOP_SEQUENCES, value)
 
     @property
     def max_tokens(self):
@@ -79,9 +79,7 @@ class AistudioGenerationConfig:
 
     @max_tokens.setter
     def max_tokens(self, value):
-        idx = GenerationConfigIndex.MAX_TOKENS
-        self._ensure_len(idx + 1)
-        self.values[idx] = value
+        self._set_slot(GenerationConfigIndex.MAX_TOKENS, value)
 
     @property
     def temperature(self):
@@ -90,9 +88,7 @@ class AistudioGenerationConfig:
 
     @temperature.setter
     def temperature(self, value):
-        idx = GenerationConfigIndex.TEMPERATURE
-        self._ensure_len(idx + 1)
-        self.values[idx] = value
+        self._set_slot(GenerationConfigIndex.TEMPERATURE, value)
 
     @property
     def top_p(self):
@@ -101,9 +97,7 @@ class AistudioGenerationConfig:
 
     @top_p.setter
     def top_p(self, value):
-        idx = GenerationConfigIndex.TOP_P
-        self._ensure_len(idx + 1)
-        self.values[idx] = value
+        self._set_slot(GenerationConfigIndex.TOP_P, value)
 
     @property
     def top_k(self):
@@ -112,9 +106,7 @@ class AistudioGenerationConfig:
 
     @top_k.setter
     def top_k(self, value):
-        idx = GenerationConfigIndex.TOP_K
-        self._ensure_len(idx + 1)
-        self.values[idx] = value
+        self._set_slot(GenerationConfigIndex.TOP_K, value)
 
     @property
     def response_mime_type(self):
@@ -123,9 +115,7 @@ class AistudioGenerationConfig:
 
     @response_mime_type.setter
     def response_mime_type(self, value):
-        idx = GenerationConfigIndex.RESPONSE_MIME_TYPE
-        self._ensure_len(idx + 1)
-        self.values[idx] = value
+        self._set_slot(GenerationConfigIndex.RESPONSE_MIME_TYPE, value)
 
     @property
     def response_schema(self):
@@ -134,9 +124,7 @@ class AistudioGenerationConfig:
 
     @response_schema.setter
     def response_schema(self, value):
-        idx = GenerationConfigIndex.RESPONSE_SCHEMA
-        self._ensure_len(idx + 1)
-        self.values[idx] = value
+        self._set_slot(GenerationConfigIndex.RESPONSE_SCHEMA, value)
 
     @property
     def presence_penalty(self):
@@ -145,9 +133,7 @@ class AistudioGenerationConfig:
 
     @presence_penalty.setter
     def presence_penalty(self, value):
-        idx = GenerationConfigIndex.PRESENCE_PENALTY
-        self._ensure_len(idx + 1)
-        self.values[idx] = value
+        self._set_slot(GenerationConfigIndex.PRESENCE_PENALTY, value)
 
     @property
     def frequency_penalty(self):
@@ -156,9 +142,7 @@ class AistudioGenerationConfig:
 
     @frequency_penalty.setter
     def frequency_penalty(self, value):
-        idx = GenerationConfigIndex.FREQUENCY_PENALTY
-        self._ensure_len(idx + 1)
-        self.values[idx] = value
+        self._set_slot(GenerationConfigIndex.FREQUENCY_PENALTY, value)
 
     @property
     def response_logprobs(self):
@@ -167,9 +151,7 @@ class AistudioGenerationConfig:
 
     @response_logprobs.setter
     def response_logprobs(self, value):
-        idx = GenerationConfigIndex.RESPONSE_LOGPROBS
-        self._ensure_len(idx + 1)
-        self.values[idx] = value
+        self._set_slot(GenerationConfigIndex.RESPONSE_LOGPROBS, value)
 
     @property
     def logprobs(self):
@@ -178,9 +160,7 @@ class AistudioGenerationConfig:
 
     @logprobs.setter
     def logprobs(self, value):
-        idx = GenerationConfigIndex.LOGPROBS
-        self._ensure_len(idx + 1)
-        self.values[idx] = value
+        self._set_slot(GenerationConfigIndex.LOGPROBS, value)
 
     @property
     def image_output_mode(self):
@@ -189,11 +169,9 @@ class AistudioGenerationConfig:
 
     @image_output_mode.setter
     def image_output_mode(self, value):
-        idx = GenerationConfigIndex.IMAGE_OUTPUT_MODE
-        self._ensure_len(idx + 1)
         if isinstance(value, AistudioImageOutputMode):
             value = value.to_wire()
-        self.values[idx] = value
+        self._set_slot(GenerationConfigIndex.IMAGE_OUTPUT_MODE, value)
 
     @property
     def thinking_config(self):
@@ -202,9 +180,7 @@ class AistudioGenerationConfig:
 
     @thinking_config.setter
     def thinking_config(self, value):
-        idx = GenerationConfigIndex.THINKING_CONFIG
-        self._ensure_len(idx + 1)
-        self.values[idx] = value
+        self._set_slot(GenerationConfigIndex.THINKING_CONFIG, value)
 
     @property
     def media_resolution(self):
@@ -213,11 +189,18 @@ class AistudioGenerationConfig:
 
     @media_resolution.setter
     def media_resolution(self, value):
-        idx = GenerationConfigIndex.MEDIA_RESOLUTION
-        self._ensure_len(idx + 1)
         if isinstance(value, MediaResolution):
             value = int(value)
-        self.values[idx] = value
+        self._set_slot(GenerationConfigIndex.MEDIA_RESOLUTION, value)
+
+    @property
+    def seed(self):
+        idx = GenerationConfigIndex.SEED
+        return self.values[idx] if len(self.values) > idx else None
+
+    @seed.setter
+    def seed(self, value):
+        self._set_slot(GenerationConfigIndex.SEED, value)
 
     @property
     def output_resolution(self):
@@ -226,28 +209,21 @@ class AistudioGenerationConfig:
 
     @output_resolution.setter
     def output_resolution(self, value):
-        idx = GenerationConfigIndex.OUTPUT_RESOLUTION
+        self._set_slot(GenerationConfigIndex.OUTPUT_RESOLUTION, value)
+
+    def _set_slot(self, idx: int, value: object) -> None:
+        if value is None:
+            if len(self.values) > idx:
+                self.values[idx] = None
+                while self.values and self.values[-1] is None:
+                    self.values.pop()
+            return
         self._ensure_len(idx + 1)
         self.values[idx] = value
-
-    def enable_default_thinking(self):
-        if self.thinking_config is None:
-            self.thinking_config = AistudioThinkingConfig.default().to_wire()
-
-    def sanitize_for_plain_text(self):
-        self.response_mime_type = "text/plain"
-        self.response_schema = None
-        self.thinking_config = None
 
     def _ensure_len(self, size: int):
         while len(self.values) < size:
             self.values.append(None)
-
-
-SUPPORTED_GENERATION_CONFIG_FIELDS = frozenset(
-    name for name, descriptor in vars(AistudioGenerationConfig).items()
-    if isinstance(descriptor, property) and descriptor.fset is not None
-)
 
 
 @dataclass
@@ -257,15 +233,13 @@ class AistudioPart:
     file_id: str | None = None
     function_call: tuple[str, object] | tuple[str, object, str] | None = None
     function_response: tuple[str, object] | tuple[str, object, str] | None = None
-    executable_code: tuple[str | int, str] | None = None
-    code_execution_result: tuple[str | int, str] | None = None
+    executable_code: tuple[str, str] | None = None
+    code_execution_result: tuple[str, str] | None = None
     thought_signature: str | None = None
     thought: bool = False
 
     def to_wire(self) -> list[object]:
         wire = JspbArray()
-        # Thought ownership and signatures belong to every Part payload type.
-        # In particular, signed reasoning images must survive client replay.
         if self.thought:
             wire[PartIndex.THOUGHT_ALT_FLAG] = 1
         if self.thought_signature:
@@ -297,31 +271,21 @@ class AistudioPart:
             return wire.compact()
         if self.executable_code:
             lang, code = self.executable_code
-            language_map = {"LANGUAGE_UNSPECIFIED": 0, "PYTHON": 1}
-            if type(lang) is int:
-                lang_code = lang
-            else:
-                key = str(lang).upper()
-                if key not in language_map:
-                    raise ValueError("Unsupported executableCode language")
-                lang_code = language_map[key]
+            lang_code = 1 if str(lang).upper() in ("1", "PYTHON") else 0
             wire[PartIndex.EXECUTABLE_CODE] = [lang_code, code]
             return wire.compact()
         if self.code_execution_result:
             outcome, output = self.code_execution_result
             outcome_map = {
-                "OUTCOME_UNSPECIFIED": 0,
                 "OUTCOME_OK": 1,
                 "OUTCOME_FAILED": 2,
                 "OUTCOME_DEADLINE_EXCEEDED": 3,
             }
-            if type(outcome) is int:
-                outcome_code = outcome
-            else:
-                key = str(outcome).upper()
-                if key not in outcome_map:
-                    raise ValueError("Unsupported codeExecutionResult outcome")
-                outcome_code = outcome_map[key]
+            outcome_code = (
+                outcome_map.get(str(outcome).upper(), 1)
+                if isinstance(outcome, str)
+                else int(outcome)
+            )
             wire[PartIndex.CODE_RESULT] = [outcome_code, output]
             return wire.compact()
         wire[PartIndex.TEXT] = self.text
@@ -373,27 +337,11 @@ class AistudioContent:
     def from_user_prompt(
         cls,
         prompt: str,
-        images: list[str | tuple[str, str]] | None = None,
+        images: list[tuple[str, str]] | None = None,
     ) -> AistudioContent:
-        parts: list[AistudioPart] = []
-        for item in images or []:
-            if isinstance(item, tuple) and len(item) == 2:
-                parts.append(AistudioPart(inline_data=item))
-            elif isinstance(item, str):
-                import base64
-                import mimetypes
-                from pathlib import Path
-
-                mime = mimetypes.guess_type(item)[0] or "image/jpeg"
-                data = Path(item).read_bytes()
-                parts.append(
-                    AistudioPart(
-                        inline_data=(
-                            mime,
-                            base64.b64encode(data).decode("ascii"),
-                        )
-                    )
-                )
+        parts: list[AistudioPart] = [
+            AistudioPart(inline_data=item) for item in (images or [])
+        ]
         parts.append(AistudioPart(text=prompt))
         return cls(role="user", parts=parts)
 
@@ -408,8 +356,7 @@ class AistudioRequest:
     system_instruction: AistudioContent | None
     tools: list[list] | None
     evergreen_model_uri: str | None = None
-    tool_config: list | None = None
     request_flag: int | None = None
-    cached_content: str | None = None
+    session_token: str | None = None
     location: list | None = None
     raw_body: list = field(default_factory=list)

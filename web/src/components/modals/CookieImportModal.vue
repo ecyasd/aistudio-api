@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { ref, watch, onUnmounted } from 'vue'
+import { ref } from 'vue'
 import { useAccountsStore } from '@/stores/accounts.ts'
 import Modal from '@/components/ui/Modal.vue'
 import Button from '@/components/ui/Button.vue'
-import { Sparkles, FileText, Upload, CheckCircle2 } from 'lucide-vue-next'
-const props = defineProps<{
+import { Sparkles, FileText, Upload, FolderOpen, CheckCircle2 } from 'lucide-vue-next'
+defineProps<{
   modelValue: boolean
 }>()
 
@@ -27,94 +27,60 @@ const fileInputRef = ref<HTMLInputElement | null>(null)
 const selectedFileName = ref('')
 const selectedFileSize = ref('')
 const selectedFileContent = ref('')
+const localFilePath = ref('')
 const detectedCount = ref<number | null>(null)
-const readingFile = ref(false)
-const fileReadError = ref('')
-let activeReader: FileReader | null = null
-let fileReadSequence = 0
-let modalRevision = 0
-
-function cancelFileRead() {
-  fileReadSequence++
-  const reader = activeReader
-  activeReader = null
-  if (reader?.readyState === 1) reader.abort()
-  readingFile.value = false
-}
-
-watch(() => props.modelValue, (open) => {
-  modalRevision++
-  if (!open) cancelFileRead()
-}, { flush: 'sync' })
-
-onUnmounted(() => {
-  modalRevision++
-  cancelFileRead()
-})
 
 function onFileChange(event: Event) {
   const target = event.target as HTMLInputElement
   const file = target.files?.[0]
   if (!file) return
 
-  cancelFileRead()
-  const sequence = fileReadSequence
   selectedFileName.value = file.name
   selectedFileSize.value = `${(file.size / 1024).toFixed(1)} KB`
-  selectedFileContent.value = ''
-  detectedCount.value = null
-  fileReadError.value = ''
-  readingFile.value = true
 
   const reader = new FileReader()
-  activeReader = reader
   reader.onload = (e) => {
-    if (activeReader !== reader || sequence !== fileReadSequence) return
-    activeReader = null
-    readingFile.value = false
     const text = (e.target?.result as string) || ''
     selectedFileContent.value = text
     try {
       const parsed = JSON.parse(text)
-      const list = Array.isArray(parsed) ? parsed : (parsed.accounts || parsed.profiles || [])
-      detectedCount.value = Array.isArray(list) ? list.length : 0
+      if (Array.isArray(parsed)) {
+        detectedCount.value = parsed.length
+      } else if (Array.isArray(parsed.cookies)) {
+        detectedCount.value = 1
+      } else {
+        const list = parsed.accounts || parsed.profiles || []
+        detectedCount.value = Array.isArray(list) ? list.length : 1
+      }
     } catch {
       detectedCount.value = null
     }
-  }
-  reader.onerror = () => {
-    if (activeReader !== reader || sequence !== fileReadSequence) return
-    clearSelectedFile()
-    fileReadError.value = '无法读取所选文件，请重新选择。'
   }
   reader.readAsText(file)
 }
 
 function clearSelectedFile() {
-  cancelFileRead()
   selectedFileName.value = ''
   selectedFileSize.value = ''
   selectedFileContent.value = ''
   detectedCount.value = null
-  fileReadError.value = ''
   if (fileInputRef.value) {
     fileInputRef.value.value = ''
   }
 }
 async function handleSubmit() {
-  if (!props.modelValue || accountsStore.importing || readingFile.value) return
-  const revision = modalRevision
   if (activeTab.value === 'file') {
     const content = selectedFileContent.value.trim()
-    const sequence = fileReadSequence
-    if (!content) return
+    const path = localFilePath.value.trim()
+    if (!content && !path) return
 
     const ok = await accountsStore.importBundle({
-      content,
+      content: content || undefined,
+      file_path: path || undefined,
     })
-    if (ok && activeTab.value === 'file' && modalRevision === revision && fileReadSequence === sequence &&
-        selectedFileContent.value.trim() === content) {
+    if (ok) {
       clearSelectedFile()
+      localFilePath.value = ''
       emit('update:modelValue', false)
     }
     return
@@ -122,23 +88,29 @@ async function handleSubmit() {
 
   const raw = cookieInput.value.trim()
   if (!raw) return
-  const prefix = namePrefix.value.trim()
-  const email = singleEmail.value.trim()
-  const probe = autoProbe.value
 
-  const ok = probe
+  if (raw.startsWith('{') && (raw.includes('"accounts"') || raw.includes('"bundle"'))) {
+    const ok = await accountsStore.importBundle({ content: raw })
+    if (ok) {
+      cookieInput.value = ''
+      namePrefix.value = ''
+      singleEmail.value = ''
+      emit('update:modelValue', false)
+    }
+    return
+  }
+  const ok = autoProbe.value
     ? await accountsStore.probeAndImport({
         cookies: raw,
-        name_prefix: prefix || undefined,
+        name_prefix: namePrefix.value.trim() || undefined,
       })
     : await accountsStore.importCookies({
         cookies: raw,
-        name: prefix || undefined,
-        email: email || undefined,
+        name: namePrefix.value.trim() || undefined,
+        email: singleEmail.value.trim() || undefined,
       })
 
-  if (ok && activeTab.value === 'text' && modalRevision === revision && cookieInput.value.trim() === raw &&
-      namePrefix.value.trim() === prefix && singleEmail.value.trim() === email && autoProbe.value === probe) {
+  if (ok) {
     cookieInput.value = ''
     namePrefix.value = ''
     singleEmail.value = ''
@@ -206,7 +178,7 @@ async function handleSubmit() {
                 点击选择凭据包文件 (.json)
               </p>
               <p class="text-[11px] text-gray-400 mt-0.5">
-                支持 AIStudio 提取器导出的 aistudio_accounts.json
+                支持批量账号凭据包 (.json) 或 Cookie JSON 数组文件
               </p>
             </div>
           </div>
@@ -242,19 +214,38 @@ async function handleSubmit() {
           </div>
         </div>
 
-        <p
-          v-if="readingFile"
-          class="text-xs text-gray-500"
-        >
-          正在读取所选文件…
-        </p>
-        <p
-          v-if="fileReadError"
-          class="text-xs text-rose-600"
-          role="alert"
-        >
-          {{ fileReadError }}
-        </p>
+        <!-- Alternative: Local File Path on Server -->
+        <div class="space-y-1.5">
+          <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wider flex items-center justify-between">
+            <span class="flex items-center gap-1">
+              <FolderOpen class="w-3.5 h-3.5 text-gray-500" />
+              <span>直接填入本地文件绝对路径</span>
+            </span>
+          </label>
+          <input
+            v-model="localFilePath"
+            type="text"
+            placeholder="/sdcard/Download/aistudio_accounts.json"
+            class="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs font-mono outline-none focus:bg-white focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 transition-all"
+          >
+          <div class="flex items-center gap-1.5 flex-wrap pt-0.5 text-[11px] font-mono">
+            <span class="text-gray-400 font-sans">快捷路径:</span>
+            <button
+              type="button"
+              class="px-2 py-0.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-md transition-colors cursor-pointer"
+              @click="localFilePath = '/sdcard/Download/aistudio_accounts.json'"
+            >
+              /sdcard/Download/aistudio_accounts.json
+            </button>
+            <button
+              type="button"
+              class="px-2 py-0.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-md transition-colors cursor-pointer"
+              @click="localFilePath = 'data/aistudio_accounts.json'"
+            >
+              data/aistudio_accounts.json
+            </button>
+          </div>
+        </div>
       </div>
 
       <!-- Mode: Text Paste -->
@@ -338,7 +329,7 @@ async function handleSubmit() {
         variant="primary"
         size="sm"
         :loading="accountsStore.importing"
-        :disabled="readingFile || (activeTab === 'file' ? !selectedFileContent.trim() : !cookieInput.trim())"
+        :disabled="activeTab === 'file' ? (!selectedFileContent && !localFilePath.trim()) : !cookieInput.trim()"
         @click="handleSubmit"
       >
         <template #default>

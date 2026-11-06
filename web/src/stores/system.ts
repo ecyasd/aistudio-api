@@ -11,9 +11,6 @@ export const useSystemStore = defineStore('system', () => {
   const resettingCooldown = ref(false)
   const switchingNext = ref(false)
   const health = ref<'checking' | 'online' | 'offline'>('checking')
-  let statsRequest = 0
-  let rotationRequest = 0
-  let healthRequest = 0
 
   const totalRequests = computed(() => stats.value?.totals?.requests ?? 0)
   const totalRateLimited = computed(() => stats.value?.totals?.rate_limited ?? 0)
@@ -23,38 +20,29 @@ export const useSystemStore = defineStore('system', () => {
   const promptTokens = computed(() => stats.value?.totals?.prompt_tokens ?? 0)
   const completionTokens = computed(() => stats.value?.totals?.completion_tokens ?? 0)
   async function fetchStats() {
-    const request = ++statsRequest
     loading.value = true
     try {
-      const result = await systemApi.getStats()
-      if (request === statsRequest) stats.value = result
-      return true
+      stats.value = await systemApi.getStats()
     } catch {
-      return false
+      // ignore
     } finally {
-      if (request === statsRequest) loading.value = false
+      loading.value = false
     }
   }
 
   async function fetchRotation() {
-    const request = ++rotationRequest
     try {
-      const result = await systemApi.getRotation()
-      if (request === rotationRequest) rotation.value = result
-      return true
+      rotation.value = await systemApi.getRotation()
     } catch {
-      return false
+      // ignore
     }
   }
   async function checkHealth() {
-    const request = ++healthRequest
     try {
       await systemApi.health()
-      if (request === healthRequest) health.value = 'online'
-      return true
+      health.value = 'online'
     } catch {
-      if (request === healthRequest) health.value = 'offline'
-      return false
+      health.value = 'offline'
     }
   }
 

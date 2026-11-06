@@ -1,66 +1,32 @@
-"""Streaming replay workflow for chat completions."""
+"""Streaming workflow for chat completions."""
 
 from __future__ import annotations
 
 import codecs
 import json
 from collections.abc import AsyncGenerator
-from contextlib import aclosing
-from pathlib import Path
 
-from aistudio_api.config import settings
 from aistudio_api.domain.errors import (
-    IncompleteResponseError,
     RequestError,
+    TransportError,
     classify_error,
 )
-from aistudio_api.infrastructure.gateway.capture import CapturedRequest
-from aistudio_api.infrastructure.gateway.session import BrowserSession
+from aistudio_api.infrastructure.gateway.client import PreparedRequest
+from aistudio_api.infrastructure.gateway.session import GatewaySession
 from aistudio_api.infrastructure.gateway.stream_parser import (
     IncrementalJSONStreamParser,
 )
-from aistudio_api.infrastructure.gateway.terminal_body_replay import (
-    TerminalBodyReplayGuard,
-)
 from aistudio_api.infrastructure.gateway.wire_parser import (
-    is_response_chunk,
+    WIRE_RESPONSE_ID_INDEX,
     parse_chunk_usage,
     parse_response_chunk,
 )
+from aistudio_api.infrastructure.gateway.wire_spec import (
+    WIRE_FINISH_REASON_CONTINUING,
+)
 from aistudio_api.infrastructure.utils.logger import get_logger
-from aistudio_api.infrastructure.utils.response_diagnostics import note_timing
 
 logger = get_logger("streaming")
-MAX_ERROR_BODY_CHARS = 8192
-MAX_STREAM_DUMP_CHARS = 16 * 1024 * 1024
-
-
-def _dump_stream_exchange(
-    *,
-    model: str,
-    url: str,
-    modified_body: str,
-    status_code: int,
-    raw_response: str,
-) -> None:
-    if not settings.dump_raw_response:
-        return
-
-    out_dir = Path(settings.dump_raw_response_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    safe_model = model.replace("/", "_")
-    timestamp = __import__("time").strftime("%Y%m%d_%H%M%S")
-    payload = {
-        "kind": "stream_generate_content",
-        "model": model,
-        "url": url,
-        "status_code": status_code,
-        "modified_body": json.loads(modified_body),
-        "raw_response": raw_response,
-    }
-    path = out_dir / f"aistudio_stream_generate_content_{safe_model}_{timestamp}.json"
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
-    logger.info("已落盘流式原始请求/响应: %s", path)
 
 
 def _summarize_error_body(raw_response: str, limit: int = 500) -> str:
@@ -80,126 +46,134 @@ def _summarize_error_body(raw_response: str, limit: int = 500) -> str:
 
 
 class StreamingGateway:
-    def __init__(self, session: BrowserSession | None = None):
+    def __init__(self, session: GatewaySession | None = None):
         self._session = session
 
     async def stream_chat(
         self,
         *,
-        captured: CapturedRequest,
+        request: PreparedRequest,
         model: str,
     ) -> AsyncGenerator[tuple[str, object | None], None]:
-        if not captured:
-            raise ValueError("captured request is required")
+        if not request:
+            raise ValueError("prepared request is required")
         if self._session is None:
-            raise RuntimeError("browser session is required for streaming xhr replay")
-        modified_body = captured.body
-
+            raise RuntimeError("gateway session is required for streaming")
+        request_body = request.body
+        logger.debug("开始流式处理: model=%s, 请求体长度=%d", model, len(request_body))
         parser = IncrementalJSONStreamParser()
-        replay_guard = TerminalBodyReplayGuard()
+        utf8_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         latest_usage: dict[str, object] | None = None
         latest_finish_reason: int | None = None
         latest_response_id: str | None = None
         raw_parts: list[str] = []
-        retained_chars = 0
-        retain_limit = (
-            MAX_STREAM_DUMP_CHARS
-            if settings.dump_raw_response
-            else MAX_ERROR_BODY_CHARS
-        )
-        decoder = codecs.getincrementaldecoder("utf-8")()
+        has_received_chunks = False
         status_code = 0
-        async with aclosing(
-            self._session.send_streaming_request(
-                body=modified_body,
-                timeout_ms=settings.timeout_stream * 1000,
-                url=captured.url if captured else None,
-                headers=captured.headers if captured else None,
-            )
-        ) as events:
-            async for event_type, payload in events:
-                if event_type == "status" and payload and not status_code:
-                    note_timing("upstream_headers")
-                    status_code = int(str(payload))
-                elif event_type == "chunk" and payload:
-                    note_timing("upstream_first_byte")
-                    if isinstance(payload, bytes):
-                        try:
-                            text_payload = decoder.decode(payload)
-                        except UnicodeDecodeError as exc:
-                            raise RequestError(
-                                502, "Upstream response contains invalid UTF-8"
-                            ) from exc
-                    else:
-                        text_payload = str(payload)
-                    if (
-                        settings.dump_raw_response or status_code != 200
-                    ) and retained_chars < retain_limit:
-                        retained = text_payload[: retain_limit - retained_chars]
-                        raw_parts.append(retained)
-                        retained_chars += len(retained)
-                    if status_code != 200:
-                        continue
-                    for parsed_chunk in parser.feed(text_payload):
-                        # JSON framing alone cannot validate a generation
-                        # chunk. Do not let a prior finish marker hide a malformed
-                        # sibling that non-streaming parsing would reject.
-                        if not is_response_chunk(parsed_chunk):
-                            raise RequestError(
-                                502, "Upstream response contains a malformed generation chunk"
-                            )
-                        usage = parse_chunk_usage(parsed_chunk)
-                        if usage:
-                            latest_usage = usage
-                        if (
-                            isinstance(parsed_chunk, list)
-                            and len(parsed_chunk) > 7
-                            and isinstance(parsed_chunk[7], str)
-                            and parsed_chunk[7]
-                        ):
-                            latest_response_id = parsed_chunk[7]
-                            yield ("response_id", latest_response_id)
-                        candidate = replay_guard.accept(parse_response_chunk(parsed_chunk))
-                        if (
-                            candidate.continuation_unsafe
-                            or candidate.code_output
-                            or candidate.sources
-                        ):
-                            # Internal eligibility marker, consumed by the
-                            # continuation wrapper and never rendered as SSE.
-                            yield ("continuation_unsafe", True)
-                        if (
-                            candidate.finish_reason is not None
-                            and candidate.finish_reason > 0
-                        ):
-                            latest_finish_reason = candidate.finish_reason
-                        if candidate.parts:
-                            yield ("parts", candidate.parts)
-        raw_response = "".join(raw_parts)
-        _dump_stream_exchange(
-            model=model,
-            url=captured.url,
-            modified_body=modified_body,
-            status_code=status_code,
-            raw_response=raw_response,
+
+        def emit_parsed_chunk(
+            parsed_chunk: list[object],
+        ) -> list[tuple[str, object | None]]:
+            nonlocal latest_usage, latest_finish_reason, latest_response_id
+            events: list[tuple[str, object | None]] = []
+            usage = parse_chunk_usage(parsed_chunk)
+            if usage:
+                latest_usage = usage
+            if (
+                isinstance(parsed_chunk, list)
+                and len(parsed_chunk) > WIRE_RESPONSE_ID_INDEX
+                and isinstance(parsed_chunk[WIRE_RESPONSE_ID_INDEX], str)
+                and parsed_chunk[WIRE_RESPONSE_ID_INDEX]
+            ):
+                latest_response_id = str(parsed_chunk[WIRE_RESPONSE_ID_INDEX])
+                events.append(("response_id", latest_response_id))
+            candidate = parse_response_chunk(parsed_chunk)
+            if candidate.finish_reason is not None and candidate.finish_reason not in (
+                0,
+                WIRE_FINISH_REASON_CONTINUING,
+            ):
+                latest_finish_reason = candidate.finish_reason
+            if candidate.thinking:
+                events.append(("thinking", candidate.thinking))
+            if candidate.reasoning_images:
+                events.append(("reasoning_images", candidate.reasoning_images))
+            if candidate.function_calls:
+                events.append(("tool_calls", candidate.function_calls))
+            if candidate.images:
+                events.append(("images", candidate.images))
+            if candidate.text:
+                events.append(("body", candidate.text))
+            if candidate.thought_signature:
+                events.append(("thought_signature", candidate.thought_signature))
+            return events
+
+        async for event_type, payload in self._session.send_streaming_request(
+            body=request_body,
+            url=request.url,
+            headers=request.headers,
+            ctx=request.ctx,
+        ):
+            if event_type == "error":
+                err_msg = (
+                    str(payload).strip()
+                    if payload
+                    else "unknown streaming transport error"
+                )
+                raise TransportError(f"Streaming request failed: {err_msg}")
+            if event_type == "status" and payload and not status_code:
+                status_code = int(str(payload))
+            elif event_type == "chunk" and payload:
+                has_received_chunks = True
+                if isinstance(payload, bytes):
+                    text_payload = utf8_decoder.decode(payload, final=False)
+                else:
+                    text_payload = str(payload)
+                if not text_payload:
+                    continue
+                if status_code != 200:
+                    raw_parts.append(text_payload)
+                for parsed_chunk in parser.feed(text_payload):
+                    for event in emit_parsed_chunk(parsed_chunk):
+                        yield event
+
+        trailing_text = utf8_decoder.decode(b"", final=True)
+        if trailing_text:
+            if status_code != 200:
+                raw_parts.append(trailing_text)
+            for parsed_chunk in parser.feed(trailing_text):
+                for event in emit_parsed_chunk(parsed_chunk):
+                    yield event
+
+        for parsed_chunk in parser.finish():
+            for event in emit_parsed_chunk(parsed_chunk):
+                yield event
+        logger.debug(
+            "流式数据流接收结束: model=%s, 分块到达=%s", model, has_received_chunks
         )
+        raw_response = "".join(raw_parts)
+        if status_code == 0:
+            raise TransportError(
+                "stream ended before HTTP response status arrived (connection failed)"
+            )
         if status_code != 200:
             detail = _summarize_error_body(raw_response)
-            if status_code in (401, 403, 429):
+            if (
+                status_code in (401, 403, 429)
+                or "[,[" in raw_response
+                or "[null,[" in raw_response
+                or raw_response.lstrip().startswith("[,")
+            ):
                 raise classify_error(status_code, raw_response)
             if detail:
                 raise RequestError(status_code, detail)
             raise RequestError(status_code, "")
-
-        try:
-            decoder.decode(b"", final=True)
-        except UnicodeDecodeError as exc:
-            raise RequestError(502, "Upstream response contains invalid UTF-8") from exc
-        # EOF validates the outer JSON envelope; a finish marker alone cannot
-        # turn a truncated document or a failed transport into success.
-        list(parser.finish())
+        if not has_received_chunks:
+            raise TransportError(
+                "stream ended before any data arrived (connection truncated)"
+            )
         if latest_finish_reason is None:
-            raise IncompleteResponseError
+            raise TransportError(
+                "Upstream stream ended without a terminal finish reason"
+            )
         yield ("finish_reason", latest_finish_reason)
         yield ("usage", latest_usage)
         yield ("done", None)

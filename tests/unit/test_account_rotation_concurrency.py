@@ -5,12 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import UTC, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from aistudio_api.application import account_rotator as rotator_module
 from aistudio_api.application.account_orchestrator import (
     try_switch_account,
 )
@@ -20,90 +18,67 @@ from aistudio_api.application.account_rotator import (
     get_seconds_until_pacific_midnight,
 )
 from aistudio_api.infrastructure.account.account_store import AccountMeta, AccountStore
-from aistudio_api.infrastructure.gateway.capture import (
-    CapturedRequest,
-    RequestCaptureService,
+from aistudio_api.infrastructure.gateway.client import (
+    AIStudioClient,
+    PreparedRequest,
 )
 from aistudio_api.infrastructure.gateway.session import (
-    DEFAULT_BOOTSTRAP_TEMPLATE,
-    BrowserSession,
+    GENERATE_CONTENT_URL,
+    GatewaySession,
+    SessionContext,
 )
-from aistudio_api.infrastructure.gateway.session_state import SessionContext
 
 
 @pytest.mark.asyncio
-async def test_capture_service_concurrency_and_caching():
-    """并发请求抓取模板时，模板捕获只执行 1 次，快照签名每次实时生成（不复用缓存）。"""
-    mock_session = MagicMock(spec=BrowserSession)
-    mock_session.generate_snapshot = AsyncMock(return_value="mock_snap")
+async def test_prepare_request_concurrency():
+    """并发构建请求时，每次请求均实时生成全新的 WAA 快照签名。"""
+    mock_session = MagicMock(spec=GatewaySession)
+    mock_session.ensure_ready = AsyncMock(return_value=SessionContext(auth_user="0"))
+    mock_session.generate_snapshot = AsyncMock(return_value="!mock_snap")
 
-    call_count = 0
+    client = AIStudioClient()
+    client._session = mock_session
 
-    async def fake_capture_template(model: str):
-        nonlocal call_count
-        call_count += 1
-        await asyncio.sleep(0.001)
-        return {
-            "url": "https://example.com/generate",
-            "headers": {"content-type": "application/json"},
-            "body": '["models/gemini-2.5-flash",[[[[null,"old"]],"user"]],null,[null,null,null,128,0.5,0.8,16],"orig_snap"]',
-        }
-
-    mock_session.capture_template = AsyncMock(side_effect=fake_capture_template)
-    service = RequestCaptureService(session=mock_session)
-
-    # 5 个并发请求同时请求同一个 model
     tasks = [
-        service.capture(prompt=f"hi {i}", model="gemini-2.5-flash") for i in range(5)
+        client.prepare_request(prompt=f"hi {i}", model="gemini-2.5-flash")
+        for i in range(5)
     ]
     results = await asyncio.gather(*tasks)
 
-    # capture_template 应当只被执行 1 次（模板复用）
-    assert call_count == 1
     assert len(results) == 5
-    # 快照签名是每次实时生成的，共调用 5 次
     assert mock_session.generate_snapshot.call_count == 5
     for res in results:
-        assert isinstance(res, CapturedRequest)
-        assert res.url == "https://example.com/generate"
+        assert isinstance(res, PreparedRequest)
+        assert res.url == GENERATE_CONTENT_URL
 
-    # 再次请求，模板直接命中，快照签名生成第 6 次
-    res6 = await service.capture(prompt="hi again", model="gemini-2.5-flash")
-    assert call_count == 1
+    res6 = await client.prepare_request(prompt="hi again", model="gemini-2.5-flash")
     assert mock_session.generate_snapshot.call_count == 6
     assert res6 is not None
 
 
 @pytest.mark.asyncio
-async def test_capture_service_ephemeral_signature_identical_prompts():
+async def test_prepare_request_ephemeral_signature_identical_prompts():
     """相同 Prompt 并发请求时，每次都生成全新快照签名，绝不复用。"""
-    mock_session = MagicMock(spec=BrowserSession)
+    mock_session = MagicMock(spec=GatewaySession)
+    mock_session.ensure_ready = AsyncMock(return_value=SessionContext(auth_user="0"))
     snap_counter = 0
 
-    async def fake_snapshot(contents):
+    async def fake_snapshot(contents, *args, **kwargs):
         nonlocal snap_counter
         snap_counter += 1
         return f"!snap_token_{snap_counter}"
 
     mock_session.generate_snapshot = AsyncMock(side_effect=fake_snapshot)
-    mock_session.capture_template = AsyncMock(
-        return_value={
-            "url": "https://example.com/generate",
-            "headers": {"content-type": "application/json"},
-            "body": '["models/gemini-2.5-flash",[[[[null,"old"]],"user"]],null,[null,null,null,128,0.5,0.8,16],"orig"]',
-        }
-    )
-    service = RequestCaptureService(session=mock_session)
+    client = AIStudioClient()
+    client._session = mock_session
 
-    # 3 个完全相同的并发 Prompt
     tasks = [
-        service.capture(prompt="same question", model="gemini-2.5-flash")
+        client.prepare_request(prompt="same question", model="gemini-2.5-flash")
         for _ in range(3)
     ]
     results = await asyncio.gather(*tasks)
 
     assert len(results) == 3
-    # 签名各不相同，杜绝 403 重放
     snapshots = [r.snapshot for r in results if r]
     assert snapshots == ["!snap_token_1", "!snap_token_2", "!snap_token_3"]
     assert len(set(snapshots)) == 3
@@ -124,8 +99,7 @@ async def test_account_stats_per_model_cooldown():
     assert stats.get_cooldown_remaining("gemini-2.5-pro") > 0
     assert stats.get_cooldown_remaining("gemini-2.5-flash") == 0
 
-    # 冷却到期后的成功请求清理遗留标记；在途成功不能提前清除新冷却。
-    stats.model_cooldowns["gemini-2.5-pro"] = time.time() - 1
+    # 成功请求清除偶发冷却
     stats.record_success(model="gemini-2.5-pro")
     assert stats.is_available("gemini-2.5-pro")
 
@@ -134,23 +108,17 @@ async def test_account_stats_per_model_cooldown():
 async def test_account_stats_pacific_midnight_reset():
     """测试美西跨天日限额自动恢复。"""
     stats = AccountStats(account_id="acc_1")
-    stats.model_cooldowns["gemini-2.5-pro"] = time.time() + 3600
-    stats.model_rate_limited_dates["gemini-2.5-pro"] = "2020-01-01"  # 过去的日期
+    m_stats = stats.get_model_daily("gemini-2.5-pro")
+    m_stats.cooldown_until = time.time() + 3600
+    stats.daily_date_la = "2020-01-01"  # 过去的日期
 
     assert stats.is_available("gemini-2.5-pro")
-    assert "gemini-2.5-pro" not in stats.model_rate_limited_dates
+    assert stats.daily_date_la != "2020-01-01"
 
 
 @pytest.mark.asyncio
-async def test_account_stats_clear_cooldown_resets_counter(monkeypatch):
+async def test_account_stats_clear_cooldown_resets_counter():
     """测试手动清除冷却会重置 429 次数计数器，不会在下一次 429 时直接秒锁至午夜。"""
-    # LA noon leaves room for the full daytime 300-second backoff.
-    instant = datetime(2026, 10, 20, 19, tzinfo=UTC)
-    clock = MagicMock(wraps=datetime)
-    clock.now.side_effect = lambda tz=None: instant.astimezone(tz)
-    monkeypatch.setattr(rotator_module, "ZoneInfo", lambda _: timezone(timedelta(hours=-7)))
-    monkeypatch.setattr(rotator_module, "datetime", clock)
-    monkeypatch.setattr(rotator_module.time, "time", instant.timestamp)
     stats = AccountStats(account_id="acc_1")
     # 连续 3 次 429 触发当日锁定
     stats.record_rate_limited(model="gemini-2.5-pro")
@@ -162,7 +130,8 @@ async def test_account_stats_clear_cooldown_resets_counter(monkeypatch):
     # 手动清除冷却
     stats.clear_cooldown(model="gemini-2.5-pro")
     assert stats.is_available("gemini-2.5-pro")
-    assert "gemini-2.5-pro" not in stats.model_rate_limited
+    m_stats = stats.get_model_daily("gemini-2.5-pro")
+    assert m_stats.rate_limited == 0
 
     # 下一次遇到 429 应重新享有 60s 临时冷却，而不是直接锁到午夜
     stats.record_rate_limited(model="gemini-2.5-pro")
@@ -249,7 +218,7 @@ async def test_rotator_auth_error_failover():
     assert next_acc is not None
     assert next_acc.id == "acc_2"
 
-    # 新进请求（未指定 failed_account_id）也应该自动规避仍在 auth_cooldown 的 acc_1，直接选择 acc_2
+    # 新进请求（未指定 failed_account_id）也因 acc_1 具有 auth_errors 惩罚分 (+200) 而自动优先选择健康的 acc_2
     new_req_acc = await rotator.get_next_account(
         model="gemini-3.8-flash",
         current_account_id=None,
@@ -261,12 +230,12 @@ async def test_rotator_auth_error_failover():
 @pytest.mark.asyncio
 async def test_try_switch_account_avalanche_protection():
     """测试并发多个 429 时，_switch_lock 防止级联切号。"""
-    from aistudio_api.application.runtime import runtime_state
+    from aistudio_api.api.state import runtime_state
 
     mock_rotator = MagicMock(spec=AccountRotator)
     mock_acc_service = MagicMock()
     mock_client = MagicMock()
-    mock_client._session = MagicMock()
+    mock_client.session = MagicMock()
 
     acc1 = AccountMeta(
         id="acc_1", name="Acc 1", email="acc1@test.com", created_at="2026-01-01"
@@ -320,65 +289,9 @@ def test_get_seconds_until_pacific_midnight():
 
 
 @pytest.mark.asyncio
-async def test_goto_aistudio_net_err_aborted_tolerance():
-    """当 page.goto 遭遇 net::ERR_ABORTED 但已在 aistudio 时，视为有效抵达并容错。"""
-    from aistudio_api.infrastructure.browser.cdp_client import CDPPage
-    from aistudio_api.infrastructure.gateway.session_auth import navigate_to_aistudio
-
-    page = MagicMock(spec=CDPPage)
-    page.url = "https://aistudio.google.com/prompts/new_chat"
-    page.goto = AsyncMock(
-        side_effect=RuntimeError("Navigation failed: net::ERR_ABORTED")
-    )
-    page.evaluate = AsyncMock(
-        side_effect=lambda expr, *a, **kw: (
-            "https://aistudio.google.com/prompts/new_chat"
-            if "location.href" in expr
-            else (True if "default_MakerSuite" in expr else None)
-        )
-    )
-    page.wait_for_timeout = AsyncMock()
-
-    mock_verify = AsyncMock()
-    mock_save = AsyncMock()
-    await navigate_to_aistudio(
-        page,
-        auth_user="0",
-        auth_file=None,
-        verify_identity_cb=mock_verify,
-        save_cookies_cb=mock_save,
-    )
-    assert mock_verify.called
-
-
-@pytest.mark.asyncio
-async def test_ensure_botguard_available_regions_fast_fail():
-    """检测到 available-regions 时立刻抛出 RuntimeError，无需等待 20s 超时。"""
-    from aistudio_api.infrastructure.browser.cdp_client import CDPPage
-
-    page = MagicMock(spec=CDPPage)
-    page.url = "https://aistudio.google.com/available-regions"
-    page.is_closed = MagicMock(return_value=False)
-    page.evaluate = AsyncMock(return_value=False)
-
-    session = BrowserSession(port=9222)
-    session.set_ready_context(
-        SessionContext(
-            page=page,
-            snap_key="snap_key",
-            auth_user="0",
-            auth_file=None,
-            base_template=dict(DEFAULT_BOOTSTRAP_TEMPLATE),
-        )
-    )
-    with pytest.raises(RuntimeError, match="地区限制"):
-        await session.ensure_botguard_service()
-
-
-@pytest.mark.asyncio
 async def test_runtime_state_record_model_stats():
     """测试 RuntimeState.record 正确更新 stats，不抛出 TypeError 'Field' object is not subscriptable。"""
-    from aistudio_api.application.runtime import RuntimeState
+    from aistudio_api.api.state import RuntimeState
 
     state = RuntimeState()
     state.record("models/gemini-3.8-flash", "errors")
@@ -399,93 +312,23 @@ async def test_runtime_state_record_model_stats():
 
 
 @pytest.mark.asyncio
-async def test_capture_model_preservation_when_template_differs():
-    """测试当 Hook 拦截模板为 3.7-flash 时，请求 3.8-flash 不会被模板模型覆盖。"""
-    mock_session = MagicMock(spec=BrowserSession)
+async def test_prepare_request_model_preservation():
+    """测试构建请求时模型名称准确写入顶层 wire 数组。"""
+    mock_session = MagicMock(spec=GatewaySession)
+    mock_session.ensure_ready = AsyncMock(return_value=SessionContext(auth_user="0"))
     mock_session.generate_snapshot = AsyncMock(return_value="!mock_snap")
-    mock_session.capture_template = AsyncMock(
-        return_value={
-            "url": "https://example.com/generate",
-            "headers": {"content-type": "application/json"},
-            "body": '["models/gemini-3.7-flash",[[[[null,"template prompt"]],"user"]],null,[null,null,null,128,0.5,0.8,16],"old_snap"]',
-        }
-    )
-    service = RequestCaptureService(session=mock_session)
+    client = AIStudioClient()
+    client._session = mock_session
 
-    captured = await service.capture(
+    prepared = await client.prepare_request(
         prompt="Hello",
         model="models/gemini-3.8-flash",
     )
-    assert captured is not None
-    # 确认 captured.model 是用户请求的模型，而不是模板的 gemini-3.7-flash
-    assert captured.model == "models/gemini-3.8-flash"
-    import json
+    assert prepared is not None
+    assert prepared.model == "models/gemini-3.8-flash"
 
-    body = json.loads(captured.body)
+    body = json.loads(prepared.body)
     assert body[0] == "models/gemini-3.8-flash"
-
-
-@pytest.mark.asyncio
-async def test_browser_session_send_streaming_batch_events():
-    """测试流式回放支持批量事件以提升并发吞吐。"""
-    from aistudio_api.infrastructure.browser.cdp_client import CDPPage
-
-    page = MagicMock(spec=CDPPage)
-    page.url = "https://aistudio.google.com/prompts/new_chat"
-    page.is_closed = MagicMock(return_value=False)
-    binding_callback = None
-
-    def mock_on_binding(name, cb):
-        nonlocal binding_callback
-        if name == "__aistudio_stream_push__":
-            binding_callback = cb
-
-    page.on_binding = MagicMock(side_effect=mock_on_binding)
-
-    events = [
-        {"type": "status", "status": 200},
-        {"type": "chunk", "text": "hello "},
-        {"type": "chunk", "text": "world"},
-        {"type": "done"},
-    ]
-
-    async def fake_eval(expr, args=None, *a, **kwargs):
-        if "default_MakerSuite" in expr or "INSTALL_HOOKS" in expr:
-            return "already_hooked"
-        if "service" in expr:
-            return True
-        if isinstance(args, dict) and "rid" in args and binding_callback:
-            rid = args["rid"]
-            for ev in events:
-                ev_copy = dict(ev)
-                ev_copy["rid"] = rid
-                binding_callback(json.dumps(ev_copy))
-            return None
-        return None
-
-    page.evaluate = AsyncMock(side_effect=fake_eval)
-    session = BrowserSession(port=9222)
-    session.set_ready_context(
-        SessionContext(
-            page=page,
-            snap_key="snap_key",
-            auth_user="0",
-            auth_file=None,
-            base_template=dict(DEFAULT_BOOTSTRAP_TEMPLATE),
-        )
-    )
-    results = []
-    async for tag, data in session.send_streaming_request(
-        url="https://example.com",
-        headers={},
-        body="[]",
-        timeout_ms=5000,
-    ):
-        results.append((tag, data))
-
-    assert ("status", 200) in results
-    assert ("chunk", b"hello ") in results
-    assert ("chunk", b"world") in results
 
 
 @pytest.mark.asyncio
@@ -502,7 +345,7 @@ async def test_rotator_prioritizes_least_used_account():
 
     rotator = AccountRotator(account_store=store)
     # acc1 调用了 50 次，acc2 只调用了 5 次 (使用公共 record_success 接口填充状态)
-    for _ in range(50):
+    for _ in range(15):
         rotator.record_success("acc_1", model="gemini-3.8-flash")
     for _ in range(5):
         rotator.record_success("acc_2", model="gemini-3.8-flash")
@@ -513,7 +356,6 @@ async def test_rotator_prioritizes_least_used_account():
     )
     assert chosen is not None
     assert chosen.id == "acc_1"
-
     # 2. 发生故障转移（如 acc1 触发 429）或初次调度时：优先选择调用次数少的 acc2
     chosen_failover = await rotator.get_next_account(
         model="models/gemini-3.8-flash",
@@ -523,45 +365,38 @@ async def test_rotator_prioritizes_least_used_account():
     assert chosen_failover is not None
     assert chosen_failover.id == "acc_2"
 
-    # 3. 前缀统一规范化：带 models/ 前缀与不带前缀均指向相同的调用计数
     rotator.record_success("acc_2", model="models/gemini-3.8-flash")
     acc2_stats = rotator.get_account_stats("acc_2")
     assert acc2_stats is not None
-    assert acc2_stats.model_requests["gemini-3.8-flash"] == 6
+    assert acc2_stats.get_model_daily("gemini-3.8-flash").requests == 6
 
 
 @pytest.mark.asyncio
 async def test_model_requests_midnight_reset():
-    """测试美西午夜跨天后，模型的单日请求计数与限流锁定自动归零刷新。"""
     stats = AccountStats(account_id="acc_1")
-    stats.model_requests["gemini-3.8-flash"] = 50
-    stats.model_requests_dates["gemini-3.8-flash"] = "2020-01-01"  # 过去的日期
-    stats.model_cooldowns["gemini-3.8-flash"] = time.time() + 3600
-    stats.model_rate_limited_dates["gemini-3.8-flash"] = "2020-01-01"
+    m_stats = stats.get_model_daily("gemini-3.8-flash")
+    m_stats.requests = 50
+    m_stats.cooldown_until = time.time() + 3600
+    stats.daily_date_la = "2020-01-01"  # 过去的日期
 
     # 跨天后自动恢复可用且单日请求计数清零
     assert stats.is_available("gemini-3.8-flash")
-    assert stats.model_requests["gemini-3.8-flash"] == 0
+    assert stats.get_model_daily("gemini-3.8-flash").requests == 0
 
 
 @pytest.mark.asyncio
 async def test_ensure_authorization_header_concurrency_and_fallback():
-    """并发请求或 CDP 超时异常时，_ensure_authorization_header 绝不丢失已有 Authorization 头部。"""
-    from aistudio_api.infrastructure.browser.cdp_client import CDPPage
+    """并发请求或异常时，_ensure_authorization_header 绝不丢失已有 Authorization 头部。"""
     from aistudio_api.infrastructure.gateway.transport import (
         _ensure_authorization_header,
     )
-
-    page = MagicMock(spec=CDPPage)
-    page.get_cookies = AsyncMock(side_effect=TimeoutError("CDP busy under concurrency"))
 
     headers = {
         "Content-Type": "application/json",
         "Authorization": "SAPISIDHASH 1789397237_abcdef0123456789",
     }
 
-    # 当 CDP 出现超时波动时，绝不能将原有的 Authorization 剥离留空
-    result = await _ensure_authorization_header(page, headers, auth_user="0")
+    result = await _ensure_authorization_header(headers, auth_user="0")
     assert "Authorization" in result
     assert result["Authorization"] == "SAPISIDHASH 1789397237_abcdef0123456789"
     assert result["X-Goog-AuthUser"] == "0"
@@ -569,14 +404,13 @@ async def test_ensure_authorization_header_concurrency_and_fallback():
 
 @pytest.mark.asyncio
 async def test_try_switch_account_concurrent_403_avalanche_and_in_place_recovery():
-    """并发多个协程遭遇 403 时，在位自愈仅执行 1 次，自愈后立即清除 auth_cooldown 避免连锁 403。"""
-    from aistudio_api.application.runtime import runtime_state
+    """并发多个协程遭遇 403 时，在位自愈仅执行 1 次，自愈后立即重置错误状态避免连锁 403。"""
+    from aistudio_api.api.state import runtime_state
 
     mock_rotator = MagicMock(spec=AccountRotator)
     mock_acc_service = MagicMock()
     mock_client = MagicMock()
-    mock_client._session = MagicMock()
-
+    mock_client.session = MagicMock()
     acc1 = AccountMeta(
         id="acc_1", name="Account 1", email="acc1@test.com", created_at="2026-01-01"
     )
@@ -591,11 +425,9 @@ async def test_try_switch_account_concurrent_403_avalanche_and_in_place_recovery
     mock_rotator.record_auth_error.side_effect = lambda acc_id, model=None: (
         stats.record_auth_error(model)
     )
-    def clear_auth_lockout(_account_id):
-        stats.session_expired = False
-        stats.auth_cooldown = 0.0
-
-    mock_rotator.clear_auth_lockout.side_effect = clear_auth_lockout
+    mock_rotator.clear_cooldown.side_effect = lambda acc_id, model=None: (
+        stats.clear_cooldown(model)
+    )
 
     activate_count = 0
 
@@ -615,9 +447,7 @@ async def test_try_switch_account_concurrent_403_avalanche_and_in_place_recovery
     ):
         # 3 个并发协程同时遇到 403 并尝试切号/自愈
         tasks = [
-            try_switch_account(
-                model="gemini-3.8-flash", failed_account_id="acc_1", is_auth_error=True
-            )
+            try_switch_account(model="gemini-3.8-flash", failed_account_id="acc_1")
             for _ in range(3)
         ]
         results = await asyncio.gather(*tasks)
@@ -625,6 +455,6 @@ async def test_try_switch_account_concurrent_403_avalanche_and_in_place_recovery
         assert all(results)
         # 1. 防雪崩：在位自愈只应当执行 1 次实质性的 activate_account 调用
         assert activate_count == 1
-        # 2. 自愈成功后，必须清除账号的 auth_cooldown，使账号立即恢复健康可用，杜绝并发下后续请求直接 403
+        # 2. 自愈成功后，必须清除账号的错误状态，使账号立即恢复健康可用，杜绝并发下后续请求直接 403
         assert stats.is_available("gemini-3.8-flash")
-        assert stats.auth_cooldown == 0.0
+        assert stats.auth_errors == 0
