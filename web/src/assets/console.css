@@ -3,6 +3,7 @@
 .panel-heading h2 { font-size: 14px; font-weight: 600; }.panel-heading small { margin-left: 8px; color: var(--console-muted); font-size: 11px; font-weight: 400; }
 .monitor-page select, .usage-filters input { color: var(--console-text); background: var(--console-bg); border: 1px solid var(--console-line); border-radius: 5px; min-height: 36px; padding: 6px 10px; font-size: 12px; max-width: 100%; }
 .usage-filters { margin-bottom: 16px; }.usage-filters label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--console-muted); }.usage-filters input { color-scheme: dark; min-width: 0; }
+.usage-page .usage-filters select { flex: 1 1 145px; min-width: 130px; }
 .usage-scope { margin: 16px 0; }.monitor-metrics.usage-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }.usage-metrics strong small { font-size: 18px; }
 .usage-charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-bottom: 20px; }.usage-chart { width: 100%; height: 260px; padding: 12px; }.usage-chart-panel { min-width: 0; }.usage-ranking { margin-bottom: 20px; }
 .usage-pager { display: flex; justify-content: flex-end; align-items: center; gap: 12px; padding: 12px 20px; font-size: 12px; color: var(--console-muted); }
