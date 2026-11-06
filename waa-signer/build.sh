@@ -13,7 +13,8 @@ ARCH="$(uname -m)"
 
 case "$ARCH" in
   x86_64|amd64)
-    SM_ARCH="linux-x64"
+    SM_ARCH="linux-amd64-gnu"
+    SM_SHA256="50df89da549e87f0baedfaa15f05ba5faf4719eaafee5da48c3b9f46a29b06d3"
     GO_ARCH="amd64"
     ZIG_TARGET="x86_64-linux-musl"
     ;;
@@ -35,7 +36,12 @@ if [ ! -f "$DEPS_DIR/lib/libjs_static.a" ]; then
   TARBALL="spidermonkey-${SM_VERSION}-${SM_ARCH}.tar.gz"
   DOWNLOAD_URL="https://github.com/Mag1cFall/firefox/releases/download/${SM_VERSION}/${TARBALL}"
   echo ">>> 正在下载 SpiderMonkey 静态依赖库: ${DOWNLOAD_URL}"
-  curl -fL "$DOWNLOAD_URL" | tar -xz -C "$DEPS_DIR"
+  curl --fail --location --retry 3 "$DOWNLOAD_URL" --output "$DEPS_DIR/sdk.tar.gz"
+  if [ -n "${SM_SHA256:-}" ]; then
+    echo "$SM_SHA256  $DEPS_DIR/sdk.tar.gz" | sha256sum --check
+  fi
+  tar -xzf "$DEPS_DIR/sdk.tar.gz" -C "$DEPS_DIR"
+  rm "$DEPS_DIR/sdk.tar.gz"
   echo ">>> SpiderMonkey 解压完成: ${DEPS_DIR}"
 fi
 
