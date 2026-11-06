@@ -71,7 +71,7 @@ async function cancel(item: RequestRecord) {
       </div>
     </header>
     <div class="monitor-metrics">
-        <article><span>最近请求</span><strong>{{ items.length }}</strong><small>保留 7 天 · 展示最近 500 条</small></article>
+      <article><span>最近请求</span><strong>{{ items.length }}</strong><small>保留 7 天 · 展示最近 500 条</small></article>
       <article><span>进行中</span><strong class="accent-text">{{ active }}</strong><small>包含准备和上游生成</small></article>
       <article><span>失败请求</span><strong :class="{ 'error-text': failures }">{{ failures }}</strong><small>包含流内错误</small></article>
       <article><span>已报告 Tokens</span><strong>{{ tokenCount.toLocaleString() }}</strong><small>仅统计上游实际报告值</small></article>

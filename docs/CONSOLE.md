@@ -34,7 +34,7 @@ OpenAI 适配支持 system/developer/user/assistant/tool 历史、assistant 预�
 
 `/api/console/requests`、`/api/console/logs` 及 `/api/console/requests/{id}/cancel` 均要求管理认证并禁止缓存。取消等待请求自己的生成任务清理；不关闭共享网关或其他请求。
 
-结束请求只在内存保留 10 分钟、最多 100 条，活动请求最多 64 条；日志最多 1,000 条，每个请求最多 64 个阶段。只记录白名单元数据和固定事件，不存对话、正文、思考、签名、Cookie、凭据或原始异常。完整报文转储及其设置入口已移除。
+请求与事件默认保存到 SQLite，保留 7 天，请求最多 5,000 条、事件最多 10,000 条；页面展示最近 500 条结束请求及 1,000 个事件，活动请求最多 64 条，每个请求最多 64 个阶段。只记录白名单元数据和固定事件，不存对话、正文、思考、签名、Cookie、凭据或原始异常。完整报文转储及其设置入口已移除。
 
 首正文时间表示服务端首次收到正文，不能直接等同于用户设备上的显示时间。流式用量取上游实际报告值；未报告显示“未报告”，不估算为零。非流式首正文与完整结果一起到达，不能作为真实首字测量。
 
@@ -42,4 +42,4 @@ OpenAI 适配支持 system/developer/user/assistant/tool 历史、assistant 预�
 
 后端运行 `uv run --no-sync python scripts/run_tests.py`、`uv run --no-sync ruff check .`、`uv run --no-sync pyright`。测试入口在导入应用前隔离配置与数据，只使用合成响应及网关替身。前端运行 `npm run type-check`、`npm run lint`、`npm run build`。
 
-仓库的 CI 在 Linux 上检查后端和前端；Docker 构建为手动 Linux amd64，避免继承上游定时多平台发布。维护分支的推送不触发旧版生产交付。
+仓库的 CI 在 Linux 上检查后端、前端和 amd64 容器；master 通过后由 GitHub Release、OIDC 与 SSM 自动部署。服务器环境变量、持久目录及日志轮转见 [部署说明](../deploy/README.md)。

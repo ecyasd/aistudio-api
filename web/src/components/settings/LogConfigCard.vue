@@ -46,7 +46,7 @@ async function save() {
       @update:model-value="logLevel = String($event || 'INFO')"
     />
     <p class="text-sm text-gray-600 leading-relaxed">
-      请求诊断自动记录脱敏元数据，在独立的日志与请求页面查看。记录保留 10 分钟，不保存对话内容或凭据。
+      请求诊断自动记录脱敏元数据，在独立的日志与请求页面查看。记录默认落盘保留 7 天，不保存对话内容或凭据。
     </p>
     <RouterLink
       to="/logs"

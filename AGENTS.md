@@ -7,3 +7,5 @@
 - 账号归属、签名顺序、流式背压、取消与资源释放沿用上游链路；修改这些行为须补离线回归。启动不主动探测 Google 账号或发起推理。
 - Python 检查使用项目隔离环境及 `scripts/run_tests.py`；前端检查按 `web/package.json`。提交前审查 diff，不提交运行配置、账号、构建缓存或私有运维资料。
 - 整合工作在开发分支完成；发布与代码回滚保留所有运行数据。架构入口见 `docs/ARCHITECTURE.md`，控制台与协议适配见 `docs/CONSOLE.md`。
+
+- 生产使用环境变量与 Docker Compose，按 `deploy/README.md` 的固定目录持久化配置、账号、WAA 状态、请求元数据与轮转日志，默认开启。master 经 Linux 检查与 amd64 镜像验证后由 GitHub OIDC/SSM 自动发布；不在服务器现场构建，不引入多平台发布。
