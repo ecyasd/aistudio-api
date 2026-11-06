@@ -23,6 +23,7 @@ services:
       WAA_STATE_DIR: /data/waa
       AISTUDIO_BIND_HOST: 127.0.0.1
       PYTHON_DOTENV_DISABLED: '1'
+      AISTUDIO_ALLOW_RESTART: '1'
     volumes:
       - /var/lib/aistudio-console:/data
       - /var/log/aistudio-console:/logs

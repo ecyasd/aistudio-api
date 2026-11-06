@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Activity, LayoutDashboard, Users, Sliders, Key, LogOut, ScrollText, Radio } from 'lucide-vue-next'
+import { Activity, LayoutDashboard, Users, Sliders, Key, LogOut, ScrollText, Radio, ChartNoAxesCombined } from 'lucide-vue-next'
 import { useAuthStore } from '@/stores/auth'
 import { useRouter, useRoute } from 'vue-router'
 import { useSystemHealth } from '@/composables/useSystemHealth'
@@ -12,6 +12,7 @@ const route = useRoute()
 const { state: healthState } = useSystemHealth(15000)
 const navItems = [
   { name: '概览', path: '/', icon: LayoutDashboard },
+  { name: '用量统计', path: '/usage', icon: ChartNoAxesCombined },
   { name: '请求', path: '/requests', icon: Activity },
   { name: '日志', path: '/logs', icon: ScrollText },
   { name: '账号', path: '/accounts', icon: Users },

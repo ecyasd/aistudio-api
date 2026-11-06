@@ -47,6 +47,7 @@ snapshot_*.log
 docs/
 *.md
 !README.md
+!THIRD_PARTY_NOTICES.md
 
 # Development scripts
 scripts/

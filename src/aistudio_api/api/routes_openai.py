@@ -359,10 +359,17 @@ async def openai_models(state: RuntimeState = Depends(get_runtime_state)):
                 "object": "model",
                 "created": 0,
                 "owned_by": "google",
+                "channels": item.channels,
             }
             for item in models.models
         ],
     }
+
+
+@router.get("/auth/check")
+async def model_auth_check():
+    """Deployment can verify dynamic key auth without contacting Google."""
+    return {"authenticated": True}
 
 
 @router.post("/chat/completions")

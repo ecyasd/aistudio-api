@@ -57,6 +57,23 @@ async def test_v1_models_returns_openai_format(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_model_auth_check_never_discovers_google_models(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    probe = AsyncMock(side_effect=AssertionError("Google must not be contacted"))
+    monkeypatch.setattr(
+        "aistudio_api.infrastructure.gateway.model_discovery.model_discovery.get_models",
+        probe,
+    )
+    async with _build_client() as client:
+        assert (await client.get("/v1/auth/check")).status_code == 200
+        assert (
+            await client.get("/v1/auth/check", headers={"Authorization": ""})
+        ).status_code == 401
+    probe.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_models_endpoint_accepts_query_param_key(monkeypatch):
     async with _build_client() as client:
         # Unauthorized without key

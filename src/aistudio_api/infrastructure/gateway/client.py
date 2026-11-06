@@ -11,7 +11,7 @@ from aistudio_api.domain.errors import (
     TransportError,
     classify_error,
 )
-from aistudio_api.domain.models import ModelOutput
+from aistudio_api.domain.models import Candidate, ModelOutput
 from aistudio_api.infrastructure.gateway.session import (
     DEFAULT_UPSTREAM_HEADERS,
     GENERATE_CONTENT_URL,
@@ -164,7 +164,23 @@ class AIStudioClient:
         max_tokens: int | None = None,
         generation_config_overrides: dict | None = None,
         prepared: PreparedRequest | None = None,
+        assistant_request: dict | None = None,
     ):
+        if model.endswith("-build"):
+            from aistudio_api.infrastructure.gateway.assistant import stream_assistant
+
+            async with aclosing(
+                stream_assistant(
+                    self._session,
+                    model=model,
+                    contents=contents or [],
+                    system=system_instruction_content,
+                    request=assistant_request or {},
+                )
+            ) as events:
+                async for event in events:
+                    yield event
+            return
         effective_prep = prepared or await self.prepare_request(
             model=model,
             contents=contents,
@@ -202,7 +218,33 @@ class AIStudioClient:
         max_tokens: int | None = None,
         generation_config_overrides: dict | None = None,
         prepared: PreparedRequest | None = None,
+        assistant_request: dict | None = None,
     ) -> ModelOutput:
+        if model.endswith("-build"):
+            candidate = Candidate()
+            result = ModelOutput(candidates=[candidate], model=model)
+            async with aclosing(
+                self.stream_generate_content(
+                    model=model,
+                    contents=contents,
+                    system_instruction_content=system_instruction_content,
+                    assistant_request=assistant_request,
+                )
+            ) as events:
+                async for kind, value in events:
+                    if kind == "body":
+                        candidate.text += str(value)
+                    elif kind == "thinking":
+                        candidate.thinking += str(value)
+                    elif kind == "tool_calls" and isinstance(value, list):
+                        candidate.function_calls.extend(value)
+                    elif kind == "usage" and isinstance(value, dict):
+                        result.usage = value
+                    elif kind == "finish_reason" and isinstance(value, int):
+                        candidate.finish_reason = value
+                    elif kind == "response_id":
+                        result.response_id = str(value)
+            return result
         if prepared is not None:
             effective_prep = prepared
             logger.debug("重放已有已签名请求: model=%s", model)

@@ -313,8 +313,12 @@ def test_account_stats_session_expired_permanent_isolation():
     assert stats.is_available("gemini-3.8-flash")
 
 
-def test_account_stats_short_cooldown_sync():
+def test_account_stats_short_cooldown_sync(monkeypatch):
     """Verify short 60s cooldown is tracked accurately for monitoring."""
+    monkeypatch.setattr(
+        "aistudio_api.application.account_rotator.get_seconds_until_pacific_midnight",
+        lambda: 3600,
+    )
     stats = AccountStats(account_id="acc_test")
     stats.record_rate_limited(model="gemini-2.5-flash")
 

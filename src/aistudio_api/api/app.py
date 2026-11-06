@@ -44,13 +44,17 @@ logger = get_logger("server")
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    from aistudio_api.infrastructure.runtime_options import active_options
+
+    active_options()
     from aistudio_api.infrastructure.waa.daemon import (
         ensure_signer_ready,
         stop_signer_daemon,
     )
 
     # 启动时自动检查并拉起本地 WAA 签名服务（若配置为本地节点）
-    ensure_signer_ready()
+    if active_options().engine == "browserless":
+        ensure_signer_ready()
 
     from aistudio_api.application.account_rotator import init_rotator
     from aistudio_api.application.account_service import AccountService
@@ -92,6 +96,12 @@ async def lifespan(_app: FastAPI):
         except Exception as e:
             logger.debug("关闭客户端失败: %s", e)
     stop_signer_daemon()
+    if active_options().engine == "browser":
+        from aistudio_api.infrastructure.browser.runtime import (
+            runtime as browser_runtime,
+        )
+
+        await browser_runtime.close()
     runtime_state.client = None
     runtime_state.account_service = None
     runtime_state.rotator = None

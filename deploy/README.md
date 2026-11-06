@@ -20,9 +20,13 @@
 
 请求页显示最近 500 条结束记录和进行中的请求，日志页读取最近 1,000 个事件。历史仅包含白名单元数据，不记录对话、正文、思考、签名或凭据。
 
+用量页从当前留存的全部结束记录聚合，默认最多 5,000 条。引擎选择保存在 `config.yaml` 的 `runtime.engine`，初始未设置时读取 `AISTUDIO_ENGINE`，默认 `browserless`；可在设置页改为 `browser` 并重启。PG 与 `-build` 代码助手同时提供。CloakBrowser 随镜像分发，默认不启动。
+
 ## 环境与服务
 
 环境示例见 `runtime.env.example`。`AISTUDIO_WEB_PASSWORD` 与 `AISTUDIO_BOOTSTRAP_API_KEY` 独立；后者只在空目录首次初始化配置时使用，以后通过管理界面维护调用密钥。
+
+发布器使用管理认证读取当前动态密钥策略，在 `/v1/auth/check` 检查认证；不调用 Google 模型目录或生成接口，也不依赖已经被用户轮换的初始密钥。
 
 容器以 UID/GID 10001 运行，数据和日志挂载目录由该 UID 拥有。根文件系统只读，临时文件使用有界 tmpfs。Linux 主机网络配合 `AISTUDIO_BIND_HOST=127.0.0.1`，API 8080 与本地签名器 8081 均仅监听 loopback；公网只通过既有 Caddy HTTPS。使用主机网络是为了保持按网卡拓扑检查的现有流量保护稳定。
 
@@ -32,6 +36,7 @@
 
 ```sh
 systemctl status aistudio-api.service
+sudo systemctl restart aistudio-api.service
 docker ps --filter name=aistudio-console
 docker logs --tail 100 aistudio-console
 tail -n 100 /var/log/aistudio-console/runtime.log

@@ -6,6 +6,7 @@ import inspect
 import itertools
 import time
 from collections.abc import AsyncGenerator
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 from aistudio_api.config import settings
@@ -17,6 +18,7 @@ from aistudio_api.infrastructure.account.cookie_parser import (
 )
 from aistudio_api.infrastructure.gateway.transport import HTTPStreamTransport
 from aistudio_api.infrastructure.gateway.wire_types import AistudioContent
+from aistudio_api.infrastructure.runtime_options import active_options
 from aistudio_api.infrastructure.utils.logger import get_logger
 from aistudio_api.infrastructure.waa.signer import WaaSigner
 
@@ -28,6 +30,7 @@ class SessionContext:
     """Encapsulates active authentication context and metadata for AI Studio gateway."""
 
     auth_user: str = "0"
+    account_id: str | None = None
     auth_file: str | None = None
     tier: str = "Free"
     cookies: dict[str, str] = field(default_factory=dict)
@@ -51,7 +54,13 @@ class GatewaySession:
         self._auth_user: str | None = None
         self._tier: str | None = None
         self._active_context: SessionContext | None = None
+        self._request_context: ContextVar[SessionContext | None] = ContextVar(
+            "request_auth_context", default=None
+        )
         self._transport = HTTPStreamTransport(proxy_url=settings.proxy_url)
+        self._browser_headers: ContextVar[dict[str, str] | None] = ContextVar(
+            "browser_signer_headers", default=None
+        )
         from aistudio_api.infrastructure.gateway.model_defaults import (
             get_active_waa_server,
         )
@@ -72,9 +81,17 @@ class GatewaySession:
         return self._active_context
 
     @property
+    def request_context(self) -> SessionContext | None:
+        return self._request_context.get()
+
+    @property
     def last_signer_headers(self) -> dict[str, str]:
         """Get dynamic protocol headers returned by the underlying signer."""
-        return self._signer.last_headers
+        return (
+            (self._browser_headers.get() or {})
+            if active_options().engine == "browser"
+            else self._signer.last_headers
+        )
 
     def set_ready_context(self, context: SessionContext) -> None:
         """Set active ready context (used by transitions and test fixtures)."""
@@ -102,8 +119,11 @@ class GatewaySession:
     async def ensure_ready(self) -> SessionContext:
         """Ensure session context is initialized and ready."""
         if self.is_ready and self._active_context is not None:
+            self._request_context.set(self._active_context)
             return self._active_context
-        return await self.transition_to_account(self._auth_file, force_refresh=False)
+        context = await self.transition_to_account(self._auth_file, force_refresh=False)
+        self._request_context.set(context)
+        return context
 
     async def switch_auth(self, auth_file: str | None) -> None:
         """Atomic account switch."""
@@ -152,6 +172,12 @@ class GatewaySession:
     ) -> str:
         """Generate fresh WAA proof token for request contents."""
         active_ctx = ctx or await self.ensure_ready()
+        if active_options().engine == "browser":
+            from aistudio_api.infrastructure.browser.runtime import runtime
+
+            proof, headers = await runtime.proof(contents, active_ctx, model)
+            self._browser_headers.set(headers)
+            return proof
         from aistudio_api.infrastructure.gateway.model_defaults import (
             get_active_waa_server,
         )
@@ -189,6 +215,9 @@ class GatewaySession:
     ) -> tuple[str, dict[str, str]]:
         """Generate fresh WAA proof token and dynamic session headers."""
         active_ctx = ctx or await self.ensure_ready()
+        if active_options().engine == "browser":
+            proof = await self.generate_snapshot(contents, ctx=active_ctx, model=model)
+            return proof, self.last_signer_headers
         cookies = active_ctx.cookies or load_cookies_from_auth_file(
             active_ctx.auth_file
         )
@@ -219,6 +248,21 @@ class GatewaySession:
         req_headers["X-Goog-AuthUser"] = active_ctx.auth_user
         if headers:
             req_headers.update(headers)
+        if active_options().engine == "browser":
+            response_status = 0
+            chunks = []
+            async for kind, value in self.send_streaming_request(
+                body=body, url=target_url, headers=req_headers, ctx=active_ctx
+            ):
+                if kind == "status":
+                    response_status = int(str(value))
+                elif kind == "chunk" and isinstance(value, bytes):
+                    chunks.append(value)
+                elif kind == "error":
+                    from aistudio_api.domain.errors import TransportError
+
+                    raise TransportError("Browser transport interrupted")
+            return response_status, b"".join(chunks)
         return await self._transport.send_request(
             url=target_url,
             headers=req_headers,
@@ -245,6 +289,28 @@ class GatewaySession:
         req_headers["X-Goog-AuthUser"] = active_ctx.auth_user
         if headers:
             req_headers.update(headers)
+        if active_options().engine == "browser":
+            from contextlib import aclosing
+
+            from aistudio_api.infrastructure.browser.runtime import runtime
+            from aistudio_api.infrastructure.gateway.transport import (
+                _ensure_authorization_header,
+            )
+
+            authorized = await _ensure_authorization_header(
+                req_headers,
+                auth_user=active_ctx.auth_user,
+                tier=active_ctx.tier,
+                cookies=active_ctx.cookies,
+            )
+            async with aclosing(
+                runtime.stream(
+                    ctx=active_ctx, url=target_url, headers=authorized, body=body
+                )
+            ) as events:
+                async for event in events:
+                    yield event
+            return
         async for event in self._transport.send_streaming_request(
             url=target_url,
             headers=req_headers,

@@ -60,7 +60,8 @@ class AccountService:
         self._store.set_active_account(account_id)
         logger.info("已切换活跃账号持久化状态: %s", account_id)
         await session.switch_auth(str(auth_path))
-        await session.ensure_ready()
+        context = await session.ensure_ready()
+        context.account_id = account_id
         logger.info("已切换到账号: %s (%s)", account_id, account.name)
         return account
 

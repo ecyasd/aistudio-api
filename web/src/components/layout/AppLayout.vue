@@ -65,7 +65,7 @@ async function handleRefresh() {
         </button>
         <span>控制台 / {{ currentTitle }}</span>
         <button
-          v-if="!['requests', 'logs'].includes(String(route.name))"
+          v-if="!['requests', 'logs', 'usage'].includes(String(route.name))"
           type="button"
           class="console-button"
           :disabled="refreshing"

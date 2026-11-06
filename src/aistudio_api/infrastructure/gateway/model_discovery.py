@@ -573,6 +573,34 @@ class ModelDiscoveryService:
                 }
             )
 
+        existing = {item["id"] for item in models}
+        for item in list(models):
+            capabilities = item.get("capabilities")
+            if (
+                not isinstance(capabilities, list)
+                or "code_assistant" not in capabilities
+            ):
+                continue
+            derived_id = str(item["id"]) + "-build"
+            if derived_id not in existing:
+                models.append(
+                    {
+                        **item,
+                        "id": derived_id,
+                        "name": "models/" + derived_id,
+                        "displayName": str(item.get("displayName") or item["id"])
+                        + " (Build)",
+                        "aliases": [],
+                        "channels": ["assistant"],
+                        "supportedGenerationMethods": ["generateContent"],
+                        "capabilities": [
+                            "chat_model",
+                            "assistant_route",
+                            "function_declarations",
+                            "thinking",
+                        ],
+                    }
+                )
         return models
 
 

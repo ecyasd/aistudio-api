@@ -7,6 +7,7 @@ import ApiKeyManagerCard from '@/components/settings/ApiKeyManagerCard.vue'
 import LogConfigCard from '@/components/settings/LogConfigCard.vue'
 import VisualConfigEditor from '@/components/config/VisualConfigEditor.vue'
 import SignerServerCard from '@/components/settings/SignerServerCard.vue'
+import RuntimeCard from '@/components/settings/RuntimeCard.vue'
 import {
   Server,
   CheckCircle2,
@@ -40,6 +41,7 @@ onMounted(() => {
 
 <template>
   <div class="space-y-6">
+    <RuntimeCard />
     <!-- Top Title -->
     <div>
       <h2 class="text-xl font-bold text-gray-900 tracking-tight">
