@@ -9,6 +9,7 @@ import fcntl
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import time
 import urllib.error
@@ -191,6 +192,18 @@ def main() -> dict[str, object]:
         wait_idle()
         for name in old:
             run("systemctl", "stop", name)
+        unit = Path("/etc/systemd/system/aistudio-api.service")
+        dropins = Path("/etc/systemd/system/aistudio-api.service.d")
+        legacy = ETC / "legacy-transition"
+        first_container = not (ETC / "container-service-installed").exists()
+        if first_container:
+            legacy.mkdir(mode=0o700, exist_ok=True)
+            shutil.copyfile(unit, legacy / "api.service")
+            if dropins.exists():
+                shutil.move(str(dropins), str(legacy / "service.d"))
+            shutil.copyfile(ETC / "container.service", unit)
+            unit.chmod(0o644)
+            run("systemctl", "daemon-reload")
         (ETC / "image.env").write_text("AISTUDIO_IMAGE=" + image + "\n")
         (ETC / "image.env").chmod(0o600)
         try:
@@ -203,9 +216,15 @@ def main() -> dict[str, object]:
                 (ETC / "image.env").write_text(previous)
                 run("systemctl", "restart", "aistudio-api.service")
             else:
+                if first_container:
+                    shutil.copyfile(legacy / "api.service", unit)
+                    if (legacy / "service.d").exists():
+                        shutil.move(str(legacy / "service.d"), str(dropins))
+                    run("systemctl", "daemon-reload")
                 for name in reversed(old):
                     run("systemctl", "start", name)
             raise
+        (ETC / "container-service-installed").touch(mode=0o600)
         record = {
             "ok": True,
             "commit": args.commit,

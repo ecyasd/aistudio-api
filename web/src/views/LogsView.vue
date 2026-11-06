@@ -152,7 +152,7 @@ watch([items, follow], async () => {
         </div>
       </div>
       <footer class="log-footer">
-        <span>{{ groups.length }} 组 / {{ items.length }} 个事件</span><span>内存保留 10 分钟 · 最多 1,000 个事件</span>
+        <span>{{ groups.length }} 组 / {{ items.length }} 个事件</span><span>保留 7 天 · 展示最近 1,000 个事件</span>
       </footer>
     </article>
   </section>
