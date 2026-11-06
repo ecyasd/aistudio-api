@@ -32,6 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && groupadd --gid 10001 aistudio && useradd --uid 10001 --gid 10001 --no-create-home aistudio
 WORKDIR /app
 COPY requirements.txt ./
+COPY THIRD_PARTY_NOTICES.md ./THIRD_PARTY_NOTICES.md
 RUN pip install --no-cache-dir -r requirements.txt
 COPY src/ ./src/
 COPY defaults/config.yaml ./defaults/config.yaml

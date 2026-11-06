@@ -400,6 +400,8 @@ uv run pytest
 
 ## 借物表与致谢 (Credits & Acknowledgments)
 
+第三方许可与署名见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)；Docker 镜像内同时附带该文件。
+
 本项目在逆向工程、签名算法与协议实现过程中，参考并借鉴了以下优秀的开源项目与社区成果，在此致以诚挚的感谢：
 
 - **[Mag1cFall/AIStudio2API](https://github.com/Mag1cFall/AIStudio2API)**：提供了嵌入式 SpiderMonkey 152 运行时与 Firefox 152 DOM / WebIDL 宿主现场实现，以及基于 uTLS 的网络栈设计，`waa-signer` 服务基于其核心逻辑适配抽离。
