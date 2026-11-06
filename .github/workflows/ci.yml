@@ -136,11 +136,18 @@ jobs:
             -e AISTUDIO_BOOTSTRAP_API_KEY=synthetic-call \
             aistudio-console:${{ github.sha }}
           for attempt in $(seq 1 45); do
+            if test "$(docker inspect --format '{{.State.Running}}' image-smoke)" != true; then
+              docker logs image-smoke
+              exit 1
+            fi
             if docker exec image-smoke curl -fsS http://127.0.0.1:8080/health >/dev/null; then break; fi
             sleep 2
           done
           docker exec image-smoke python /app/deploy/smoke_image.py
           docker rm -f image-smoke
+      - name: Show synthetic startup failure
+        if: failure()
+        run: docker logs image-smoke 2>/dev/null || true
       - name: Export immutable Docker image
         shell: bash
         run: |

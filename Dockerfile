@@ -14,7 +14,7 @@ FROM python:3.12-slim-bookworm
 ARG REVISION
 LABEL org.opencontainers.image.revision=$REVISION
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/app/src PYTHON_DOTENV_DISABLED=1 \
-    AISTUDIO_DATA_DIR=/data AISTUDIO_CONFIG_FILE=/data/config.yaml WAA_STATE_DIR=/data/waa
+    AISTUDIO_DATA_DIR=/data AISTUDIO_CONFIG_FILE=/data/config.yaml WAA_STATE_DIR=/data/waa HOME=/data XDG_CACHE_HOME=/data/cache
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl libstdc++6 libgcc-s1 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 aistudio && useradd --uid 10001 --gid 10001 --no-create-home aistudio

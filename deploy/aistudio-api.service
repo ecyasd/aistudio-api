@@ -1,0 +1,18 @@
+[Unit]
+Description=AI Studio Docker Compose service
+After=network-online.target docker.service
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/usr/bin/python3 /usr/local/libexec/aws-traffic-guard.py gate
+ExecStart=/usr/bin/docker compose --env-file /etc/aistudio-console/image.env -f /srv/aistudio-console/compose.yaml up -d --wait --wait-timeout 90
+ExecStop=/usr/bin/docker compose --env-file /etc/aistudio-console/image.env -f /srv/aistudio-console/compose.yaml down --timeout 40
+TimeoutStartSec=120
+TimeoutStopSec=60
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

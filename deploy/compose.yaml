@@ -4,6 +4,7 @@ services:
     image: ${AISTUDIO_IMAGE:?AISTUDIO_IMAGE must reference a verified release}
     container_name: aistudio-console
     init: true
+    network_mode: host
     restart: unless-stopped
     env_file:
       - /etc/aistudio-console/runtime.env
@@ -20,9 +21,8 @@ services:
       AISTUDIO_PERSIST_STATS: '1'
       AISTUDIO_PERSIST_ROTATOR: '1'
       WAA_STATE_DIR: /data/waa
+      AISTUDIO_BIND_HOST: 127.0.0.1
       PYTHON_DOTENV_DISABLED: '1'
-    ports:
-      - 127.0.0.1:8080:8080
     volumes:
       - /var/lib/aistudio-console:/data
       - /var/log/aistudio-console:/logs

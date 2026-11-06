@@ -26,7 +26,7 @@ os.execvp(
         "uvicorn",
         "aistudio_api.api.app:app",
         "--host",
-        "0.0.0.0",
+        os.environ.get("AISTUDIO_BIND_HOST", "0.0.0.0"),
         "--port",
         "8080",
         "--no-access-log",
