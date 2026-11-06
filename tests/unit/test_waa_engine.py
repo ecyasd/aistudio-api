@@ -76,7 +76,7 @@ async def test_remote_proof_signer_error():
 
     with (
         patch("httpx.AsyncClient", return_value=mock_client),
-        pytest.raises(TransportError, match="Cookie expired or invalid"),
+        pytest.raises(TransportError, match="HTTP 500"),
     ):
         await signer.mint_proof(
             cookies={"SAPISID": "expired"},

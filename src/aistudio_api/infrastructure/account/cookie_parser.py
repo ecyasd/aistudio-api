@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -13,7 +14,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import httpx
 
-from aistudio_api.infrastructure.utils.common import mask_email
+from aistudio_api.infrastructure.account.cookie_formats import parse_cookie_values
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 logger = get_logger("cookie_parser")
@@ -46,6 +47,9 @@ _CANONICAL_TIERS: dict[str, str] = {
     "pro": "Pro",
     "ultra": "Ultra",
     "ultra_20x": "Ultra_20X",
+    "tier0": "Plus",
+    "tier1": "Pro",
+    "tier2": "Ultra",
 }
 
 
@@ -56,24 +60,31 @@ def normalize_benefit_tier(tier: str | None) -> str:
     return _CANONICAL_TIERS.get(tier.strip().lower(), "Free")
 
 
-def parse_benefit_tier_response(raw_data: object) -> str:
-    """解析 GetAiStudioBenefitTier 响应数组为标准权益名称 (Free / Pro / Ultra / Plus)。"""
+def _known_benefit_tier(raw_data: object) -> str | None:
+    """Keep unavailable/malformed responses distinct from a verified Free tier."""
     if isinstance(raw_data, str):
         text = raw_data.strip().removeprefix(")]}'").strip()
         if text.startswith("[,"):
             text = "[null," + text[2:]
         try:
             raw_data = json.loads(text)
-        except Exception:
-            return "Free"
-    if not isinstance(raw_data, list) or not raw_data or raw_data[0] is None:
+        except (ValueError, RecursionError):
+            return None
+    if not isinstance(raw_data, list):
+        return None
+    if not raw_data or raw_data[0] is None:
         return "Free"
-    val = raw_data[0]
-    if isinstance(val, bool):
-        return "Free"
-    if isinstance(val, (int, float)):
-        return BENEFIT_TIER_TO_NAME.get(int(val), "Free")
-    return "Free"
+    value = raw_data[0]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value not in BENEFIT_TIER_TO_NAME:
+        return None
+    return BENEFIT_TIER_TO_NAME[int(value)]
+
+
+def parse_benefit_tier_response(raw_data: object) -> str:
+    """Compatibility parser for callers that require a conservative default."""
+    return _known_benefit_tier(raw_data) or "Free"
 
 
 def get_tier_header_value(tier: str | None) -> str | None:
@@ -126,108 +137,8 @@ def filter_minimal_cookies(cookies: dict[str, str]) -> dict[str, str]:
 
 
 def parse_raw_cookies(raw: object) -> dict[str, str]:
-    """万能 Cookie 解析器，支持：
-    1. JSON 数组（EditThisCookie / Cookie-Editor 导出：`[{"name": "...", "value": "..."}, ...]`）
-    2. JSON 对象（`{"cookies": [...]}` 或 `{"cookies": {"k": "v"}}`）
-    3. Netscape / curl 格式（7 列 Tab 分隔）
-    4. HTTP 请求头格式（`Cookie: k1=v1; k2=v2` 或带换行的多行键值对）
-    """
-    parsed: dict[str, str] = {}
-    if not raw:
-        return parsed
-
-    text = raw.strip() if isinstance(raw, str) else json.dumps(raw)
-
-    if re.match(r"^cookie:\s*", text, re.IGNORECASE):
-        text = re.sub(r"^cookie:\s*", "", text, flags=re.IGNORECASE)
-
-    # 1. 尝试 JSON 格式
-    if text.startswith(("{", "[")):
-        try:
-            obj = json.loads(text)
-            if isinstance(obj, list):
-                for item in obj:
-                    if (
-                        isinstance(item, dict)
-                        and item.get("name")
-                        and item.get("value") is not None
-                    ):
-                        k = str(item["name"]).strip()
-                        v = str(item["value"]).strip()
-                        if k and v:
-                            parsed[k] = v
-                if parsed:
-                    return parsed
-            elif isinstance(obj, dict):
-                if isinstance(obj.get("cookie"), str):
-                    text = obj["cookie"]
-                elif isinstance(obj.get("cookies"), str):
-                    text = obj["cookies"]
-                elif isinstance(obj.get("cookies"), list):
-                    for item in obj["cookies"]:
-                        if (
-                            isinstance(item, dict)
-                            and item.get("name")
-                            and item.get("value") is not None
-                        ):
-                            k = str(item["name"]).strip()
-                            v = str(item["value"]).strip()
-                            if k and v:
-                                parsed[k] = v
-                    if parsed:
-                        return parsed
-                elif isinstance(obj.get("cookies"), dict):
-                    for k, v in obj["cookies"].items():
-                        if k and v is not None:
-                            parsed[str(k).strip()] = str(v).strip()
-                    return parsed
-        except Exception:
-            pass
-
-    # 2. 按行与分号拆分解析
-    lines = re.split(r"[\r\n;]+", text)
-    ignored_keys = {
-        "domain",
-        "path",
-        "expires",
-        "samesite",
-        "secure",
-        "httponly",
-        "priority",
-        "hostonly",
-    }
-
-    for line in lines:
-        trimmed = line.strip()
-        if trimmed.startswith("#HttpOnly_") and "\t" in trimmed:
-            trimmed = trimmed.removeprefix("#HttpOnly_")
-        if not trimmed or trimmed.startswith("#"):
-            continue
-
-        # Netscape 7 列 Tab 分隔
-        if "\t" in trimmed:
-            cols = trimmed.split("\t")
-            if len(cols) >= 7:
-                k = cols[5].strip() if len(cols) > 5 else ""
-                v = cols[6].strip() if len(cols) > 6 else ""
-                if k and v and k.lower() not in ignored_keys:
-                    parsed[k] = v
-                continue
-
-        # 标准 KV：name=value
-        if "=" in trimmed:
-            k, _, v = trimmed.partition("=")
-            k = k.strip()
-            v = v.strip()
-            k = re.sub(r"^cookie:\s*", "", k, flags=re.IGNORECASE)
-            if (v.startswith('"') and v.endswith('"')) or (
-                v.startswith("'") and v.endswith("'")
-            ):
-                v = v[1:-1]
-            if k and v and k.lower() not in ignored_keys:
-                parsed[k] = v
-
-    return parsed
+    """Decode supported exports with one offline, scope-aware parser."""
+    return parse_cookie_values(raw)
 
 
 def calculate_sapisid_hash(
@@ -350,7 +261,7 @@ def load_cookies_from_auth_file(auth_file: str | Path | None) -> dict[str, str]:
         if isinstance(cookies, dict):
             return {str(k): str(v) for k, v in cookies.items() if k}
     except Exception as e:
-        logger.warning("Failed to load cookies from %s: %s", auth_file, e)
+        logger.warning("Failed to load saved cookies: %s", type(e).__name__)
     return {}
 
 
@@ -427,7 +338,9 @@ async def probe_account_emails_map(
         ) as new_client:
             return await _do_fetch(new_client)
     except Exception as e:
-        logger.debug("通过 HTTP 探测子账号 u/%s 邮箱失败: %s", u_index, e)
+        logger.debug(
+            "通过 HTTP 探测子账号 u/%s 邮箱失败: %s", u_index, type(e).__name__
+        )
     return {}
 
 
@@ -450,7 +363,7 @@ async def probe_account_email(
 async def probe_account_benefit_tier(
     raw_or_dict: object,
     auth_user: str = "0",
-) -> str:
+) -> str | None:
     """通过 GetAiStudioBenefitTier RPC 探测指定子账号的订阅权益等级。"""
     cookie_dict = (
         raw_or_dict
@@ -459,7 +372,7 @@ async def probe_account_benefit_tier(
         else parse_raw_cookies(raw_or_dict)
     )
     if not cookie_dict:
-        return "Free"
+        return None
 
     import httpx
 
@@ -476,21 +389,23 @@ async def probe_account_benefit_tier(
         async with httpx.AsyncClient(timeout=8.0, proxy=settings.proxy_url) as client:
             resp = await client.post(tier_url, headers=headers, content="[]")
             if resp.status_code == 200:
-                return parse_benefit_tier_response(resp.text)
+                return _known_benefit_tier(resp.text)
     except Exception as e:
-        logger.debug("探测子账号 u/%s 权益等级失败: %s", u_index, e)
-    return "Free"
+        logger.debug("探测子账号 u/%s 权益等级失败: %s", u_index, type(e).__name__)
+    return None
 
 
 async def probe_google_accounts_infinite(
     raw_or_dict: object,
     *,
     max_fails_in_a_row: int = 1,
+    max_accounts: int = 10,
 ) -> list[dict[str, object]]:
-    """一路向下探测多账号登录索引（u/0, u/1, u/2...），直到探测失败为止。
+    """Discover up to ten identities within 30 seconds (legacy function name).
 
-    Returns:
-        有效账号列表，例如 [{"auth_user": "0", "status_code": 200, "name": "Google Account (u/0)"}, ...]
+    A blanket 400/403 is not evidence of a logged-in identity. Such responses
+    are accepted only when the independently fetched Google identity map names
+    that index. Repeated emails and unconfirmed nonzero indices stop discovery.
     """
     cookie_dict = parse_raw_cookies(raw_or_dict)
     if not cookie_dict:
@@ -501,78 +416,79 @@ async def probe_google_accounts_infinite(
     from aistudio_api.config import settings
 
     valid_accounts: list[dict[str, object]] = []
-
-    auth_user_idx = 0
+    seen_emails: set[str] = set()
     consecutive_failures = 0
-    async with httpx.AsyncClient(timeout=10.0, proxy=settings.proxy_url) as client:
-        emails_map = await probe_account_emails_map(
-            cookie_dict, auth_user="0", client=client
-        )
-        while True:
-            u_index = str(auth_user_idx)
-            headers = build_makersuite_headers(
-                cookie_dict,
-                auth_user=u_index,
-                include_visit_id=True,
+    max_accounts = max(1, min(max_accounts, 10))
+    max_fails_in_a_row = max(1, min(max_fails_in_a_row, 3))
+    base_url = "https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/"
+    try:
+        async with (
+            asyncio.timeout(30),
+            httpx.AsyncClient(timeout=10.0, proxy=settings.proxy_url) as client,
+        ):
+            emails_map = await probe_account_emails_map(
+                cookie_dict, auth_user="0", client=client
             )
-            url = "https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/ListModels"
-            try:
-                resp = await client.post(url, headers=headers, content="[]")
-                # 200 (OK), 400 (Bad Request on param but authed), 403 (Forbidden/Permission/Quota) 均表示此账号 Session 存在
-                # 401 表示该 auth_user 未登录或 Session 无效
-                if resp.status_code in (200, 400, 403):
-                    consecutive_failures = 0
-                    detected_tier = "Free"
-                    tier_url = "https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GetAiStudioBenefitTier"
-                    try:
-                        tier_resp = await client.post(
-                            tier_url, headers=headers, content="[]"
-                        )
-                        if tier_resp.status_code == 200:
-                            detected_tier = parse_benefit_tier_response(tier_resp.text)
-                    except Exception:
-                        pass
-                    detected_email = emails_map.get(u_index)
-                    if not detected_email:
-                        try:
-                            extra_map = await probe_account_emails_map(
-                                cookie_dict, auth_user=u_index, client=client
+            for index in range(max_accounts):
+                u_index = str(index)
+                headers = build_makersuite_headers(
+                    cookie_dict, auth_user=u_index, include_visit_id=True
+                )
+                try:
+                    response = await client.post(
+                        base_url + "ListModels", headers=headers, content="[]"
+                    )
+                    authenticated = response.status_code == 200 or (
+                        response.status_code in (400, 403) and u_index in emails_map
+                    )
+                    if not authenticated:
+                        consecutive_failures += 1
+                    else:
+                        email = emails_map.get(u_index)
+                        if not email:
+                            emails_map.update(
+                                await probe_account_emails_map(
+                                    cookie_dict, auth_user=u_index, client=client
+                                )
                             )
-                            emails_map.update(extra_map)
-                            detected_email = emails_map.get(u_index)
+                            email = emails_map.get(u_index)
+                        if (email and email.lower() in seen_emails) or (
+                            index > 0 and not email
+                        ):
+                            break
+                        tier = "Free"
+                        try:
+                            tier_response = await client.post(
+                                base_url + "GetAiStudioBenefitTier",
+                                headers=headers,
+                                content="[]",
+                            )
+                            if tier_response.status_code == 200:
+                                tier = parse_benefit_tier_response(tier_response.text)
                         except Exception:
                             pass
-                    valid_accounts.append(
-                        {
-                            "auth_user": u_index,
-                            "status_code": resp.status_code,
-                            "name": f"Google Account (u/{u_index})",
-                            "email": detected_email,
-                            "tier": detected_tier,
-                        }
-                    )
-                    logger.info(
-                        "探活子账号 u/%s 成功: 状态码=%d, 邮箱=%s, 等级=%s",
-                        u_index,
-                        resp.status_code,
-                        mask_email(detected_email) if detected_email else "无",
-                        detected_tier,
-                    )
-                elif resp.status_code == 401:
+                        valid_accounts.append(
+                            {
+                                "auth_user": u_index,
+                                "status_code": response.status_code,
+                                "name": f"Google Account (u/{u_index})",
+                                "email": email,
+                                "tier": tier,
+                            }
+                        )
+                        if email:
+                            seen_emails.add(email.lower())
+                        consecutive_failures = 0
+                        logger.info(
+                            "已识别登录身份 u/%s: 状态码=%d",
+                            u_index,
+                            response.status_code,
+                        )
+                except Exception:
                     consecutive_failures += 1
-                    logger.debug("子账号 u/%s 未授权 (HTTP 401)", u_index)
-                else:
-                    consecutive_failures += 1
-                    logger.debug(
-                        "子账号 u/%s 探活返回 HTTP %d", u_index, resp.status_code
-                    )
-            except Exception as e:
-                consecutive_failures += 1
-                logger.debug("子账号 u/%s 探活请求异常: %s", u_index, e)
-
-            if consecutive_failures >= max_fails_in_a_row:
-                break
-
-            auth_user_idx += 1
-
+                    logger.debug("登录身份 u/%s 识别请求失败", u_index)
+                if consecutive_failures >= max_fails_in_a_row:
+                    break
+    except TimeoutError:
+        logger.info("登录身份识别达到时间上限，已识别 %d 个身份", len(valid_accounts))
     return valid_accounts

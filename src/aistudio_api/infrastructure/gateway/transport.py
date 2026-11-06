@@ -160,8 +160,8 @@ class HTTPStreamTransport:
             auth_user,
         )
 
-        client = await self._get_client()
         try:
+            client = await self._get_client()
             resp = await client.post(
                 url, headers=clean_headers, content=body.encode("utf-8")
             )
@@ -174,11 +174,11 @@ class HTTPStreamTransport:
             )
             return resp.status_code, resp.content
         except Exception as exc:
-            err_detail = (
-                f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
-            )
-            logger.error("HTTP request failed: url=%s, err=%s", url, err_detail)
-            raise TransportError(f"HTTP request failed: {err_detail}") from exc
+            # HTTP clients may include a rejected Cookie/Authorization value in
+            # their exception text. Retain the category, never the raw message.
+            error_type = type(exc).__name__
+            logger.error("HTTP request failed: error_type=%s", error_type)
+            raise TransportError(f"HTTP request failed: {error_type}") from None
 
     async def send_streaming_request(
         self,
@@ -201,10 +201,9 @@ class HTTPStreamTransport:
         )
         logger.debug("Starting streaming HTTP request: url=%s", url)
 
-        client = await self._get_client()
-
         resp = None
         try:
+            client = await self._get_client()
             req = client.build_request(
                 "POST", url, headers=clean_headers, content=body.encode("utf-8")
             )
@@ -221,11 +220,9 @@ class HTTPStreamTransport:
                     yield ("chunk", chunk)
 
         except Exception as exc:
-            err_detail = (
-                f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
-            )
-            logger.warning("Streaming request encountered exception: %s", err_detail)
-            yield ("error", err_detail)
+            error_type = type(exc).__name__
+            logger.warning("Streaming request failed: error_type=%s", error_type)
+            yield ("error", error_type)
         finally:
             if resp is not None:
                 await resp.aclose()

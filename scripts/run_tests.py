@@ -21,6 +21,11 @@ def main() -> int:
         )
         environment = dict(os.environ)
         environment.pop("CREDENTIALS_DIRECTORY", None)
+        # SDK clients may consult these even when their transports are replaced
+        # by ASGI mocks. Never inherit an operator's real outbound proxy in tests.
+        for variable in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"):
+            environment.pop(variable, None)
+            environment.pop(variable.lower(), None)
         environment.update(
             {
                 "PYTHONPATH": str(repo / "src"),

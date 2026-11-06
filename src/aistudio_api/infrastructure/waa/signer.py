@@ -119,7 +119,7 @@ class RemoteProofSigner:
             payload["wireContents"] = wire_contents
 
         max_attempts = 2
-        last_error: Exception | None = None
+        last_error_type = "UnknownError"
 
         for attempt in range(1, max_attempts + 1):
             try:
@@ -134,13 +134,14 @@ class RemoteProofSigner:
 
                 if resp.status_code != 200:
                     raise TransportError(
-                        f"Remote proof server returned HTTP {resp.status_code}: {resp.text[:300]}"
+                        f"Remote proof server returned HTTP {resp.status_code}"
                     )
 
                 data = resp.json()
                 if not data.get("ok") or not data.get("proof"):
-                    err_msg = data.get("error") or "unknown proof server error"
-                    raise TransportError(f"Remote proof minting failed: {err_msg}")
+                    raise TransportError(
+                        "Remote proof minting failed: invalid proof response (HTTP 200)"
+                    )
 
                 proof = str(data["proof"])
                 raw_headers = data.get("headers")
@@ -159,12 +160,12 @@ class RemoteProofSigner:
                 return proof
 
             except (httpx.TransportError, httpx.TimeoutException) as e:
-                last_error = e
+                last_error_type = type(e).__name__
                 logger.warning(
-                    "Remote proof server connection error on attempt %d/%d: %s",
+                    "Remote proof server connection error on attempt %d/%d: error_type=%s",
                     attempt,
                     max_attempts,
-                    e,
+                    last_error_type,
                 )
                 # Reset client on connection errors to discard stale connections
                 await self.close()
@@ -173,19 +174,19 @@ class RemoteProofSigner:
             except TransportError:
                 raise
             except Exception as e:
-                last_error = e
+                last_error_type = type(e).__name__
                 logger.warning(
-                    "Remote proof server unexpected error on attempt %d/%d: %s",
+                    "Remote proof server unexpected error on attempt %d/%d: error_type=%s",
                     attempt,
                     max_attempts,
-                    e,
+                    last_error_type,
                 )
                 if attempt < max_attempts:
                     await asyncio.sleep(0.5)
 
         raise TransportError(
-            f"Remote proof minting failed after {max_attempts} attempts: {last_error}"
-        )
+            f"Remote proof minting failed after {max_attempts} attempts: {last_error_type}"
+        ) from None
 
 
 class WaaSigner:

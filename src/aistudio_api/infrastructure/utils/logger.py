@@ -79,10 +79,10 @@ def set_log_level(level: str | int) -> None:
     for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         logging.getLogger(logger_name).setLevel(numeric_level)
 
-    # 非 DEBUG 模式下静默外部 HTTP 客户端的冗余网络日志
-    httpx_level = logging.DEBUG if level_name == "DEBUG" else logging.WARNING
+    # HTTP debug traces can contain Set-Cookie headers and raw protocol errors.
+    # Keep application DEBUG diagnostics without enabling those payload traces.
     for logger_name in ("httpx", "httpcore"):
-        logging.getLogger(logger_name).setLevel(httpx_level)
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
 
 
 def setup_logging(level: str | int = "INFO") -> None:

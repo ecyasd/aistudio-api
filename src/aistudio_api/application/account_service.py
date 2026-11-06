@@ -81,6 +81,10 @@ class AccountService:
         """更新账号的订阅权益等级 (Free / Pro / Ultra / Plus)。"""
         return self._store.update_account_tier(account_id, tier)
 
+    def validate_account_id(self, account_id: str) -> None:
+        """Check a proposed credential destination before a batch is written."""
+        self._store.validate_account_id(account_id)
+
     def save_account_from_cookies(
         self,
         *,

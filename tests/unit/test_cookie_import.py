@@ -41,7 +41,8 @@ def test_parse_raw_cookies_json_array_and_netscape():
     assert parsed_json["SID"] == "sid_val"
 
     # 2. Netscape 7 列 Tab 格式
-    netscape_raw = ".google.com\tTRUE\t/\tTRUE\t1788678271\tSAPISID\tnetscape_sapisid\n.google.com\tTRUE\t/\tTRUE\t1788678271\tSID\tnetscape_sid"
+    # Session cookies do not make this format test depend on the calendar date.
+    netscape_raw = ".google.com\tTRUE\t/\tTRUE\t0\tSAPISID\tnetscape_sapisid\n.google.com\tTRUE\t/\tTRUE\t0\tSID\tnetscape_sid"
     parsed_netscape = parse_raw_cookies(netscape_raw)
     assert parsed_netscape["SAPISID"] == "netscape_sapisid"
     assert parsed_netscape["SID"] == "netscape_sid"

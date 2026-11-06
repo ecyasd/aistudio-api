@@ -38,6 +38,7 @@ jobs:
             backend:
               - 'src/aistudio_api/**'
               - 'tests/**'
+              - 'scripts/run_tests.py'
               - 'pyproject.toml'
               - 'uv.lock'
               - '.github/workflows/ci.yml'
@@ -104,6 +105,9 @@ jobs:
 
       - name: Run ESLint
         run: npm run lint
+
+      - name: Run Cookie Import Regression
+        run: npm test
 
       - name: Verify Web Production Build
         run: npm run build

@@ -340,6 +340,10 @@ class AccountStore:
             self._save_registry(registry)
         return acc
 
+    def validate_account_id(self, account_id: str) -> None:
+        """Validate an import destination without creating or changing any files."""
+        _safe_account_dir(self._accounts_dir, account_id)
+
     def save_account(
         self,
         name: str,

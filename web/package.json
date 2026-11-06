@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
     "build": "vue-tsc -b && vite build",
     "type-check": "vue-tsc -b",
     "lint": "eslint src --max-warnings 0",
