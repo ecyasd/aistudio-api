@@ -47,6 +47,21 @@ def test_parse_raw_cookies_json_array_and_netscape():
     assert parsed_netscape["SID"] == "netscape_sid"
 
 
+def test_netscape_http_only_records_are_cookies_not_comments():
+    raw = (
+        "# Netscape HTTP Cookie File\n"
+        "# ordinary comment=value\n"
+        "#HttpOnly_.google.com\tTRUE\t/\tTRUE\t0\tSID\tfixture_sid\n"
+        ".google.com\tTRUE\t/\tTRUE\t0\tSAPISID\tfixture_sapisid"
+    )
+    assert parse_cookie_string(raw) == {
+        "cookies": [
+            {"name": "SID", "value": "fixture_sid"},
+            {"name": "SAPISID", "value": "fixture_sapisid"},
+        ]
+    }
+
+
 @pytest.mark.asyncio
 async def test_model_discovery_parse():
     from aistudio_api.infrastructure.gateway.model_discovery import model_discovery

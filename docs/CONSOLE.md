@@ -31,7 +31,7 @@ OpenAI 适配支持 system/developer/user/assistant/tool 历史、assistant 预�
 - `/requests`：状态、协议、模型、总耗时、首正文、上游调用次数、上游报告的 Token、结束原因和阶段时间线。可停止进行中的请求，也可打开关联日志。
 - 请求管理上方同时展示当前请求与账号/模型冷却，提供停止、解除冷却和详情；从用量页可读取仍在留存期内的较早记录。
 - `/logs`：按请求分组的固定事件，支持级别、来源、模型/请求 ID 搜索、展开阶段和跟随最新。筛选状态保存于 URL，便于直接打开。
-- 两页每两秒读取快照，支持暂停和手动刷新；页面隐藏时暂停轮询，离开页面取消读取。读取失败保留上次数据并显示失败状态。
+- 请求与冷却每 10 秒读取快照，日志页每 2 秒读取；支持暂停和手动刷新。页面隐藏时暂停轮询，离开页面取消读取。读取失败保留上次数据并显示失败状态，停止请求与手动刷新立即执行。
 - HTTP 响应携带 `X-Request-ID`；流式 HTTP 200 后发生的错误单独记录错误状态，不能据 HTTP 200 判定成功。
 
 `/api/console/requests`、`/api/console/logs` 及 `/api/console/requests/{id}/cancel` 均要求管理认证并禁止缓存。取消等待请求自己的生成任务清理；不关闭共享网关或其他请求。
@@ -41,6 +41,10 @@ OpenAI 适配支持 system/developer/user/assistant/tool 历史、assistant 预�
 首正文时间表示服务端首次收到正文，不能直接等同于用户设备上的显示时间。流式用量取上游实际报告值；未报告显示“未报告”，不估算为零。非流式首正文与完整结果一起到达，不能作为真实首字测量。
 
 ## PG、Build 代码助手与运行引擎
+
+管理界面统一使用 `web/src/assets/theme.css` 的 AIS2 风格深色主题。引擎选择和上游已有的 WAA 签名服务管理合并到同一个配置区；模型规则默认折叠，按需展开。
+
+账号导入界面自动区分 Cookie 请求头、JSON Cookie 数组、Playwright storage state、Netscape cookies.txt 和账号包。文件可多选；预览只识别本地格式，不把 Cookie 条数当作账号数。导入保存显式传入 `probe_identity=false`，默认不探测 Google；只有勾选识别多登录身份才调用现有探测导入接口。部分文件失败时保留结果，只重试失败来源。导入 API 未传此字段时保留原有探测行为，兼容既有客户端。
 
 普通模型调用 Playground（PG）；具有官网能力码 48 的模型在目录追加 `-build` 条目，调用 `CodeAssistantOffline` 与 `StreamCodeAssistantOfflineGeneration`，这是 Build 写代码助手。两类模型同时提供，可在同一个服务中并发调用，共用已有账号和 WAA 基础设施，按完整模型 ID 分开记录冷却与用量；无需启动第二套 API 服务。协议依据 [AIS2 的代码助手说明](https://github.com/Mag1cFall/AIStudio2API/blob/main/docs/build.md#8-写代码助手通道)。
 

@@ -59,6 +59,7 @@ export interface ApplyPresetResponse {
 }
 
 export interface ImportCookiesRequest {
+  probe_identity?: boolean
   cookies: string
   name?: string
   email?: string
@@ -95,6 +96,7 @@ export interface BundleAccountItem {
 }
 
 export interface ImportBundleRequest {
+  probe_identity?: boolean
   file_path?: string
   content?: string
   accounts?: BundleAccountItem[]

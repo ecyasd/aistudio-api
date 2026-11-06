@@ -312,13 +312,13 @@ onBeforeRouteLeave((_to, _from, next) => {
 </script>
 
 <template>
-  <div class="bg-white border border-gray-200/80 rounded-2xl p-6 shadow-xs space-y-5">
+  <div class="bg-panel border border-line/80 rounded-2xl p-6  space-y-5">
     <!-- Header & Mode Switcher -->
-    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-gray-100 pb-5">
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-line pb-5">
       <div>
         <div class="flex items-center gap-2">
-          <SlidersHorizontal class="w-4 h-4 text-brand-600" />
-          <h3 class="font-bold text-gray-900 text-sm">
+          <SlidersHorizontal class="w-4 h-4 text-accent" />
+          <h3 class="font-semibold text-fg text-sm">
             模型规则与安全策略 (config.yaml)
           </h3>
         </div>
@@ -332,16 +332,16 @@ onBeforeRouteLeave((_to, _from, next) => {
           title="查看所有配置项详细规范与推荐说明"
           @click="dictModalOpen = true"
         >
-          <BookOpen class="w-3.5 h-3.5 text-brand-600" />
+          <BookOpen class="w-3.5 h-3.5 text-accent" />
           <span>参数规范字典</span>
         </Button>
 
         <!-- Tab Pill Toggle -->
-        <div class="flex items-center bg-gray-100 p-1 rounded-xl text-xs font-medium">
+        <div class="flex items-center bg-raised p-1 rounded-xl text-xs font-medium">
           <button
             type="button"
             class="px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 cursor-pointer"
-            :class="activeTab === 'visual' ? 'bg-white text-brand-700 shadow-2xs font-semibold' : 'text-gray-600 hover:text-gray-900'"
+            :class="activeTab === 'visual' ? 'bg-panel text-accent  font-semibold' : 'text-secondary hover:text-fg'"
             @click="switchTab('visual')"
           >
             <SlidersHorizontal class="w-3.5 h-3.5" />
@@ -350,7 +350,7 @@ onBeforeRouteLeave((_to, _from, next) => {
           <button
             type="button"
             class="px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 cursor-pointer"
-            :class="activeTab === 'yaml' ? 'bg-white text-brand-700 shadow-2xs font-semibold' : 'text-gray-600 hover:text-gray-900'"
+            :class="activeTab === 'yaml' ? 'bg-panel text-accent  font-semibold' : 'text-secondary hover:text-fg'"
             @click="switchTab('yaml')"
           >
             <FileCode class="w-3.5 h-3.5" />
@@ -385,21 +385,21 @@ onBeforeRouteLeave((_to, _from, next) => {
       v-if="activeTab === 'visual'"
       class="relative"
     >
-      <Search class="w-4 h-4 text-gray-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+      <Search class="w-4 h-4 text-muted absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
       <input
         v-model="filterKeyword"
         type="text"
         placeholder="在下方快速筛选规则组或模型名称（如：image、gemini、gemma）..."
-        class="w-full pl-10 pr-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs outline-none focus:bg-white focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 font-mono transition-all"
+        class="w-full pl-10 pr-4 py-2 bg-canvas border border-line rounded-xl text-xs outline-none focus:bg-panel focus:border-accent-line focus:ring-2 focus:ring-accent/20 font-mono transition-all"
       >
     </div>
 
     <!-- Error Banner if YAML is invalid -->
     <div
       v-if="yamlParseError"
-      class="p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 flex items-start gap-2.5"
+      class="p-3.5 bg-danger-soft border border-danger-line rounded-xl text-xs text-danger flex items-start gap-2.5"
     >
-      <AlertCircle class="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+      <AlertCircle class="w-4 h-4 text-danger shrink-0 mt-0.5" />
       <div>
         <div class="font-semibold">
           YAML 语法解析错误
@@ -416,14 +416,14 @@ onBeforeRouteLeave((_to, _from, next) => {
       class="space-y-6"
     >
       <!-- Global Drop Unsupported Params Switch -->
-      <div class="p-4 bg-gray-50/80 border border-gray-200/80 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+      <div class="p-4 bg-canvas/80 border border-line/80 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
-          <div class="text-xs font-bold text-gray-900 flex items-center gap-1.5">
+          <div class="text-xs font-semibold text-fg flex items-center gap-1.5">
             <span>全局丢弃不支持参数 (drop_unsupported_params)</span>
-            <span class="text-[10px] text-brand-700 bg-brand-50 px-1.5 py-0.5 rounded font-mono border border-brand-200/60 font-semibold">全局默认</span>
+            <span class="text-[10px] text-accent bg-accent-soft px-1.5 py-0.5 rounded font-mono border border-accent-line/60 font-semibold">全局默认</span>
             <FieldHelpTip schema-key="system.drop_unsupported_params" />
           </div>
-          <p class="text-[11px] text-gray-400 mt-0.5">
+          <p class="text-[11px] text-muted mt-0.5">
             自动过滤下游客户端传入的未知安全类别（如 HARM_CATEGORY_CIVIC_INTEGRITY）或模型不支持的工具，避免 400 报错阻断
           </p>
         </div>
@@ -438,10 +438,10 @@ onBeforeRouteLeave((_to, _from, next) => {
 
       <!-- Section 1: Model Profiles -->
       <div class="space-y-4">
-        <div class="flex items-center justify-between border-b border-gray-100 pb-3">
+        <div class="flex items-center justify-between border-b border-line pb-3">
           <div>
-            <h4 class="text-xs font-bold text-gray-900 flex items-center gap-2">
-              <Layers class="w-4 h-4 text-brand-600" />
+            <h4 class="text-xs font-semibold text-fg flex items-center gap-2">
+              <Layers class="w-4 h-4 text-accent" />
               <span>模型分组规则 (Model Profiles)</span>
             </h4>
           </div>
@@ -471,13 +471,13 @@ onBeforeRouteLeave((_to, _from, next) => {
         </div>
         <div
           v-else-if="filterKeyword.trim()"
-          class="p-6 text-center text-gray-400 text-xs border border-dashed border-gray-200 rounded-2xl"
+          class="p-6 text-center text-muted text-xs border border-dashed border-line rounded-2xl"
         >
           未找到匹配 "{{ filterKeyword }}" 的模型分组规则
         </div>
         <div
           v-else
-          class="p-8 text-center text-gray-400 text-xs border border-dashed border-gray-200 rounded-2xl"
+          class="p-8 text-center text-muted text-xs border border-dashed border-line rounded-2xl"
         >
           未配置任何模型分组规则。点击上方按钮添加规则。
         </div>
@@ -495,7 +495,7 @@ onBeforeRouteLeave((_to, _from, next) => {
       v-else
       class="space-y-2"
     >
-      <div class="flex items-center justify-between text-xs text-gray-400 font-mono">
+      <div class="flex items-center justify-between text-xs text-muted font-mono">
         <span>config.yaml 直接编辑</span>
         <span>保存后自动热重载，无需重启进程</span>
       </div>
@@ -504,7 +504,7 @@ onBeforeRouteLeave((_to, _from, next) => {
         rows="22"
         spellcheck="false"
         placeholder="正在加载 config.yaml..."
-        class="w-full p-4 font-mono text-xs bg-gray-900 text-gray-100 rounded-xl outline-none focus:ring-2 focus:ring-brand-500 leading-relaxed shadow-inner border border-gray-800"
+        class="w-full p-4 font-mono text-xs bg-canvas text-fg rounded-xl outline-none focus:ring-2 focus:ring-accent leading-relaxed shadow-inner border border-line"
         @keydown="handleYamlKeydown"
       />
     </div>

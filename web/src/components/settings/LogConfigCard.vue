@@ -28,9 +28,9 @@ async function save() {
 </script>
 
 <template>
-  <section class="bg-white border border-gray-200/80 rounded-2xl p-6 space-y-5">
+  <section class="bg-panel border border-line/80 rounded-2xl p-6 space-y-5">
     <div class="flex flex-wrap items-center justify-between gap-4">
-      <h3 class="flex items-center gap-2 font-semibold text-gray-900">
+      <h3 class="flex items-center gap-2 font-semibold text-fg">
         <Activity :size="17" />日志配置
       </h3><Button
         :loading="saving"
@@ -45,12 +45,12 @@ async function save() {
       :options="logLevels"
       @update:model-value="logLevel = String($event || 'INFO')"
     />
-    <p class="text-sm text-gray-600 leading-relaxed">
+    <p class="text-sm text-secondary leading-relaxed">
       请求诊断自动记录脱敏元数据，在独立的日志与请求页面查看。记录默认落盘保留 7 天，不保存对话内容或凭据。
     </p>
     <RouterLink
       to="/logs"
-      class="text-sm text-brand-700 underline"
+      class="text-sm text-accent underline"
     >打开日志页面</RouterLink>
   </section>
 </template>

@@ -26,11 +26,11 @@ withDefaults(defineProps<Props>(), {
     :class="[
       size === 'sm' ? 'px-3 py-1.5 text-xs gap-1.5' : size === 'lg' ? 'px-5 py-2.5 text-base gap-2.5' : 'px-4 py-2 text-sm gap-2',
       {
-        'bg-brand-500 hover:bg-brand-600 text-white shadow-xs focus:ring-2 focus:ring-brand-400/40': variant === 'primary',
-        'bg-white hover:bg-gray-50 text-gray-700 border border-gray-200 shadow-xs focus:ring-2 focus:ring-gray-200': variant === 'secondary',
-        'bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 focus:ring-2 focus:ring-rose-200': variant === 'danger',
-        'hover:bg-gray-100 text-gray-600 focus:ring-2 focus:ring-gray-200': variant === 'ghost',
-        'border border-gray-300 text-gray-700 hover:bg-gray-50': variant === 'outline',
+        'bg-accent hover:brightness-110 text-on-accent focus:ring-2 focus:ring-accent/40': variant === 'primary',
+        'bg-panel hover:bg-canvas text-secondary border border-line  focus:ring-2 focus:ring-line': variant === 'secondary',
+        'bg-danger-soft hover:bg-danger-soft text-danger border border-danger-line focus:ring-2 focus:ring-danger': variant === 'danger',
+        'hover:bg-raised text-secondary focus:ring-2 focus:ring-line': variant === 'ghost',
+        'border border-line-strong text-secondary hover:bg-canvas': variant === 'outline',
       },
     ]"
   >

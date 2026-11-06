@@ -1,91 +1,57 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { Code2, Terminal, Copy, Check } from 'lucide-vue-next'
-import { useClipboard } from '@/composables/useClipboard.ts'
-
+import { Copy, Check, Plug } from 'lucide-vue-next'
+import { useClipboard } from '@/composables/useClipboard'
 const { copied, copy } = useClipboard()
-
-const baseUrl = computed(() => {
-  if (typeof window !== 'undefined' && window.location.origin) {
-    return window.location.origin
-  }
-  return 'http://localhost:8080'
-})
-
-const codeSnippets = computed(() => [
-  {
-    title: 'cURL (标准 HTTP)',
-    lang: 'bash',
-    code: `curl ${baseUrl.value}/v1beta/models/gemini-3.8-flash:generateContent \\
-  -H "x-goog-api-key: your-api-key" \\
-  -H "Content-Type: application/json" \\
-  -d '{"contents": [{"role": "user", "parts": [{"text": "Hello"}]}]}'`,
-  },
-  {
-    title: 'Python (Google GenAI SDK)',
-    lang: 'python',
-    code: `from google import genai
-
-client = genai.Client(
-    api_key="your-api-key",
-    http_options={
-        "api_version": "v1beta",
-        "base_url": "${baseUrl.value}",
-    },
-)
-
-response = client.models.generate_content(
-    model="gemini-3.8-flash",
-    contents="Hello"
-)
-print(response.text)`,
-  },
-])
-
-function handleCopy(code: string, index: number) {
-  void copy(code, index, '已复制调用示例到剪贴板')
-}
+const base = window.location.origin + '/v1'
 </script>
 
 <template>
-  <div class="bg-white border border-gray-200/80 rounded-2xl p-6 shadow-xs space-y-4">
-    <div class="flex items-center gap-2 border-b border-gray-100 pb-3">
-      <Code2 class="w-4 h-4 text-brand-600" />
-      <h3 class="font-semibold text-gray-900 text-sm">
-        快速调用示例
-      </h3>
+  <article class="console-panel">
+    <div class="panel-heading">
+      <h2 class="flex items-center gap-2">
+        <Plug
+          :size="16"
+          class="text-accent"
+        />酒馆接入
+      </h2><span class="text-xs text-muted">OpenAI 兼容</span>
     </div>
-
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-      <div
-        v-for="(snippet, idx) in codeSnippets"
-        :key="idx"
-        class="bg-gray-900 text-gray-100 rounded-xl p-4 flex flex-col justify-between overflow-hidden shadow-xs"
-      >
-        <div class="flex items-center justify-between pb-2 border-b border-gray-800 text-xs font-medium text-gray-400">
-          <div class="flex items-center gap-1.5">
-            <Terminal class="w-3.5 h-3.5 text-brand-400" />
-            <span>{{ snippet.title }}</span>
-          </div>
-          <button
+    <div class="connection-body">
+      <div>
+        <label
+          for="tavern-base"
+          class="text-sm text-secondary"
+        >自定义 API 地址</label><div class="connection-url">
+          <input
+            id="tavern-base"
+            :value="base"
+            readonly
+          ><button
             type="button"
-            class="flex items-center gap-1 text-[11px] text-gray-400 hover:text-white px-2 py-0.5 rounded bg-gray-800 hover:bg-gray-700 transition-colors cursor-pointer"
-            @click="handleCopy(snippet.code, idx)"
+            class="console-button"
+            @click="copy(base, 0, '已复制 API 地址')"
           >
             <Check
-              v-if="copied === idx"
-              class="w-3 h-3 text-emerald-400"
-            />
-            <Copy
+              v-if="copied === 0"
+              :size="15"
+            /><Copy
               v-else
-              class="w-3 h-3"
-            />
-            <span>{{ copied === idx ? '已复制' : '复制' }}</span>
+              :size="15"
+            />复制地址
           </button>
-        </div>
-
-        <pre class="mt-3 text-xs font-mono overflow-x-auto text-gray-200 leading-relaxed"><code>{{ snippet.code }}</code></pre>
+        </div><p>在 SillyTavern 中选择 Chat Completion → 自定义 OpenAI 兼容接口。</p>
+      </div>
+      <div class="connection-options">
+        <div>
+          <strong>调用密钥</strong><p>使用独立 API Key，前往设置页创建或管理。</p><RouterLink
+            to="/settings"
+            class="text-accent text-sm"
+          >管理 API Key ↗</RouterLink>
+        </div><div><strong>选择模型</strong><p>普通模型走 PG；带 <code>-build</code> 后缀走 Build 代码助手。两种请求可以并发。</p></div>
       </div>
     </div>
-  </div>
+  </article>
 </template>
+
+<style scoped>
+.connection-body { padding:20px; }.connection-url { display:flex; gap:10px; margin-top:10px; }.connection-url input { flex:1; min-width:0; border:1px solid var(--color-line); border-radius:6px; padding:10px 12px; font:13px ui-monospace,monospace; }.connection-body p { color:var(--color-muted); font-size:12px; margin:9px 0; line-height:1.7; }.connection-options { display:grid; grid-template-columns:1fr 1fr; gap:24px; border-top:1px solid var(--color-line); margin-top:20px; padding-top:20px; }.connection-options strong { font-size:13px; color:var(--color-secondary); }@media(max-width:600px){.connection-options { grid-template-columns:1fr; gap:15px; }.connection-url { flex-wrap:wrap; }.connection-url input { width:100%; flex-basis:100%; }}
+</style>

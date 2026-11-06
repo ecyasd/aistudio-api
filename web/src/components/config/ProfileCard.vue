@@ -32,7 +32,7 @@ const emit = defineEmits<{
   delete: []
 }>()
 
-const expanded = ref(true)
+const expanded = ref(false)
 
 function handleDelete() {
   if (confirm(`确定要删除规则组 "${props.profile.name || 'unnamed'}" 吗？`)) {
@@ -66,16 +66,16 @@ function updateThinkingConfig(level: 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH' | nul
 </script>
 
 <template>
-  <div class="bg-white border border-gray-200/90 rounded-2xl shadow-xs overflow-hidden transition-all">
+  <div class="bg-panel border border-line/90 rounded-2xl  overflow-hidden transition-all">
     <!-- Header / Toggle -->
     <div
-      class="px-5 py-3.5 bg-gray-50/60 border-b border-gray-100 flex items-center justify-between gap-3 cursor-pointer select-none hover:bg-gray-100/60 transition-colors"
+      class="px-5 py-3.5 bg-canvas/60 border-b border-line flex items-center justify-between gap-3 cursor-pointer select-none hover:bg-raised/60 transition-colors"
       @click="expanded = !expanded"
     >
       <div class="flex items-center gap-2.5 min-w-0">
         <button
           type="button"
-          class="text-gray-400 p-0.5 rounded hover:bg-gray-200/60 transition-colors"
+          class="text-muted p-0.5 rounded hover:bg-line/60 transition-colors"
         >
           <ChevronDown
             v-if="expanded"
@@ -87,23 +87,23 @@ function updateThinkingConfig(level: 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH' | nul
           />
         </button>
 
-        <div class="w-6 h-6 rounded-lg bg-brand-500 text-white flex items-center justify-center font-bold text-xs shrink-0 shadow-2xs">
+        <div class="w-6 h-6 rounded-lg bg-accent text-on-accent flex items-center justify-center font-semibold text-xs shrink-0 ">
           {{ index + 1 }}
         </div>
 
         <div class="truncate">
           <div class="flex items-center gap-2">
-            <span class="font-bold text-gray-900 text-xs font-mono">
+            <span class="font-semibold text-fg text-xs font-mono">
               {{ profile.name || 'unnamed_profile' }}
             </span>
             <span
               v-if="profile.is_image_model"
-              class="px-2 py-0.2 text-[10px] font-semibold rounded-full bg-purple-100 text-purple-800"
+              class="px-2 py-0.2 text-[10px] font-semibold rounded-full bg-violet-soft text-violet"
             >
               生图模型规则
             </span>
           </div>
-          <div class="text-[11px] text-gray-400 font-mono flex items-center gap-2 mt-0.5 truncate">
+          <div class="text-[11px] text-muted font-mono flex items-center gap-2 mt-0.5 truncate">
             <span v-if="profile.match?.contains?.length">包含: {{ profile.match.contains.join(', ') }}</span>
             <span v-if="profile.match?.prefixes?.length">前缀: {{ profile.match.prefixes.join(', ') }}</span>
             <span v-if="profile.match?.exact?.length">精确: {{ profile.match.exact.join(', ') }}</span>
@@ -117,7 +117,7 @@ function updateThinkingConfig(level: 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH' | nul
       >
         <button
           type="button"
-          class="p-1.5 text-gray-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+          class="p-1.5 text-muted hover:text-danger hover:bg-danger-soft rounded-lg transition-colors cursor-pointer"
           title="删除该规则预设"
           @click="handleDelete"
         >
@@ -162,10 +162,10 @@ function updateThinkingConfig(level: 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH' | nul
       </div>
 
       <!-- Match Conditions -->
-      <div class="p-3.5 bg-gray-50/70 border border-gray-200/70 rounded-xl space-y-3">
+      <div class="p-3.5 bg-canvas/70 border border-line/70 rounded-xl space-y-3">
         <div class="flex items-center justify-between">
-          <div class="flex items-center gap-2 text-xs font-bold text-gray-800">
-            <Layers class="w-4 h-4 text-brand-600" />
+          <div class="flex items-center gap-2 text-xs font-semibold text-fg">
+            <Layers class="w-4 h-4 text-accent" />
             <span>模型匹配规则</span>
           </div>
           <FieldHelpTip schema-key="match.rules" />
@@ -198,10 +198,10 @@ function updateThinkingConfig(level: 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH' | nul
       </div>
 
       <!-- Default Tools -->
-      <div class="p-3.5 bg-gray-50/70 border border-gray-200/70 rounded-xl space-y-2">
+      <div class="p-3.5 bg-canvas/70 border border-line/70 rounded-xl space-y-2">
         <div class="flex items-center justify-between">
-          <div class="flex items-center gap-2 text-xs font-bold text-gray-800">
-            <Wrench class="w-4 h-4 text-brand-600" />
+          <div class="flex items-center gap-2 text-xs font-semibold text-fg">
+            <Wrench class="w-4 h-4 text-accent" />
             <span>默认内置工具</span>
           </div>
           <FieldHelpTip schema-key="profile.default_tools" />
@@ -216,10 +216,10 @@ function updateThinkingConfig(level: 'MINIMAL' | 'LOW' | 'MEDIUM' | 'HIGH' | nul
       </div>
 
       <!-- Generation Config Defaults -->
-      <div class="p-3.5 bg-gray-50/70 border border-gray-200/70 rounded-xl space-y-3">
+      <div class="p-3.5 bg-canvas/70 border border-line/70 rounded-xl space-y-3">
         <div class="flex items-center justify-between">
-          <div class="flex items-center gap-2 text-xs font-bold text-gray-800">
-            <Cpu class="w-4 h-4 text-brand-600" />
+          <div class="flex items-center gap-2 text-xs font-semibold text-fg">
+            <Cpu class="w-4 h-4 text-accent" />
             <span>生成参数默认值</span>
           </div>
           <FieldHelpTip schema-key="generation.defaults" />

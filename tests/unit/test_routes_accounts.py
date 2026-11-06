@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -17,8 +17,6 @@ from aistudio_api.infrastructure.account.account_store import AccountMeta
 @pytest.fixture(autouse=True)
 def synthetic_management_password(monkeypatch):
     monkeypatch.setattr(settings, "web_password", "test-admin")
-
-
 
 
 @pytest.fixture(autouse=True)
@@ -148,3 +146,40 @@ async def test_api_accounts_active_endpoint():
         assert "no-store" in resp.headers.get("Cache-Control", "")
         data = resp.json()
         assert data["id"] == "acc_1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bundle", [False, True])
+async def test_import_save_only_does_not_probe_google(
+    setup_mock_account_service, monkeypatch, bundle
+):
+    import json
+
+    service = setup_mock_account_service
+    service.save_account_from_cookies.return_value = (
+        service.get_active_account.return_value
+    )
+    monkeypatch.setattr(runtime_state, "client", None)
+    email = AsyncMock(
+        side_effect=AssertionError("No Google discovery during save-only import")
+    )
+    tier = AsyncMock(
+        side_effect=AssertionError("No Google discovery during save-only import")
+    )
+    monkeypatch.setattr("aistudio_api.api.routes_accounts.probe_account_email", email)
+    monkeypatch.setattr(
+        "aistudio_api.api.routes_accounts.probe_account_benefit_tier", tier
+    )
+    cookies = json.dumps([{"name": "SID", "value": "fixture", "domain": ".google.com"}])
+    if bundle:
+        path = "/api/accounts/import-bundle"
+        payload = {"probe_identity": False, "accounts": [{"cookies": cookies}]}
+    else:
+        path = "/api/accounts/import-cookies"
+        payload = {"probe_identity": False, "cookies": cookies}
+    async with _client() as client:
+        response = await client.post(path, json=payload)
+    assert response.status_code == 200
+    email.assert_not_awaited()
+    tier.assert_not_awaited()
+    service.save_account_from_cookies.assert_called_once()

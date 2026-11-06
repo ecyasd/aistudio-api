@@ -40,85 +40,93 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="space-y-6">
-    <RuntimeCard />
-    <!-- Top Title -->
-    <div>
-      <h2 class="text-xl font-bold text-gray-900 tracking-tight">
-        系统与模型规则配置
-      </h2>
-    </div>
+  <div class="monitor-page space-y-6">
+    <header class="monitor-heading">
+      <div>
+        <div class="eyebrow">
+          WORKSPACE / SETTINGS
+        </div><h1>设置</h1><p>管理运行引擎、访问密钥和模型参数。</p>
+      </div>
+    </header>
+    <RuntimeCard @saved="loadConfig">
+      <template #signers>
+        <SignerServerCard
+          embedded
+          @switched="loadConfig"
+        />
+      </template>
+    </RuntimeCard>
 
     <!-- Server Runtime Status Cards -->
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-      <div class="bg-white border border-gray-200/80 rounded-2xl p-4 shadow-xs">
-        <div class="flex items-center gap-2 text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
-          <Server class="w-4 h-4 text-blue-600" />
+      <div class="bg-panel border border-line/80 rounded-2xl p-4 ">
+        <div class="flex items-center gap-2 text-xs font-semibold text-muted uppercase tracking-wider mb-2">
+          <Server class="w-4 h-4 text-info" />
           <span>服务端口</span>
         </div>
-        <div class="text-base font-bold text-gray-900 font-mono">
+        <div class="text-base font-semibold text-fg font-mono">
           :{{ config?.port || 8080 }}
         </div>
-        <div class="text-[11px] text-gray-400 mt-1">
+        <div class="text-[11px] text-muted mt-1">
           HTTP 服务监听端口
         </div>
       </div>
 
-      <div class="bg-white border border-gray-200/80 rounded-2xl p-4 shadow-xs">
-        <div class="flex items-center gap-2 text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
-          <Cpu class="w-4 h-4 text-emerald-600" />
+      <div class="bg-panel border border-line/80 rounded-2xl p-4 ">
+        <div class="flex items-center gap-2 text-xs font-semibold text-muted uppercase tracking-wider mb-2">
+          <Cpu class="w-4 h-4 text-success" />
           <span>日志输出模式</span>
         </div>
-        <div class="text-base font-bold text-gray-900 font-mono">
+        <div class="text-base font-semibold text-fg font-mono">
           {{ config?.log_level || 'INFO' }}
         </div>
-        <div class="text-[11px] text-gray-400 mt-1">
+        <div class="text-[11px] text-muted mt-1">
           诊断记录: 有界脱敏元数据
         </div>
       </div>
 
-      <div class="bg-white border border-gray-200/80 rounded-2xl p-4 shadow-xs">
-        <div class="flex items-center gap-2 text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
-          <Globe class="w-4 h-4 text-amber-600" />
+      <div class="bg-panel border border-line/80 rounded-2xl p-4 ">
+        <div class="flex items-center gap-2 text-xs font-semibold text-muted uppercase tracking-wider mb-2">
+          <Globe class="w-4 h-4 text-warning" />
           <span>网络代理状态</span>
         </div>
-        <div class="text-base font-bold text-gray-900">
+        <div class="text-base font-semibold text-fg">
           <span
             v-if="config?.proxy_configured"
-            class="text-emerald-600 flex items-center gap-1"
+            class="text-success flex items-center gap-1"
           >
             <CheckCircle2 class="w-4 h-4" /> 已配置代理
           </span>
           <span
             v-else
-            class="text-gray-400 text-sm"
+            class="text-muted text-sm"
           >直连 (未配代理)</span>
         </div>
-        <div class="text-[11px] text-gray-400 mt-1">
+        <div class="text-[11px] text-muted mt-1">
           支持 HTTP / SOCKS5 出口代理
         </div>
       </div>
 
-      <div class="bg-white border border-gray-200/80 rounded-2xl p-4 shadow-xs">
-        <div class="flex items-center gap-2 text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
-          <Lock class="w-4 h-4 text-rose-600" />
+      <div class="bg-panel border border-line/80 rounded-2xl p-4 ">
+        <div class="flex items-center gap-2 text-xs font-semibold text-muted uppercase tracking-wider mb-2">
+          <Lock class="w-4 h-4 text-danger" />
           <span>控制台鉴权状态</span>
         </div>
-        <div class="text-base font-bold">
+        <div class="text-base font-semibold">
           <span
             v-if="config?.auth_enabled"
-            class="text-emerald-600 flex items-center gap-1"
+            class="text-success flex items-center gap-1"
           >
             <CheckCircle2 class="w-4 h-4" /> 鉴权已启用
           </span>
           <span
             v-else
-            class="text-amber-600 flex items-center gap-1"
+            class="text-warning flex items-center gap-1"
           >
             <AlertCircle class="w-4 h-4" /> 免密开放模式
           </span>
         </div>
-        <div class="text-[11px] text-gray-400 mt-1">
+        <div class="text-[11px] text-muted mt-1">
           {{ config?.auth_enabled ? '已受 AISTUDIO_WEB_PASSWORD 保护' : '未配置 AISTUDIO_WEB_PASSWORD' }}
         </div>
       </div>
@@ -126,10 +134,10 @@ onMounted(() => {
     <!-- Restrained Auth Reminder if Auth is disabled -->
     <div
       v-if="config && !config.auth_enabled"
-      class="px-4 py-3 bg-amber-50/70 border border-amber-200/80 rounded-xl flex items-center justify-between gap-3 text-xs text-amber-900"
+      class="px-4 py-3 bg-warning-soft/70 border border-warning-line/80 rounded-xl flex items-center justify-between gap-3 text-xs text-warning"
     >
       <div class="flex items-center gap-2">
-        <AlertCircle class="w-4 h-4 text-amber-600 shrink-0" />
+        <AlertCircle class="w-4 h-4 text-warning shrink-0" />
         <span>控制台当前处于免密访问模式。公网部署建议配置环境变量 <code>AISTUDIO_WEB_PASSWORD</code> 启用鉴权。</span>
       </div>
     </div>
@@ -143,7 +151,6 @@ onMounted(() => {
       @saved="loadConfig"
     />
     <!-- WAA Signer Servers & Features Binding Card -->
-    <SignerServerCard @switched="loadConfig" />
 
     <!-- API Key Management Card -->
     <ApiKeyManagerCard />

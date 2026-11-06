@@ -18,29 +18,29 @@ const toastStore = useToastStore()
       <div
         v-for="toast in toastStore.toasts"
         :key="toast.id"
-        class="pointer-events-auto flex items-start gap-3 p-3.5 rounded-xl shadow-lg border text-sm font-medium transition-all"
+        class="pointer-events-auto flex items-start gap-3 p-3.5 rounded-xl  border text-sm font-medium transition-all"
         :class="{
-          'bg-white border-green-200 text-green-800': toast.type === 'success',
-          'bg-white border-red-200 text-red-800': toast.type === 'error',
-          'bg-white border-amber-200 text-amber-800': toast.type === 'warning',
-          'bg-white border-blue-200 text-blue-800': toast.type === 'info',
+          'bg-panel border-success-line text-success': toast.type === 'success',
+          'bg-panel border-danger-line text-danger': toast.type === 'error',
+          'bg-panel border-warning-line text-warning': toast.type === 'warning',
+          'bg-panel border-info-line text-info': toast.type === 'info',
         }"
       >
         <CheckCircle2
           v-if="toast.type === 'success'"
-          class="w-5 h-5 text-green-500 shrink-0 mt-0.5"
+          class="w-5 h-5 text-success shrink-0 mt-0.5"
         />
         <AlertCircle
           v-else-if="toast.type === 'error'"
-          class="w-5 h-5 text-red-500 shrink-0 mt-0.5"
+          class="w-5 h-5 text-danger shrink-0 mt-0.5"
         />
         <AlertTriangle
           v-else-if="toast.type === 'warning'"
-          class="w-5 h-5 text-amber-500 shrink-0 mt-0.5"
+          class="w-5 h-5 text-warning shrink-0 mt-0.5"
         />
         <Info
           v-else
-          class="w-5 h-5 text-blue-500 shrink-0 mt-0.5"
+          class="w-5 h-5 text-info shrink-0 mt-0.5"
         />
 
         <div class="flex-1 leading-snug break-words">
@@ -49,7 +49,7 @@ const toastStore = useToastStore()
 
         <button
           type="button"
-          class="text-gray-400 hover:text-gray-600 rounded-lg p-0.5 transition-colors"
+          class="text-muted hover:text-secondary rounded-lg p-0.5 transition-colors"
           @click="toastStore.remove(toast.id)"
         >
           <X class="w-4 h-4" />

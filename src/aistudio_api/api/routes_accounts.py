@@ -122,6 +122,7 @@ class ApplyPresetResponse(BaseModel):
 
 class ImportCookiesRequest(BaseModel):
     cookies: str
+    probe_identity: bool = True
     name: str | None = None
     email: str | None = None
     account_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_\-\.@]+$")
@@ -157,6 +158,7 @@ class BundleAccountItem(BaseModel):
 
 
 class ImportBundleRequest(BaseModel):
+    probe_identity: bool = True
     file_path: str | None = None
     content: str | None = None
     accounts: list[BundleAccountItem] | None = None
@@ -577,6 +579,7 @@ async def import_cookies(
 
             if bundle_list:
                 bundle_req = ImportBundleRequest(
+                    probe_identity=req.probe_identity,
                     accounts=[
                         BundleAccountItem(
                             name=str(a.get("name") or "Google Account"),
@@ -640,7 +643,7 @@ async def import_cookies(
     cid = f"cookie_{secrets.token_hex(4)}"
     detected_email = req.email
     detected_tier = req.tier
-    if not detected_email or not detected_tier:
+    if req.probe_identity and (not detected_email or not detected_tier):
         raw_cookies_list = storage_state.get("cookies")
         if isinstance(raw_cookies_list, list):
             cookie_dict = {
@@ -824,7 +827,7 @@ async def import_bundle(
         acc_email = str(item["email"]) if item.get("email") else None
         acc_auth_user = str(item.get("auth_user") or "0")
         acc_tier = str(item.get("tier") or "")
-        if not acc_email or not acc_tier:
+        if req.probe_identity and (not acc_email or not acc_tier):
             raw_cookies_list = storage_state.get("cookies")
             if isinstance(raw_cookies_list, list):
                 cookie_dict = {

@@ -8,7 +8,7 @@ const isLoginPage = computed(() => route.meta.public === true)
 </script>
 
 <template>
-  <div class="min-h-screen bg-gray-50 text-gray-900">
+  <div class="min-h-screen bg-canvas text-fg">
     <router-view v-if="isLoginPage" />
     <AppLayout v-else>
       <router-view />

@@ -2,7 +2,7 @@ import { onUnmounted, ref, shallowRef, watch } from 'vue'
 import { request } from '@/api/client'
 import { usePolling } from './usePolling'
 
-export function useConsoleFeed<T>(endpoint: string) {
+export function useConsoleFeed<T>(endpoint: string, intervalMs = 2000) {
   const items = shallowRef<T[]>([])
   const error = ref('')
   const loading = ref(false)
@@ -27,7 +27,7 @@ export function useConsoleFeed<T>(endpoint: string) {
       if (!disposed) loading.value = false
     }
   }
-  const polling = usePolling(refresh, 2000)
+  const polling = usePolling(refresh, intervalMs)
   watch(live, (value) => {
     if (value) { polling.resume(); void refresh() }
     else polling.pause()

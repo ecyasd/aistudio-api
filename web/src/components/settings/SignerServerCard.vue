@@ -20,6 +20,7 @@ const emit = defineEmits<{
 }>()
 
 const toast = useToastStore()
+defineProps<{ embedded?: boolean }>()
 
 const loading = ref(false)
 const switching = ref<string | null>(null)
@@ -182,26 +183,26 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="bg-white border border-gray-200/80 rounded-2xl p-5 shadow-xs">
+  <div :class="embedded ? 'space-y-4' : 'bg-panel border border-line rounded-xl p-5'">
     <!-- Header -->
-    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-gray-100">
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-line">
       <div class="space-y-1">
         <div class="flex items-center gap-2">
-          <KeyRound class="w-5 h-5 text-indigo-600" />
-          <h3 class="text-base font-bold text-gray-900 tracking-tight">
-            无浏览器 WAA 签名服务
+          <KeyRound class="w-5 h-5 text-info" />
+          <h3 class="text-base font-semibold text-fg tracking-tight">
+            WAA 签名服务
           </h3>
-          <span class="px-2 py-0.5 text-[11px] font-semibold bg-gray-100 text-gray-700 rounded-md">
+          <span class="px-2 py-0.5 text-[11px] font-semibold bg-raised text-secondary rounded-md">
             纯手动切换
           </span>
         </div>
-        <p class="text-xs text-gray-500">
-          无浏览器引擎使用此处选择的签名节点；有浏览器引擎直接在本机 CloakBrowser 中签名。
+        <p class="text-xs text-muted">
+          选择本地或远程签名服务，沿用上游的签名节点配置。
         </p>
       </div>
       <button
         type="button"
-        class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-indigo-600 bg-indigo-50 hover:bg-indigo-100 rounded-lg transition-colors cursor-pointer self-start sm:self-auto shrink-0"
+        class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-info bg-info-soft hover:bg-info-soft rounded-lg transition-colors cursor-pointer self-start sm:self-auto shrink-0"
         @click="openCreateModal"
       >
         <Plus class="w-3.5 h-3.5" />
@@ -217,32 +218,32 @@ onMounted(() => {
         class="p-4 rounded-xl border transition-all"
         :class="[
           server.is_active
-            ? 'border-indigo-300 bg-indigo-50/30 ring-1 ring-indigo-200/50'
-            : 'border-gray-200 bg-white hover:border-gray-300'
+            ? 'border-info-line bg-info-soft/30 ring-1 ring-info/50'
+            : 'border-line bg-panel hover:border-line-strong'
         ]"
       >
         <div class="flex flex-col md:flex-row md:items-center justify-between gap-3">
           <!-- Info -->
           <div class="space-y-1.5 min-w-0">
             <div class="flex items-center gap-2 flex-wrap">
-              <span class="text-sm font-semibold text-gray-900">
+              <span class="text-sm font-semibold text-fg">
                 {{ server.name }}
               </span>
               <span
                 v-if="server.is_active"
-                class="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium bg-emerald-100 text-emerald-800 rounded-md"
+                class="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium bg-success-soft text-success rounded-md"
               >
                 <Check class="w-3 h-3" />
                 当前激活
               </span>
-              <span class="text-xs font-mono text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded">
+              <span class="text-xs font-mono text-muted bg-raised px-1.5 py-0.5 rounded">
                 {{ server.url }}
               </span>
               <!-- Test Result Indicator -->
               <span
                 v-if="testResults[server.id]"
                 class="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded"
-                :class="testResults[server.id].ok ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'"
+                :class="testResults[server.id].ok ? 'bg-success-soft text-success' : 'bg-danger-soft text-danger'"
               >
                 <CheckCircle2
                   v-if="testResults[server.id].ok"
@@ -258,19 +259,19 @@ onMounted(() => {
 
             <p
               v-if="server.description"
-              class="text-xs text-gray-500"
+              class="text-xs text-muted"
             >
               {{ server.description }}
             </p>
 
             <!-- Bound User-Agent & Features -->
-            <div class="text-[11px] text-gray-600 bg-gray-50/80 p-2 rounded-lg border border-gray-100 space-y-1 font-mono break-all">
+            <div class="text-[11px] text-secondary bg-canvas/80 p-2 rounded-lg border border-line space-y-1 font-mono break-all">
               <div>
-                <span class="text-gray-400 select-none">User-Agent: </span>
+                <span class="text-muted select-none">User-Agent: </span>
                 <span>{{ server.user_agent || '未设置 (默认跟随全局)' }}</span>
               </div>
               <div v-if="server.headers && Object.keys(server.headers).length > 0">
-                <span class="text-gray-400 select-none">绑定头部: </span>
+                <span class="text-muted select-none">绑定头部: </span>
                 <span>{{ Object.entries(server.headers).map(([k, v]) => `${k}: ${v}`).join('; ') }}</span>
               </div>
             </div>
@@ -280,7 +281,7 @@ onMounted(() => {
           <div class="flex items-center gap-2 shrink-0 self-end md:self-center">
             <button
               type="button"
-              class="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-gray-600 hover:text-gray-900 bg-gray-100 hover:bg-gray-200/80 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+              class="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-secondary hover:text-fg bg-raised hover:bg-line/80 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
               :disabled="testingId === server.id"
               @click="handleTest(server)"
             >
@@ -290,7 +291,7 @@ onMounted(() => {
               />
               <Activity
                 v-else
-                class="w-3.5 h-3.5 text-gray-500"
+                class="w-3.5 h-3.5 text-muted"
               />
               <span>测试连接</span>
             </button>
@@ -298,7 +299,7 @@ onMounted(() => {
             <button
               v-if="!server.is_active"
               type="button"
-              class="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-xs transition-colors cursor-pointer disabled:opacity-50"
+              class="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-white bg-action hover:bg-action-hover rounded-lg  transition-colors cursor-pointer disabled:opacity-50"
               :disabled="switching === server.id"
               @click="handleSwitch(server.id)"
             >
@@ -311,7 +312,7 @@ onMounted(() => {
 
             <button
               type="button"
-              class="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors cursor-pointer"
+              class="p-1.5 text-muted hover:text-secondary hover:bg-raised rounded-lg transition-colors cursor-pointer"
               title="编辑"
               @click="openEditModal(server)"
             >
@@ -321,7 +322,7 @@ onMounted(() => {
             <button
               v-if="!server.is_active"
               type="button"
-              class="p-1.5 text-gray-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+              class="p-1.5 text-muted hover:text-danger hover:bg-danger-soft rounded-lg transition-colors cursor-pointer"
               title="删除"
               @click="handleDeleteServer(server)"
             >
@@ -337,14 +338,14 @@ onMounted(() => {
       v-if="showModal"
       class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs"
     >
-      <div class="bg-white rounded-2xl max-w-lg w-full p-5 shadow-xl border border-gray-100 space-y-4">
-        <div class="flex items-center justify-between pb-3 border-b border-gray-100">
-          <h4 class="text-sm font-bold text-gray-900">
+      <div class="bg-panel rounded-2xl max-w-lg w-full p-5  border border-line space-y-4">
+        <div class="flex items-center justify-between pb-3 border-b border-line">
+          <h4 class="text-sm font-semibold text-fg">
             {{ isEditing ? '编辑签名服务器' : '添加签名服务器' }}
           </h4>
           <button
             type="button"
-            class="text-gray-400 hover:text-gray-600 cursor-pointer"
+            class="text-muted hover:text-secondary cursor-pointer"
             @click="showModal = false"
           >
             ✕
@@ -353,81 +354,81 @@ onMounted(() => {
 
         <div class="space-y-3 text-xs">
           <div>
-            <label class="block font-medium text-gray-700 mb-1">服务器标识 (ID)</label>
+            <label class="block font-medium text-secondary mb-1">服务器标识 (ID)</label>
             <input
               v-model="form.id"
               type="text"
               :disabled="isEditing"
               placeholder="如 local_spidermonkey 或 custom_nodevm"
-              class="w-full px-3 py-2 border border-gray-200 rounded-lg font-mono focus:outline-hidden focus:border-indigo-500 disabled:bg-gray-50"
+              class="w-full px-3 py-2 border border-line rounded-lg font-mono focus:outline-hidden focus:border-info-line disabled:bg-canvas"
             >
           </div>
 
           <div>
-            <label class="block font-medium text-gray-700 mb-1">名称 *</label>
+            <label class="block font-medium text-secondary mb-1">名称 *</label>
             <input
               v-model="form.name"
               type="text"
               placeholder="如 本地 Go 签名服务"
-              class="w-full px-3 py-2 border border-gray-200 rounded-lg focus:outline-hidden focus:border-indigo-500"
+              class="w-full px-3 py-2 border border-line rounded-lg focus:outline-hidden focus:border-info-line"
             >
           </div>
 
           <div>
-            <label class="block font-medium text-gray-700 mb-1">服务地址 (URL) *</label>
+            <label class="block font-medium text-secondary mb-1">服务地址 (URL) *</label>
             <input
               v-model="form.url"
               type="text"
               placeholder="http://127.0.0.1:8081"
-              class="w-full px-3 py-2 border border-gray-200 rounded-lg font-mono focus:outline-hidden focus:border-indigo-500"
+              class="w-full px-3 py-2 border border-line rounded-lg font-mono focus:outline-hidden focus:border-info-line"
             >
           </div>
 
           <div>
-            <label class="block font-medium text-gray-700 mb-1">绑定的特征 User-Agent</label>
+            <label class="block font-medium text-secondary mb-1">绑定的特征 User-Agent</label>
             <textarea
               v-model="form.user_agent"
               rows="2"
               placeholder="在此处填写该签名机底层模拟的真实 User-Agent"
-              class="w-full px-3 py-2 border border-gray-200 rounded-lg font-mono text-[11px] focus:outline-hidden focus:border-indigo-500"
+              class="w-full px-3 py-2 border border-line rounded-lg font-mono text-[11px] focus:outline-hidden focus:border-info-line"
             />
-            <p class="text-[11px] text-gray-400 mt-0.5">
+            <p class="text-[11px] text-muted mt-0.5">
               提示：SpiderMonkey 152 对应 Firefox 152 UA；NodeVM / Playwright 对应其模拟的 Chrome UA。
             </p>
           </div>
 
           <div>
-            <label class="block font-medium text-gray-700 mb-1">自定义特征请求头 (JSON 格式)</label>
+            <label class="block font-medium text-secondary mb-1">自定义特征请求头 (JSON 格式)</label>
             <textarea
               v-model="customHeadersText"
               rows="3"
               :placeholder="JSON.stringify({ 'X-User-Agent': 'grpc-web-javascript/0.1' })"
-              class="w-full px-3 py-2 border border-gray-200 rounded-lg font-mono text-[11px] focus:outline-hidden focus:border-indigo-500"
+              class="w-full px-3 py-2 border border-line rounded-lg font-mono text-[11px] focus:outline-hidden focus:border-info-line"
             />
           </div>
 
           <div>
-            <label class="block font-medium text-gray-700 mb-1">描述说明</label>
+            <label class="block font-medium text-secondary mb-1">描述说明</label>
             <input
               v-model="form.description"
               type="text"
               placeholder="选填，关于该签名节点的补充说明"
-              class="w-full px-3 py-2 border border-gray-200 rounded-lg focus:outline-hidden focus:border-indigo-500"
+              class="w-full px-3 py-2 border border-line rounded-lg focus:outline-hidden focus:border-info-line"
             >
           </div>
         </div>
 
-        <div class="flex items-center justify-end gap-2 pt-3 border-t border-gray-100">
+        <div class="flex items-center justify-end gap-2 pt-3 border-t border-line">
           <button
             type="button"
-            class="px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-100 rounded-lg cursor-pointer"
+            class="px-3 py-1.5 text-xs text-secondary hover:bg-raised rounded-lg cursor-pointer"
             @click="showModal = false"
           >
             取消
           </button>
           <button
             type="button"
-            class="px-4 py-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-xs cursor-pointer disabled:opacity-50"
+            class="px-4 py-1.5 text-xs font-semibold text-white bg-action hover:bg-action-hover rounded-lg  cursor-pointer disabled:opacity-50"
             :disabled="saving"
             @click="handleSaveServer"
           >

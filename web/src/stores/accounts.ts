@@ -6,12 +6,10 @@ import type {
   Account,
   AccountWithStats,
   AccountRotationStats,
-  ImportCookiesRequest,
-  ProbeAndImportRequest,
-  ImportBundleRequest,
   AccountPreset,
 } from '@/types'
 import { useToastStore } from './toast.ts'
+import type { CookieImportResult, CookieSource } from '@/utils/cookieImport'
 
 export const useAccountsStore = defineStore('accounts', () => {
   const accounts = ref<Account[]>([])
@@ -208,52 +206,32 @@ export const useAccountsStore = defineStore('accounts', () => {
     }
   }
 
-  async function importCookies(payload: ImportCookiesRequest) {
+  async function importSources(sources: CookieSource[], options: { discover: boolean; name: string }) {
+    if (importing.value) return []
     const toast = useToastStore()
     importing.value = true
+    const results: CookieImportResult[] = []
     try {
-      const res = await accountsApi.importCookies(payload)
-      toast.success(`导入成功: 解析出 ${res.cookie_count} 个 Cookie (u/${res.auth_user})`)
-      await fetchAll()
-      return true
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '导入失败'
-      toast.error(msg)
-      return false
-    } finally {
-      importing.value = false
-    }
-  }
-
-  async function probeAndImport(payload: ProbeAndImportRequest) {
-    const toast = useToastStore()
-    importing.value = true
-    try {
-      const res = await accountsApi.probeAndImport(payload)
-      toast.success(`已完成探测并导入 ${res.imported_count} 个账号`)
-      await fetchAll()
-      return true
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '自动探活导入失败'
-      toast.error(msg)
-      return false
-    } finally {
-      importing.value = false
-    }
-  }
-
-  async function importBundle(payload: ImportBundleRequest) {
-    const toast = useToastStore()
-    importing.value = true
-    try {
-      const res = await accountsApi.importBundle(payload)
-      toast.success(`批量导入成功: 已入库 ${res.imported_count} 个账号`)
-      await fetchAll()
-      return true
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '批量导入失败'
-      toast.error(msg)
-      return false
+      for (const [index, source] of sources.entries()) {
+        try {
+          let count = 0
+          if (source.kind === 'bundle') {
+            count = (await accountsApi.importBundle({ content: source.content, probe_identity: false })).imported_count
+          } else if (options.discover) {
+            count = (await accountsApi.probeAndImport({ cookies: source.content, name_prefix: options.name || undefined })).imported_count
+          } else {
+            const label = options.name ? `${options.name}${sources.length > 1 ? ` ${index + 1}` : ''}` : source.label === '粘贴内容' ? undefined : source.label
+            await accountsApi.importCookies({ cookies: source.content, name: label, probe_identity: false })
+            count = 1
+          }
+          results.push({ label: source.label, ok: count > 0, count, error: count ? undefined : '未导入任何账号，请检查凭据包内容' })
+        } catch (cause) {
+          results.push({ label: source.label, ok: false, count: 0, error: cause instanceof Error ? cause.message : '导入失败，请重试' })
+        }
+      }
+      const count = results.reduce((sum, item) => sum + item.count, 0)
+      if (count) { await fetchAll(); toast.success(`导入完成，共 ${count} 个账号`) }
+      return results
     } finally {
       importing.value = false
     }
@@ -306,9 +284,7 @@ export const useAccountsStore = defineStore('accounts', () => {
     deleteAccount,
     deleteCookieGroup,
     updateAccountName,
-    importCookies,
-    probeAndImport,
-    importBundle,
+    importSources,
     detectAccountEmail,
     detectAccountTier,
     presets,

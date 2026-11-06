@@ -25,7 +25,7 @@ const emit = defineEmits<{
     <div
       class="px-5 py-3.5 flex items-center justify-between gap-3 cursor-pointer select-none transition-colors"
       :class="[
-        group.hasActive ? 'bg-brand-50/30 hover:bg-brand-50/50' : 'bg-white hover:bg-gray-50/80',
+        group.hasActive ? 'bg-accent-soft/30 hover:bg-accent-soft/50' : 'bg-panel hover:bg-canvas/80',
       ]"
       @click="emit('toggle')"
     >
@@ -33,7 +33,7 @@ const emit = defineEmits<{
         <!-- Expand Chevron -->
         <button
           type="button"
-          class="p-1 rounded-md text-gray-400 hover:text-gray-700 hover:bg-gray-200/60 transition-colors"
+          class="p-1 rounded-md text-muted hover:text-secondary hover:bg-line/60 transition-colors"
         >
           <ChevronDown
             v-if="!collapsed"
@@ -47,8 +47,8 @@ const emit = defineEmits<{
 
         <!-- Cookie Icon -->
         <div
-          class="w-7 h-7 rounded-lg flex items-center justify-center shrink-0 shadow-2xs"
-          :class="group.hasActive ? 'bg-brand-500 text-white' : 'bg-gray-100 text-gray-600'"
+          class="w-7 h-7 rounded-lg flex items-center justify-center shrink-0 "
+          :class="group.hasActive ? 'bg-accent text-on-accent' : 'bg-raised text-secondary'"
         >
           <Cookie class="w-4 h-4" />
         </div>
@@ -56,20 +56,20 @@ const emit = defineEmits<{
         <!-- Group Info -->
         <div class="truncate">
           <div class="flex items-center gap-2">
-            <span class="font-bold text-gray-900 text-xs tracking-tight">
+            <span class="font-semibold text-fg text-xs tracking-tight">
               {{ group.name }}
             </span>
-            <span class="text-[11px] font-mono text-gray-400">
+            <span class="text-[11px] font-mono text-muted">
               ({{ group.accounts.length }} 个子账号)
             </span>
             <span
               v-if="group.hasActive"
-              class="px-2 py-0.5 text-[10px] font-semibold rounded-full bg-emerald-100 text-emerald-800"
+              class="px-2 py-0.5 text-[10px] font-semibold rounded-full bg-success-soft text-success"
             >
               当前激活
             </span>
           </div>
-          <div class="text-[11px] text-gray-400 font-mono flex items-center gap-2 mt-0.5">
+          <div class="text-[11px] text-muted font-mono flex items-center gap-2 mt-0.5">
             <span>导入时间: {{ formatDate(group.createdAt) }}</span>
             <span>·</span>
             <span
@@ -86,16 +86,16 @@ const emit = defineEmits<{
         @click.stop
       >
         <div class="hidden sm:flex items-center gap-2 text-xs font-mono">
-          <span class="text-gray-500">调用: <strong class="text-gray-800">{{ group.totalRequests }}</strong></span>
-          <span class="text-gray-300">|</span>
-          <span :class="group.totalRateLimited > 0 ? 'text-rose-600 font-bold' : 'text-gray-400'">
+          <span class="text-muted">调用: <strong class="text-fg">{{ group.totalRequests }}</strong></span>
+          <span class="text-fg">|</span>
+          <span :class="group.totalRateLimited > 0 ? 'text-danger font-semibold' : 'text-muted'">
             429: {{ group.totalRateLimited }}
           </span>
         </div>
 
         <button
           type="button"
-          class="flex items-center gap-1 px-2 py-1 text-[11px] text-gray-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+          class="flex items-center gap-1 px-2 py-1 text-[11px] text-muted hover:text-danger hover:bg-danger-soft rounded-lg transition-colors cursor-pointer"
           title="删除整份 Cookie 及其下所有子账号"
           @click="emit('deleteGroup')"
         >
@@ -108,7 +108,7 @@ const emit = defineEmits<{
     <!-- Level 2: Sub-Accounts Container -->
     <div
       v-if="!collapsed"
-      class="bg-gray-50/40 px-4 sm:px-6 py-3 border-t border-gray-100"
+      class="bg-canvas/40 px-4 sm:px-6 py-3 border-t border-line"
     >
       <div class="space-y-2">
         <slot />

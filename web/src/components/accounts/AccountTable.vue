@@ -189,16 +189,16 @@ async function handleClearModelCooldown(accountId: string, model: string) {
 </script>
 
 <template>
-  <div class="bg-white border border-gray-200/80 rounded-2xl shadow-xs overflow-hidden space-y-0">
+  <div class="bg-panel border border-line/80 rounded-2xl  overflow-hidden space-y-0">
     <!-- Header Bar -->
-    <div class="px-6 py-4 border-b border-gray-100 flex flex-col gap-3 bg-gray-50/40">
+    <div class="px-6 py-4 border-b border-line flex flex-col gap-3 bg-canvas/40">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div class="flex items-center gap-2">
-          <Users class="w-4 h-4 text-brand-600" />
-          <h3 class="font-semibold text-gray-900 text-sm">
+          <Users class="w-4 h-4 text-accent" />
+          <h3 class="font-semibold text-fg text-sm">
             已配置账号
           </h3>
-          <span class="text-xs font-mono text-gray-500 bg-white border border-gray-200 px-2.5 py-0.5 rounded-full ml-1">
+          <span class="text-xs font-mono text-muted bg-panel border border-line px-2.5 py-0.5 rounded-full ml-1">
             {{ cookieGroups.length }} 组会话 · {{ filteredAccounts.length }} 个账号
           </span>
         </div>
@@ -206,24 +206,24 @@ async function handleClearModelCooldown(accountId: string, model: string) {
         <div class="flex items-center gap-2 flex-wrap">
           <button
             type="button"
-            class="px-2.5 py-1 text-xs font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors cursor-pointer flex items-center gap-1"
+            class="px-2.5 py-1 text-xs font-medium text-secondary hover:text-fg hover:bg-raised rounded-lg transition-colors cursor-pointer flex items-center gap-1"
             title="一键展开或收起所有账号的模型独立调用统计"
             @click="toggleAllModels"
           >
-            <Layers class="w-3.5 h-3.5 text-gray-500" />
+            <Layers class="w-3.5 h-3.5 text-muted" />
             <span>{{ forceExpandAllModels ? '收起模型明细' : '展开模型明细' }}</span>
           </button>
 
           <button
             type="button"
-            class="px-2.5 py-1 text-xs font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors cursor-pointer"
+            class="px-2.5 py-1 text-xs font-medium text-secondary hover:text-fg hover:bg-raised rounded-lg transition-colors cursor-pointer"
             @click="expandAll"
           >
             展开全部
           </button>
           <button
             type="button"
-            class="px-2.5 py-1 text-xs font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors cursor-pointer"
+            class="px-2.5 py-1 text-xs font-medium text-secondary hover:text-fg hover:bg-raised rounded-lg transition-colors cursor-pointer"
             @click="collapseAll"
           >
             收起全部
@@ -231,7 +231,7 @@ async function handleClearModelCooldown(accountId: string, model: string) {
 
           <button
             type="button"
-            class="px-2.5 py-1 text-xs font-medium text-gray-500 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer flex items-center gap-1"
+            class="px-2.5 py-1 text-xs font-medium text-muted hover:text-danger hover:bg-danger-soft rounded-lg transition-colors cursor-pointer flex items-center gap-1"
             title="清除已从存储中删除但残留在调度器中的无效幽灵状态"
             :disabled="cleaningGhosts"
             @click="handleCleanupGhosts"
@@ -243,25 +243,25 @@ async function handleClearModelCooldown(accountId: string, model: string) {
       </div>
 
       <!-- Search, Status Filter & Quota Countdown Bar -->
-      <div class="flex flex-col md:flex-row md:items-center justify-between gap-3 pt-2 border-t border-gray-200/60">
+      <div class="flex flex-col md:flex-row md:items-center justify-between gap-3 pt-2 border-t border-line/60">
         <!-- Search Input & Status Pills -->
         <div class="flex items-center gap-2 flex-wrap flex-1 min-w-0">
           <div class="relative w-full sm:w-64">
-            <Search class="w-3.5 h-3.5 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <Search class="w-3.5 h-3.5 text-muted absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               v-model="searchKeyword"
               type="text"
               placeholder="搜索账号名、邮箱、u/0..."
-              class="w-full pl-8 pr-3 py-1.5 bg-white border border-gray-200 rounded-xl text-xs outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 font-mono transition-all"
+              class="w-full pl-8 pr-3 py-1.5 bg-panel border border-line rounded-xl text-xs outline-none focus:border-accent-line focus:ring-2 focus:ring-accent/20 font-mono transition-all"
             >
           </div>
 
           <!-- Status Filter Pills -->
-          <div class="flex items-center bg-gray-100 p-0.5 rounded-xl text-xs font-medium">
+          <div class="flex items-center bg-raised p-0.5 rounded-xl text-xs font-medium">
             <button
               type="button"
               class="px-2.5 py-1 rounded-lg transition-all cursor-pointer"
-              :class="statusFilter === 'all' ? 'bg-white text-gray-900 font-semibold shadow-2xs' : 'text-gray-500 hover:text-gray-900'"
+              :class="statusFilter === 'all' ? 'bg-panel text-fg font-semibold ' : 'text-muted hover:text-fg'"
               @click="statusFilter = 'all'"
             >
               全部
@@ -269,7 +269,7 @@ async function handleClearModelCooldown(accountId: string, model: string) {
             <button
               type="button"
               class="px-2.5 py-1 rounded-lg transition-all cursor-pointer"
-              :class="statusFilter === 'ready' ? 'bg-white text-emerald-700 font-semibold shadow-2xs' : 'text-gray-500 hover:text-gray-900'"
+              :class="statusFilter === 'ready' ? 'bg-panel text-success font-semibold ' : 'text-muted hover:text-fg'"
               @click="statusFilter = 'ready'"
             >
               就绪
@@ -277,7 +277,7 @@ async function handleClearModelCooldown(accountId: string, model: string) {
             <button
               type="button"
               class="px-2.5 py-1 rounded-lg transition-all cursor-pointer"
-              :class="statusFilter === 'limited' ? 'bg-white text-amber-700 font-semibold shadow-2xs' : 'text-gray-500 hover:text-gray-900'"
+              :class="statusFilter === 'limited' ? 'bg-panel text-warning font-semibold ' : 'text-muted hover:text-fg'"
               @click="statusFilter = 'limited'"
             >
               配额耗尽
@@ -285,7 +285,7 @@ async function handleClearModelCooldown(accountId: string, model: string) {
             <button
               type="button"
               class="px-2.5 py-1 rounded-lg transition-all cursor-pointer"
-              :class="statusFilter === 'expired' ? 'bg-white text-rose-700 font-semibold shadow-2xs' : 'text-gray-500 hover:text-gray-900'"
+              :class="statusFilter === 'expired' ? 'bg-panel text-danger font-semibold ' : 'text-muted hover:text-fg'"
               @click="statusFilter = 'expired'"
             >
               登录态失效
@@ -294,15 +294,15 @@ async function handleClearModelCooldown(accountId: string, model: string) {
         </div>
 
         <!-- Quota Reset Functional Info -->
-        <div class="flex items-center gap-1.5 text-xs text-gray-500 font-mono shrink-0">
-          <Clock class="w-3.5 h-3.5 text-gray-400" />
+        <div class="flex items-center gap-1.5 text-xs text-muted font-mono shrink-0">
+          <Clock class="w-3.5 h-3.5 text-muted" />
           <span>每日配额刷新 (00:00 PST): 还剩 {{ hoursUntilPacificMidnight }}</span>
         </div>
       </div>
     </div>
 
     <!-- Tree Body -->
-    <div class="divide-y divide-gray-100">
+    <div class="divide-y divide-line">
       <CookieGroupBlock
         v-for="group in cookieGroups"
         :key="group.id"
@@ -329,13 +329,13 @@ async function handleClearModelCooldown(accountId: string, model: string) {
       <!-- Empty State -->
       <div
         v-if="!filteredAccounts.length"
-        class="py-16 text-center text-gray-400 space-y-3"
+        class="py-16 text-center text-muted space-y-3"
       >
-        <Cookie class="w-10 h-10 text-gray-300 mx-auto" />
-        <div class="text-sm font-medium text-gray-600">
+        <Cookie class="w-10 h-10 text-fg mx-auto" />
+        <div class="text-sm font-medium text-secondary">
           {{ searchKeyword || statusFilter !== 'all' ? '未找到匹配的账号' : '未导入账号' }}
         </div>
-        <p class="text-xs text-gray-400 max-w-sm mx-auto">
+        <p class="text-xs text-muted max-w-sm mx-auto">
           {{ searchKeyword || statusFilter !== 'all' ? '请尝试更换搜索词或筛选条件。' : '点击上方导入按钮添加凭据。' }}
         </p>
       </div>

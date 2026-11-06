@@ -1,343 +1,236 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-import { useAccountsStore } from '@/stores/accounts.ts'
+import { computed, onUnmounted, ref, watch } from 'vue'
+import { FileText, Upload, X, CheckCircle2 } from 'lucide-vue-next'
+import { useAccountsStore } from '@/stores/accounts'
+import { identifyCookieSource, type CookieSource, type CookieImportResult } from '@/utils/cookieImport'
 import Modal from '@/components/ui/Modal.vue'
 import Button from '@/components/ui/Button.vue'
-import { Sparkles, FileText, Upload, FolderOpen, CheckCircle2 } from 'lucide-vue-next'
-defineProps<{
-  modelValue: boolean
-}>()
 
-const emit = defineEmits<{
-  'update:modelValue': [val: boolean]
-}>()
-
-const accountsStore = useAccountsStore()
-
-const activeTab = ref<'text' | 'file'>('text')
-
-// 文本导入状态
-const cookieInput = ref('')
-const namePrefix = ref('')
-const singleEmail = ref('')
-const autoProbe = ref(true)
-
-// 文件导入状态
-const fileInputRef = ref<HTMLInputElement | null>(null)
-const selectedFileName = ref('')
-const selectedFileSize = ref('')
-const selectedFileContent = ref('')
-const localFilePath = ref('')
-const detectedCount = ref<number | null>(null)
-
-function onFileChange(event: Event) {
-  const target = event.target as HTMLInputElement
-  const file = target.files?.[0]
-  if (!file) return
-
-  selectedFileName.value = file.name
-  selectedFileSize.value = `${(file.size / 1024).toFixed(1)} KB`
-
-  const reader = new FileReader()
-  reader.onload = (e) => {
-    const text = (e.target?.result as string) || ''
-    selectedFileContent.value = text
-    try {
-      const parsed = JSON.parse(text)
-      if (Array.isArray(parsed)) {
-        detectedCount.value = parsed.length
-      } else if (Array.isArray(parsed.cookies)) {
-        detectedCount.value = 1
-      } else {
-        const list = parsed.accounts || parsed.profiles || []
-        detectedCount.value = Array.isArray(list) ? list.length : 1
-      }
-    } catch {
-      detectedCount.value = null
-    }
-  }
-  reader.readAsText(file)
+const props = defineProps<{ modelValue: boolean }>()
+const emit = defineEmits<{ 'update:modelValue': [value: boolean] }>()
+const store = useAccountsStore()
+const tab = ref<'text' | 'files'>('text')
+const text = ref(''), name = ref(''), discover = ref(false), error = ref(''), reading = ref(false), dragging = ref(false)
+const files = ref<{ name: string; size: number; source?: CookieSource; error?: string }[]>([])
+const results = ref<CookieImportResult[]>([])
+const picker = ref<HTMLInputElement>()
+let revision = 0, readSequence = 0
+watch(() => props.modelValue, () => {
+  revision++; readSequence++
+  text.value = ''; files.value = []; results.value = []; error.value = ''; reading.value = false
+  name.value = ''; discover.value = false
+}, { flush: 'sync' })
+onUnmounted(() => { revision++; readSequence++ })
+const pasted = computed(() => {
+  if (!text.value.trim()) return { source: undefined, error: '' }
+  try { return { source: identifyCookieSource('粘贴内容', text.value), error: '' } }
+  catch (cause) { return { source: undefined, error: cause instanceof Error ? cause.message : '无法识别格式' } }
+})
+const sources = computed(() => tab.value === 'text' ? (pasted.value.source ? [pasted.value.source] : []) : files.value.flatMap(item => item.source ? [item.source] : []))
+const remaining = computed(() => sources.value.filter(item => !results.value.some(result => result.ok && result.label === item.label)))
+watch([text, tab], () => { results.value = []; error.value = '' })
+const hasErrors = computed(() => tab.value === 'text' ? !!pasted.value.error : files.value.some(item => !!item.error))
+async function readFiles(selected: File[]) {
+  const sequence = ++readSequence, current = revision
+  reading.value = true; error.value = ''; results.value = []
+  const entries = await Promise.all(selected.map(async (file, index) => {
+    const label = selected.filter(item => item.name === file.name).length > 1 ? `${file.name} (${index + 1})` : file.name
+    try { return { name: label, size: file.size, source: identifyCookieSource(label, await file.text()) } }
+    catch (cause) { return { name: label, size: file.size, error: cause instanceof Error ? cause.message : '文件读取失败，请重新选择' } }
+  }))
+  if (sequence !== readSequence || current !== revision) return
+  files.value = entries; reading.value = false
 }
-
-function clearSelectedFile() {
-  selectedFileName.value = ''
-  selectedFileSize.value = ''
-  selectedFileContent.value = ''
-  detectedCount.value = null
-  if (fileInputRef.value) {
-    fileInputRef.value.value = ''
-  }
+function choose(event: Event) {
+  const input = event.target as HTMLInputElement
+  const selected = Array.from(input.files ?? [])
+  input.value = ''
+  void readFiles(selected)
 }
-async function handleSubmit() {
-  if (activeTab.value === 'file') {
-    const content = selectedFileContent.value.trim()
-    const path = localFilePath.value.trim()
-    if (!content && !path) return
-
-    const ok = await accountsStore.importBundle({
-      content: content || undefined,
-      file_path: path || undefined,
-    })
-    if (ok) {
-      clearSelectedFile()
-      localFilePath.value = ''
-      emit('update:modelValue', false)
-    }
-    return
-  }
-
-  const raw = cookieInput.value.trim()
-  if (!raw) return
-
-  if (raw.startsWith('{') && (raw.includes('"accounts"') || raw.includes('"bundle"'))) {
-    const ok = await accountsStore.importBundle({ content: raw })
-    if (ok) {
-      cookieInput.value = ''
-      namePrefix.value = ''
-      singleEmail.value = ''
-      emit('update:modelValue', false)
-    }
-    return
-  }
-  const ok = autoProbe.value
-    ? await accountsStore.probeAndImport({
-        cookies: raw,
-        name_prefix: namePrefix.value.trim() || undefined,
-      })
-    : await accountsStore.importCookies({
-        cookies: raw,
-        name: namePrefix.value.trim() || undefined,
-        email: singleEmail.value.trim() || undefined,
-      })
-
-  if (ok) {
-    cookieInput.value = ''
-    namePrefix.value = ''
-    singleEmail.value = ''
-    emit('update:modelValue', false)
-  }
+function drop(event: DragEvent) { dragging.value = false; if (!store.importing) void readFiles(Array.from(event.dataTransfer?.files ?? [])) }
+async function submit() {
+  if (store.importing || reading.value || hasErrors.value || !remaining.value.length) return
+  const current = revision
+  const imported = await store.importSources(remaining.value, { discover: discover.value, name: name.value.trim() })
+  if (current !== revision || !props.modelValue) return
+  results.value = [...results.value.filter(item => item.ok), ...imported]
+  if (results.value.every(item => item.ok)) emit('update:modelValue', false)
+  else error.value = '部分来源未导入，修正或重试失败项；成功项不会重复提交。'
 }
+const describe = (source: CookieSource) => `${source.format}${source.count ? ` · ${source.count} ${source.kind === 'bundle' ? '个账号条目' : '条 Cookie'}` : ''}`
 </script>
 
 <template>
   <Modal
     :model-value="modelValue"
-    max-width="lg"
-    title="导入 Google 账号凭据"
+    title="导入账号"
+    max-width="xl"
     @update:model-value="emit('update:modelValue', $event)"
   >
-    <div class="space-y-4">
-      <!-- Tab Switcher -->
-      <div class="flex items-center p-1 bg-gray-100 rounded-xl">
-        <button
-          type="button"
-          class="flex-1 flex items-center justify-center gap-1.5 py-1.5 text-xs font-semibold rounded-lg transition-all"
-          :class="activeTab === 'text' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-900'"
-          @click="activeTab = 'text'"
-        >
-          <FileText class="w-3.5 h-3.5" />
-          <span>文本粘贴导入</span>
-        </button>
-        <button
-          type="button"
-          class="flex-1 flex items-center justify-center gap-1.5 py-1.5 text-xs font-semibold rounded-lg transition-all"
-          :class="activeTab === 'file' ? 'bg-white text-brand-600 shadow-sm' : 'text-gray-500 hover:text-gray-900'"
-          @click="activeTab = 'file'"
-        >
-          <Upload class="w-3.5 h-3.5" />
-          <span>文件批量导入</span>
-        </button>
-      </div>
-
-      <!-- Mode: File Import -->
+    <div class="space-y-5">
+      <p class="text-sm text-muted">
+        粘贴 Cookie，或选择凭据文件。自动识别格式，导入前不会联网识别账号。
+      </p>
       <div
-        v-if="activeTab === 'file'"
-        class="space-y-4"
+        class="import-tabs"
+        role="tablist"
+        aria-label="导入方式"
       >
-        <!-- File Picker Drag & Drop Box -->
-        <div
-          class="border-2 border-dashed border-gray-200 hover:border-brand-400 bg-gray-50/70 hover:bg-brand-50/30 rounded-2xl p-5 text-center transition-all cursor-pointer relative"
-          @click="fileInputRef?.click()"
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="tab === 'text'"
+          :disabled="store.importing"
+          @click="tab = 'text'"
         >
-          <input
-            ref="fileInputRef"
-            type="file"
-            accept=".json,application/json"
-            class="hidden"
-            @change="onFileChange"
-          >
-          <div
-            v-if="!selectedFileName"
-            class="flex flex-col items-center gap-2"
-          >
-            <div class="w-10 h-10 rounded-full bg-brand-100 text-brand-600 flex items-center justify-center">
-              <Upload class="w-5 h-5" />
-            </div>
-            <div>
-              <p class="text-xs font-semibold text-gray-800">
-                点击选择凭据包文件 (.json)
-              </p>
-              <p class="text-[11px] text-gray-400 mt-0.5">
-                支持批量账号凭据包 (.json) 或 Cookie JSON 数组文件
-              </p>
-            </div>
-          </div>
-
-          <div
-            v-else
-            class="flex items-center justify-between bg-white p-3 rounded-xl border border-brand-200"
-          >
-            <div class="flex items-center gap-2.5 text-left">
-              <div class="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-600 flex items-center justify-center">
-                <CheckCircle2 class="w-4 h-4" />
-              </div>
-              <div>
-                <p class="text-xs font-semibold text-gray-800">
-                  {{ selectedFileName }}
-                </p>
-                <p class="text-[11px] text-gray-400">
-                  大小: {{ selectedFileSize }}
-                  <span
-                    v-if="detectedCount !== null"
-                    class="ml-1 text-brand-600 font-medium"
-                  >· 识别到 {{ detectedCount }} 个账号</span>
-                </p>
-              </div>
-            </div>
-            <button
-              type="button"
-              class="text-xs text-gray-400 hover:text-rose-500 px-2 py-1"
-              @click.stop="clearSelectedFile"
-            >
-              移除
-            </button>
-          </div>
-        </div>
-
-        <!-- Alternative: Local File Path on Server -->
-        <div class="space-y-1.5">
-          <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wider flex items-center justify-between">
-            <span class="flex items-center gap-1">
-              <FolderOpen class="w-3.5 h-3.5 text-gray-500" />
-              <span>直接填入本地文件绝对路径</span>
-            </span>
-          </label>
-          <input
-            v-model="localFilePath"
-            type="text"
-            placeholder="/sdcard/Download/aistudio_accounts.json"
-            class="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs font-mono outline-none focus:bg-white focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 transition-all"
-          >
-          <div class="flex items-center gap-1.5 flex-wrap pt-0.5 text-[11px] font-mono">
-            <span class="text-gray-400 font-sans">快捷路径:</span>
-            <button
-              type="button"
-              class="px-2 py-0.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-md transition-colors cursor-pointer"
-              @click="localFilePath = '/sdcard/Download/aistudio_accounts.json'"
-            >
-              /sdcard/Download/aistudio_accounts.json
-            </button>
-            <button
-              type="button"
-              class="px-2 py-0.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-md transition-colors cursor-pointer"
-              @click="localFilePath = 'data/aistudio_accounts.json'"
-            >
-              data/aistudio_accounts.json
-            </button>
-          </div>
-        </div>
+          <FileText :size="16" />粘贴文本
+        </button>
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="tab === 'files'"
+          :disabled="store.importing"
+          @click="tab = 'files'"
+        >
+          <Upload :size="16" />上传文件
+        </button>
       </div>
-
-      <!-- Mode: Text Paste -->
+      <div
+        v-if="tab === 'text'"
+        class="space-y-2"
+      >
+        <label
+          for="import-cookie-text"
+          class="text-sm text-secondary"
+        >Cookie 内容</label>
+        <textarea
+          id="import-cookie-text"
+          v-model="text"
+          :disabled="store.importing"
+          rows="7"
+          spellcheck="false"
+          autocapitalize="off"
+          autocomplete="off"
+          class="import-text"
+          placeholder="支持 Cookie 请求头、Cookie JSON 数组、storage state、Netscape cookies.txt 或账号包"
+        />
+        <p
+          v-if="pasted.source"
+          class="text-sm text-success"
+          role="status"
+        >
+          {{ describe(pasted.source) }}
+        </p>
+        <p
+          v-else-if="pasted.error"
+          class="text-sm text-danger"
+          role="alert"
+        >
+          {{ pasted.error }}
+        </p>
+      </div>
       <div
         v-else
-        class="space-y-4"
+        class="space-y-3"
       >
-        <div class="space-y-1.5">
-          <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wider flex items-center justify-between">
-            <span>Cookie 数据</span>
-            <span class="text-[11px] text-gray-400 font-normal">支持 JSON 数组、Netscape 或 KV 文本</span>
-          </label>
-          <textarea
-            v-model="cookieInput"
-            rows="6"
-            placeholder="[ { &quot;name&quot;: &quot;SAPISID&quot;, &quot;value&quot;: &quot;...&quot; }, ... ] 或&#10;SID=xxx; SSID=xxx; HSID=xxx; SAPISID=xxx; ..."
-            class="w-full p-3 font-mono text-xs bg-gray-50 border border-gray-200 rounded-xl outline-none focus:bg-white focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 transition-all"
-          />
-        </div>
-
-        <!-- Auto Probe Toggle -->
-        <label class="flex items-start gap-3 p-3 bg-brand-50/50 rounded-xl border border-brand-200/60 cursor-pointer select-none">
+        <label
+          class="import-drop"
+          :class="{ dragging }"
+          @dragover.prevent="dragging = true"
+          @dragleave.prevent="dragging = false"
+          @drop.prevent="drop"
+        >
+          <Upload :size="24" /><strong>{{ reading ? '正在读取文件…' : '选择或拖入文件' }}</strong><span>可同时选择多个 .json / .txt 文件</span>
           <input
-            v-model="autoProbe"
-            type="checkbox"
-            class="mt-0.5 rounded text-brand-600 focus:ring-brand-500 focus:ring-offset-0"
+            ref="picker"
+            type="file"
+            multiple
+            accept=".json,.txt,application/json,text/plain"
+            :disabled="store.importing || reading"
+            aria-label="选择 Cookie 文件"
+            @change="choose"
           >
-          <div class="flex-1 text-xs">
-            <div class="font-semibold text-brand-900 flex items-center gap-1.5">
-              <Sparkles class="w-3.5 h-3.5 text-brand-600" />
-              <span>递归探测多身份登录账号 (u/0, u/1, u/2...)</span>
-            </div>
-            <div class="text-brand-700/80 mt-0.5">
-              针对包含多登录身份的凭据，自动探测全部有效子账号并建立独立配置。
-            </div>
-          </div>
         </label>
-
-        <!-- Account Name / Email Inputs -->
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <div class="space-y-1.5">
-            <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wider">
-              账号名称前缀 <span class="text-gray-400 font-normal">(可选)</span>
-            </label>
-            <input
-              v-model="namePrefix"
-              type="text"
-              placeholder="Google Account"
-              class="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs outline-none focus:bg-white focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 transition-all"
-            >
-          </div>
-
-          <div
-            v-if="!autoProbe"
-            class="space-y-1.5"
+        <div
+          v-for="(file, index) in files"
+          :key="file.name"
+          class="import-source"
+        >
+          <FileText :size="17" /><div><strong>{{ file.name }}</strong><small>{{ file.source ? describe(file.source) : file.error }} · {{ (file.size / 1024).toFixed(1) }} KB</small></div><button
+            type="button"
+            :disabled="store.importing"
+            :aria-label="`移除 ${file.name}`"
+            @click="files.splice(index, 1)"
           >
-            <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wider">
-              邮箱地址 <span class="text-gray-400 font-normal">(可选)</span>
-            </label>
-            <input
-              v-model="singleEmail"
-              type="email"
-              placeholder="user@gmail.com"
-              class="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs outline-none focus:bg-white focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 transition-all"
-            >
-          </div>
+            <X :size="16" />
+          </button>
         </div>
       </div>
+      <div class="space-y-2">
+        <label
+          for="import-account-name"
+          class="text-sm text-secondary"
+        >账号名称或前缀 <span class="text-muted">（可选）</span></label><input
+          id="import-account-name"
+          v-model="name"
+          :disabled="store.importing"
+          class="import-text"
+          placeholder="例如：日常使用"
+        >
+      </div>
+      <label class="import-discovery"><input
+        v-model="discover"
+        type="checkbox"
+        :disabled="store.importing"
+      ><div><strong>识别并导入 Cookie 中的多个登录身份</strong><small>开启后会访问 Google，识别 u/0、u/1 等身份；账号包按文件内条目导入。仅保存时，可在导入后从账号行识别邮箱和订阅。</small></div></label>
+      <div
+        v-if="results.length"
+        class="space-y-2"
+      >
+        <p
+          v-for="item in results"
+          :key="item.label"
+          class="text-sm"
+          :class="item.ok ? 'text-success' : 'text-danger'"
+        >
+          <CheckCircle2
+            v-if="item.ok"
+            :size="14"
+            class="inline"
+          />{{ item.label }}：{{ item.ok ? `已导入 ${item.count} 个账号` : item.error }}
+        </p>
+      </div>
+      <p
+        v-if="error"
+        class="text-sm text-danger"
+        role="alert"
+      >
+        {{ error }}
+      </p>
     </div>
-
     <template #footer>
       <Button
         variant="ghost"
-        size="sm"
-        :disabled="accountsStore.importing"
+        :disabled="store.importing"
         @click="emit('update:modelValue', false)"
       >
         取消
-      </Button>
-      <Button
+      </Button><Button
         variant="primary"
-        size="sm"
-        :loading="accountsStore.importing"
-        :disabled="activeTab === 'file' ? (!selectedFileContent && !localFilePath.trim()) : !cookieInput.trim()"
-        @click="handleSubmit"
+        :loading="store.importing"
+        :disabled="reading || hasErrors || !remaining.length"
+        @click="submit"
       >
-        <template #default>
-          <span v-if="activeTab === 'file'">确认批量导入</span>
-          <span v-else-if="autoProbe">探测并导入</span>
-          <span v-else>导入 Cookie</span>
-        </template>
+        {{ discover ? '识别并导入' : '导入保存' }}
       </Button>
     </template>
   </Modal>
 </template>
+
+<style scoped>
+.import-tabs { display:flex; gap:6px; border-bottom:1px solid var(--color-line); padding-bottom:10px; }.import-tabs button { display:flex; align-items:center; gap:8px; padding:9px 14px; border-radius:6px; color:var(--color-muted); }.import-tabs button[aria-selected='true'] { background:var(--color-accent-soft); color:var(--color-accent); }
+.import-text { display:block; width:100%; border:1px solid var(--color-line); border-radius:6px; padding:10px 12px; font-size:13px; line-height:1.6; }.import-text:is(textarea) { font-family:ui-monospace,monospace; resize:vertical; }
+.import-drop { display:flex; align-items:center; flex-direction:column; gap:8px; position:relative; border:1px dashed var(--color-line-strong); border-radius:8px; padding:28px 16px; color:var(--color-muted); cursor:pointer; }.import-drop input { position:absolute; inset:0; opacity:0; width:100%; height:100%; cursor:pointer; }.import-drop strong { color:var(--color-fg); font-size:14px; }.import-drop span { font-size:12px; }.import-drop:focus-within, .import-drop.dragging { border-color:var(--color-accent); outline:2px solid var(--color-accent); outline-offset:3px; }
+.import-source { display:flex; align-items:center; gap:10px; padding:12px; border:1px solid var(--color-line); border-radius:6px; }.import-source > div { min-width:0; flex:1; }.import-source strong { display:block; font-size:13px; overflow-wrap:anywhere; }.import-source small { display:block; color:var(--color-muted); font-size:12px; margin-top:4px; }.import-source button { padding:8px; }
+.import-discovery { display:flex; align-items:flex-start; gap:10px; border:1px solid var(--color-line); border-radius:6px; padding:14px; }.import-discovery input { margin-top:4px; }.import-discovery strong { display:block; color:var(--color-secondary); font-size:13px; }.import-discovery small { display:block; color:var(--color-muted); margin-top:5px; font-size:12px; line-height:1.6; }
+</style>

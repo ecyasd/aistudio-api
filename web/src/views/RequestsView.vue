@@ -9,8 +9,8 @@ import { request } from '@/api/client'
 
 const route = useRoute()
 const router = useRouter()
-const { items, error, loading, live, updated, refresh } = useConsoleFeed<RequestRecord>('/api/console/requests')
-const cooldownFeed = useConsoleFeed<CooldownRecord>('/api/console/cooldowns')
+const { items, error, loading, live, updated, refresh } = useConsoleFeed<RequestRecord>('/api/console/requests', 10000)
+const cooldownFeed = useConsoleFeed<CooldownRecord>('/api/console/cooldowns', 10000)
 watch(live, value => { cooldownFeed.live.value = value })
 const cooldownModel = ref('')
 const cooldownModels = computed(() => [...new Set(cooldownFeed.items.value.map(item => item.model))].sort())
@@ -73,7 +73,7 @@ async function cancel(item: RequestRecord) {
         <span
           class="feed-status"
           role="status"
-        >{{ error ? '更新失败' : live ? '每 2 秒更新' : '已暂停' }}<small v-if="updated">{{ updated }}</small></span>
+        >{{ error ? '更新失败' : live ? '每 10 秒更新' : '已暂停' }}<small v-if="updated">{{ updated }}</small></span>
         <button
           type="button"
           class="console-button"

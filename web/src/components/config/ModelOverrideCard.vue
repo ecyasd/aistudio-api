@@ -98,10 +98,10 @@ function updateModelThinkingConfig(modelKey: string, level: string | null) {
 
 <template>
   <div class="space-y-4">
-    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-gray-100 pb-3">
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-line pb-3">
       <div>
-        <h4 class="text-xs font-bold text-gray-900 flex items-center gap-2">
-          <Layers class="w-4 h-4 text-brand-600" />
+        <h4 class="text-xs font-semibold text-fg flex items-center gap-2">
+          <Layers class="w-4 h-4 text-accent" />
           <span>单模型覆盖规则 (Model Overrides)</span>
         </h4>
       </div>
@@ -112,7 +112,7 @@ function updateModelThinkingConfig(modelKey: string, level: string | null) {
           v-model="newModelName"
           type="text"
           placeholder="例如: gemini-3.8-flash"
-          class="px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-mono outline-none focus:bg-white focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20"
+          class="px-3 py-1.5 bg-canvas border border-line rounded-xl text-xs font-mono outline-none focus:bg-panel focus:border-accent-line focus:ring-2 focus:ring-accent/20"
           @keydown.enter.prevent="handleAddModel"
         >
         <Button
@@ -135,17 +135,17 @@ function updateModelThinkingConfig(modelKey: string, level: string | null) {
       <div
         v-for="(override, modelKey) in models"
         :key="modelKey"
-        class="bg-white border border-gray-200/90 rounded-2xl shadow-xs overflow-hidden"
+        class="bg-panel border border-line/90 rounded-2xl  overflow-hidden"
       >
         <!-- Header -->
         <div
-          class="px-4 py-3 bg-gray-50/70 border-b border-gray-100 flex items-center justify-between gap-3 cursor-pointer select-none hover:bg-gray-100/60 transition-colors"
+          class="px-4 py-3 bg-canvas/70 border-b border-line flex items-center justify-between gap-3 cursor-pointer select-none hover:bg-raised/60 transition-colors"
           @click="toggleExpand(String(modelKey))"
         >
-          <div class="flex items-center gap-2 font-mono text-xs font-bold text-gray-900">
+          <div class="flex items-center gap-2 font-mono text-xs font-semibold text-fg">
             <button
               type="button"
-              class="text-gray-400 p-0.5"
+              class="text-muted p-0.5"
             >
               <ChevronDown
                 v-if="expandedMap[String(modelKey)]"
@@ -156,12 +156,12 @@ function updateModelThinkingConfig(modelKey: string, level: string | null) {
                 class="w-4 h-4"
               />
             </button>
-            <span class="text-brand-700 bg-brand-50 px-2 py-0.5 rounded border border-brand-200/60">
+            <span class="text-accent bg-accent-soft px-2 py-0.5 rounded border border-accent-line/60">
               {{ modelKey }}
             </span>
             <span
               v-if="override.is_image_model"
-              class="px-2 py-0.2 text-[10px] font-semibold rounded-full bg-purple-100 text-purple-800"
+              class="px-2 py-0.2 text-[10px] font-semibold rounded-full bg-violet-soft text-violet"
             >
               生图模型
             </span>
@@ -169,7 +169,7 @@ function updateModelThinkingConfig(modelKey: string, level: string | null) {
 
           <button
             type="button"
-            class="p-1.5 text-gray-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+            class="p-1.5 text-muted hover:text-danger hover:bg-danger-soft rounded-lg transition-colors cursor-pointer"
             title="删除此模型覆盖"
             @click.stop="handleDeleteModel(String(modelKey))"
           >
@@ -199,10 +199,10 @@ function updateModelThinkingConfig(modelKey: string, level: string | null) {
           </div>
 
           <!-- Generation Config Defaults -->
-          <div class="p-3.5 bg-gray-50/70 border border-gray-200/70 rounded-xl space-y-3">
+          <div class="p-3.5 bg-canvas/70 border border-line/70 rounded-xl space-y-3">
             <div class="flex items-center justify-between">
-              <div class="flex items-center gap-2 text-xs font-bold text-gray-800">
-                <Cpu class="w-4 h-4 text-brand-600" />
+              <div class="flex items-center gap-2 text-xs font-semibold text-fg">
+                <Cpu class="w-4 h-4 text-accent" />
                 <span>生成参数覆盖</span>
               </div>
               <FieldHelpTip schema-key="generation.defaults" />
@@ -307,10 +307,10 @@ function updateModelThinkingConfig(modelKey: string, level: string | null) {
           </div>
 
           <!-- Tools -->
-          <div class="p-3.5 bg-gray-50/70 border border-gray-200/70 rounded-xl space-y-2">
+          <div class="p-3.5 bg-canvas/70 border border-line/70 rounded-xl space-y-2">
             <div class="flex items-center justify-between">
-              <div class="flex items-center gap-2 text-xs font-bold text-gray-800">
-                <Wrench class="w-4 h-4 text-brand-600" />
+              <div class="flex items-center gap-2 text-xs font-semibold text-fg">
+                <Wrench class="w-4 h-4 text-accent" />
                 <span>模型专用工具</span>
               </div>
               <FieldHelpTip schema-key="profile.default_tools" />
@@ -337,7 +337,7 @@ function updateModelThinkingConfig(modelKey: string, level: string | null) {
 
     <div
       v-else
-      class="p-8 text-center text-gray-400 text-xs border border-dashed border-gray-200 rounded-2xl bg-gray-50/50"
+      class="p-8 text-center text-muted text-xs border border-dashed border-line rounded-2xl bg-canvas/50"
     >
       暂无单模型覆盖配置，全部模型遵循上方 Profiles 分组规则。
     </div>
