@@ -206,7 +206,7 @@ export const useAccountsStore = defineStore('accounts', () => {
     }
   }
 
-  async function importSources(sources: CookieSource[], options: { discover: boolean; name: string }) {
+  async function importSources(sources: CookieSource[], options: { discover: boolean; name: string; authUser?: string }) {
     if (importing.value) return []
     const toast = useToastStore()
     importing.value = true
@@ -220,17 +220,17 @@ export const useAccountsStore = defineStore('accounts', () => {
           } else if (options.discover) {
             count = (await accountsApi.probeAndImport({ cookies: source.content, name_prefix: options.name || undefined })).imported_count
           } else {
-            const label = options.name ? `${options.name}${sources.length > 1 ? ` ${index + 1}` : ''}` : source.label === '粘贴内容' ? undefined : source.label
-            await accountsApi.importCookies({ cookies: source.content, name: label, probe_identity: false })
-            count = 1
+            const label = options.name ? `${options.name}${sources.length > 1 ? ` ${index + 1}` : ''}` : source.hasAccountMetadata || source.label === '粘贴内容' ? undefined : source.label
+            const response = await accountsApi.importCookies({ cookies: source.content, name: label, auth_user: options.authUser, probe_identity: false })
+            count = response.imported_count ?? 1
           }
-          results.push({ label: source.label, ok: count > 0, count, error: count ? undefined : '未导入任何账号，请检查凭据包内容' })
+          results.push({ sourceId: source.id, label: source.label, ok: count > 0, count, error: count ? undefined : '未导入任何账号，请检查凭据包内容' })
         } catch (cause) {
-          results.push({ label: source.label, ok: false, count: 0, error: cause instanceof Error ? cause.message : '导入失败，请重试' })
+          results.push({ sourceId: source.id, label: source.label, ok: false, count: 0, error: cause instanceof Error ? cause.message : '导入失败，请重试' })
         }
       }
       const count = results.reduce((sum, item) => sum + item.count, 0)
-      if (count) { await fetchAll(); toast.success(`导入完成，共 ${count} 个账号`) }
+      if (count) { await fetchAll(); toast.success(`已保存 ${count} 个账号`) }
       return results
     } finally {
       importing.value = false

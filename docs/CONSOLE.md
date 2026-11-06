@@ -44,7 +44,13 @@ OpenAI 适配支持 system/developer/user/assistant/tool 历史、assistant 预�
 
 管理界面统一使用 `web/src/assets/theme.css` 的 AIS2 风格深色主题。引擎选择和上游已有的 WAA 签名服务管理合并到同一个配置区；模型规则默认折叠，按需展开。
 
-账号导入界面自动区分 Cookie 请求头、JSON Cookie 数组、Playwright storage state、Netscape cookies.txt 和账号包。文件可多选；预览只识别本地格式，不把 Cookie 条数当作账号数。导入保存显式传入 `probe_identity=false`，默认不探测 Google；只有勾选识别多登录身份才调用现有探测导入接口。部分文件失败时保留结果，只重试失败来源。导入 API 未传此字段时保留原有探测行为，兼容既有客户端。
+账号导入界面自动区分 Cookie 请求头、JSON Cookie 数组或键值对象、Playwright / AIS2 `storage-state.json`、Netscape `cookies.txt`、`accounts` / `profiles` 账号包，以及包含 `storage_state` / `storageState` 的单账号凭据包。前端保留原文，后端统一检查作用域、有效期、同名 Cookie 冲突和本项目签名所需的凭据，先校验包内全部条目及保存路径再开始写入。每份来源最多 2 MiB、每包最多 100 个账号；预检拒绝不产生账号写入，磁盘故障不承诺跨账号事务。
+
+文件可多选；预览只识别本地格式，不把 Cookie 条数当作账号数或登录有效性。导入保存显式传入 `probe_identity=false`，默认不探测 Google；登录序号留空时使用文件内的 `auth_user` / `authUser`，普通 Cookie 默认 `u/0`，按已有 ID 更新且未提供序号时保留原身份。`TIER0` / `TIER1` / `TIER2` 分别映射 Plus / Pro / Ultra。识别到的来源邮箱和账号名称用于现有去重和保存逻辑，当前账号更新后立即替换后续请求的内存会话，在途请求保持原上下文。
+
+只有勾选识别多登录身份才访问 Google；最多检查 10 个身份、总时限 30 秒，重复邮箱停止，普通 400/403 不再直接当成新登录身份。部分文件失败时保留结果，相同成功内容在弹窗内跨页签、重新选择文件后不会重复提交；修正内容后可以重试。导入期间不能关闭弹窗。导入 API 未传 `probe_identity` 时保留原有探测行为，兼容既有客户端。
+
+本项目只保存兼容 Cookie 与账号字段，不保存来源浏览器的 OAuth、localStorage 或 Camoufox 指纹包；时区、语言、UA 和指纹由当前服务引擎负责。导入 Cookie 不等于继承原浏览器环境或获得自动续签能力。完整比较、修复理由与验证记录见 [2026-11-06 审查](REVIEW_2026-11-06.md)。
 
 普通模型调用 Playground（PG）；具有官网能力码 48 的模型在目录追加 `-build` 条目，调用 `CodeAssistantOffline` 与 `StreamCodeAssistantOfflineGeneration`，这是 Build 写代码助手。两类模型同时提供，可在同一个服务中并发调用，共用已有账号和 WAA 基础设施，按完整模型 ID 分开记录冷却与用量；无需启动第二套 API 服务。协议依据 [AIS2 的代码助手说明](https://github.com/Mag1cFall/AIStudio2API/blob/main/docs/build.md#8-写代码助手通道)。
 

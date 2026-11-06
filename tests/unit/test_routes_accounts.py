@@ -170,7 +170,12 @@ async def test_import_save_only_does_not_probe_google(
     monkeypatch.setattr(
         "aistudio_api.api.routes_accounts.probe_account_benefit_tier", tier
     )
-    cookies = json.dumps([{"name": "SID", "value": "fixture", "domain": ".google.com"}])
+    cookies = json.dumps(
+        [
+            {"name": "SID", "value": "fixture", "domain": ".google.com"},
+            {"name": "SAPISID", "value": "fixture-signing", "domain": ".google.com"},
+        ]
+    )
     if bundle:
         path = "/api/accounts/import-bundle"
         payload = {"probe_identity": False, "accounts": [{"cookies": cookies}]}

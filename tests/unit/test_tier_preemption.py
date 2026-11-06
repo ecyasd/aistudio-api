@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -12,6 +13,26 @@ from aistudio_api.application.account_orchestrator import ensure_active_account
 from aistudio_api.application.account_rotator import AccountRotator
 from aistudio_api.application.account_service import AccountService
 from aistudio_api.infrastructure.account.account_store import AccountMeta
+from aistudio_api.infrastructure.gateway.session import SessionContext
+
+
+def _activation_for(service, target):
+    """Reflect the real service's registry and session updates when it activates."""
+
+    async def activate(account_id, session):
+        assert account_id == target.id
+        auth_path = Path("/fixtures") / target.id / "auth.json"
+        service.get_active_account.return_value = target
+        service.get_account_auth_path.return_value = auth_path
+        session.active_context = SessionContext(
+            account_id=target.id,
+            auth_file=str(auth_path),
+            auth_user=target.auth_user,
+            tier=target.tier,
+        )
+        return target
+
+    return AsyncMock(side_effect=activate)
 
 
 @pytest.mark.asyncio
@@ -38,7 +59,7 @@ async def test_free_account_requesting_paid_model_preempts_to_pro_account():
     )
 
     mock_service.get_active_account.return_value = free_acc
-    mock_service.activate_account = AsyncMock(return_value=pro_acc)
+    mock_service.activate_account = _activation_for(mock_service, pro_acc)
     mock_rotator.get_next_account = AsyncMock(return_value=pro_acc)
     mock_rotator.clear_cooldown = MagicMock()
 
@@ -57,6 +78,7 @@ async def test_free_account_requesting_paid_model_preempts_to_pro_account():
         mock_service.activate_account.assert_awaited_once_with(
             "acc_pro", mock_client.session
         )
+        assert mock_client.session.active_context.account_id == pro_acc.id
 
 
 @pytest.mark.asyncio
@@ -118,7 +140,7 @@ async def test_plus_account_requesting_pro_model_preempts_to_pro_account():
     )
 
     mock_service.get_active_account.return_value = plus_acc
-    mock_service.activate_account = AsyncMock(return_value=pro_acc)
+    mock_service.activate_account = _activation_for(mock_service, pro_acc)
     mock_rotator.get_next_account = AsyncMock(return_value=pro_acc)
     mock_rotator.clear_cooldown = MagicMock()
 
@@ -135,6 +157,7 @@ async def test_plus_account_requesting_pro_model_preempts_to_pro_account():
         mock_service.activate_account.assert_awaited_once_with(
             "acc_pro", mock_client.session
         )
+        assert mock_client.session.active_context.account_id == pro_acc.id
 
 
 @pytest.mark.asyncio
@@ -161,7 +184,7 @@ async def test_pro_account_requesting_ultra_model_preempts_to_ultra_account():
     )
 
     mock_service.get_active_account.return_value = pro_acc
-    mock_service.activate_account = AsyncMock(return_value=ultra_acc)
+    mock_service.activate_account = _activation_for(mock_service, ultra_acc)
     mock_rotator.get_next_account = AsyncMock(return_value=ultra_acc)
     mock_rotator.clear_cooldown = MagicMock()
 
@@ -181,3 +204,4 @@ async def test_pro_account_requesting_ultra_model_preempts_to_ultra_account():
         mock_service.activate_account.assert_awaited_once_with(
             "acc_ultra", mock_client.session
         )
+        assert mock_client.session.active_context.account_id == ultra_acc.id

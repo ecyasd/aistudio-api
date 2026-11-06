@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 import time
 
+from fastapi import HTTPException
+
 from aistudio_api.api.state import runtime_state
+from aistudio_api.infrastructure.account.cookie_parser import normalize_benefit_tier
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 logger = get_logger("orchestrator")
@@ -186,6 +189,46 @@ async def try_switch_account(
         )
 
 
+async def _synchronize_selected_session() -> None:
+    """Apply account administration to the next request, preserving frozen contexts."""
+    client = runtime_state.client
+    account_service = runtime_state.account_service
+    if client is None or account_service is None:
+        return
+
+    async with _get_switch_lock():
+        # The store may have selected another enabled account during a toggle,
+        # group change or deletion without changing the gateway's active context.
+        selected = account_service.get_active_account()
+        auth_path = (
+            account_service.get_account_auth_path(selected.id) if selected else None
+        )
+        if selected is None or auth_path is None:
+            await client.switch_auth(None)
+            raise HTTPException(
+                503,
+                detail={
+                    "message": "No enabled account with saved credentials is available. Enable or import an account.",
+                    "type": "service_unavailable",
+                },
+            )
+
+        context = client.session.active_context
+        if (
+            context is None
+            or context.account_id != selected.id
+            or context.auth_file != str(auth_path)
+            or context.auth_user != (selected.auth_user or "0")
+            or context.tier != normalize_benefit_tier(selected.tier)
+        ):
+            # switch_auth creates a fresh object. Already prepared PG/assistant
+            # requests retain their own credentials and statistics attribution.
+            await client.switch_auth(str(auth_path))
+            context = client.session.active_context
+            if context is not None:
+                context.account_id = selected.id
+
+
 async def ensure_active_account(attempt: int, model: str | None = None) -> None:
     """确保在初次尝试时存在活跃账号，且若请求付费模型而当前账号权益不足时主动抢切。"""
     if attempt != 0:
@@ -194,10 +237,11 @@ async def ensure_active_account(attempt: int, model: str | None = None) -> None:
     rotator = runtime_state.rotator
     current = account_svc.get_active_account() if account_svc else None
 
+    if account_svc is not None and current is None:
+        await _synchronize_selected_session()
+
     # 核心拦截：检测目标模型是否为 Paid 模型且当前账号层级不满足要求
     if model:
-        from fastapi import HTTPException
-
         from aistudio_api.infrastructure.gateway.model_discovery import model_discovery
 
         if model_discovery.is_paid_model(model):
@@ -240,6 +284,7 @@ async def ensure_active_account(attempt: int, model: str | None = None) -> None:
                             "type": "permission_denied",
                         },
                     )
+                await _synchronize_selected_session()
                 return
 
     if not current:
@@ -249,15 +294,8 @@ async def ensure_active_account(attempt: int, model: str | None = None) -> None:
     ):
         await try_switch_account(model=model, failed_account_id=current.id)
 
-    # Restore a persisted selection lazily on an actual generation request.
-    client = runtime_state.client
-    selected = account_svc.get_active_account() if account_svc else None
-    if client and account_svc and selected and client.session.active_context is None:
-        auth_path = account_svc.get_account_auth_path(selected.id)
-        if auth_path:
-            await client.switch_auth(str(auth_path))
-            if client.session.active_context:
-                client.session.active_context.account_id = selected.id
+    # Restore or reconcile the selected account only on a new generation request.
+    await _synchronize_selected_session()
 
 
 def request_account_id() -> str | None:

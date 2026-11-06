@@ -69,6 +69,7 @@ export interface ImportCookiesRequest {
 }
 
 export interface ImportCookiesResponse {
+  imported_count?: number
   account_id: string
   name: string
   cookie_count: number
@@ -88,11 +89,18 @@ export interface ProbeAndImportResponse {
 
 export interface BundleAccountItem {
   id?: string
+  account_id?: string
   name?: string
+  label?: string
   email?: string
-  cookies: string
-  auth_user?: string
+  cookies?: string | Record<string, unknown> | Record<string, unknown>[]
+  cookie?: string | Record<string, unknown> | Record<string, unknown>[]
+  storage_state?: Record<string, unknown>
+  storageState?: Record<string, unknown>
+  auth_user?: string | number
+  authUser?: string | number
   tier?: string
+  g1Tier?: string
 }
 
 export interface ImportBundleRequest {

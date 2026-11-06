@@ -56,6 +56,10 @@ def test_dynamic_log_level_switching():
     set_log_level("DEBUG")
     assert get_log_level() == "DEBUG"
     assert logging.getLogger("aistudio").level == logging.DEBUG
+    # Third-party protocol traces can expose response cookies and raw errors.
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("httpcore").level == logging.WARNING
+    assert not logging.getLogger("httpcore.http11").isEnabledFor(logging.DEBUG)
 
     set_log_level("WARNING")
     assert get_log_level() == "WARNING"
