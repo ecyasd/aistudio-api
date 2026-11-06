@@ -14,7 +14,8 @@ FROM debian:bookworm-slim AS browser
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && curl -fL --retry 3 https://github.com/CloakHQ/CloakBrowser/releases/download/chromium-v146.0.7680.177.4/cloakbrowser-linux-x64.tar.gz -o /tmp/browser.tar.gz \
     && echo '5af027faafb1fef9933eb784c094b764706de22a372a2cee84bc117fc4ab537f  /tmp/browser.tar.gz' | sha256sum -c - \
-    && mkdir -p /opt/cloakbrowser && tar -xzf /tmp/browser.tar.gz -C /opt/cloakbrowser --strip-components=1 \
+    && mkdir -p /opt/cloakbrowser && tar -xzf /tmp/browser.tar.gz -C /opt/cloakbrowser \
+    && test -x /opt/cloakbrowser/chrome \
     && rm /tmp/browser.tar.gz
 
 FROM python:3.12-slim-bookworm

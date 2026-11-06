@@ -97,7 +97,17 @@ def wait_idle() -> None:
 def verify() -> dict[str, bool]:
     secrets = credentials()
     admin = secrets["AISTUDIO_WEB_PASSWORD"]
-    api = secrets["AISTUDIO_BOOTSTRAP_API_KEY"]
+    status, keys = request("/api-keys", admin)
+    if status != 200 or not isinstance(keys, list):
+        raise RuntimeError("management-key-policy")
+    api = next(
+        (
+            str(item["key"])
+            for item in keys
+            if isinstance(item, dict) and item.get("key")
+        ),
+        "",
+    )
     public = json.loads((ETC / "deployment.json").read_text())["public_base_url"]
     checks = {}
     for label, base in (("local", "http://127.0.0.1:8080"), ("public", public)):
@@ -112,9 +122,11 @@ def verify() -> dict[str, bool]:
             request("/api/console/requests", api, base)[0] == 401
         )
         checks[label + "PasswordCannotCall"] = (
-            request("/v1/models", admin, base)[0] == 401
+            request("/v1/auth/check", admin, base)[0] == 401
         )
-        checks[label + "ApiKeyValid"] = request("/v1/models", api, base)[0] == 200
+        checks[label + "ModelKeyPolicy"] = request("/v1/auth/check", api or None, base)[
+            0
+        ] == (200 if api else 401)
     checks["trafficGuardActive"] = active("aws-traffic-guard.timer")
     if not all(checks.values()):
         raise RuntimeError("health-or-auth")

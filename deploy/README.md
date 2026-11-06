@@ -26,6 +26,8 @@
 
 环境示例见 `runtime.env.example`。`AISTUDIO_WEB_PASSWORD` 与 `AISTUDIO_BOOTSTRAP_API_KEY` 独立；后者只在空目录首次初始化配置时使用，以后通过管理界面维护调用密钥。
 
+发布器使用管理认证读取当前动态密钥策略，在 `/v1/auth/check` 检查认证；不调用 Google 模型目录或生成接口，也不依赖已经被用户轮换的初始密钥。
+
 容器以 UID/GID 10001 运行，数据和日志挂载目录由该 UID 拥有。根文件系统只读，临时文件使用有界 tmpfs。Linux 主机网络配合 `AISTUDIO_BIND_HOST=127.0.0.1`，API 8080 与本地签名器 8081 均仅监听 loopback；公网只通过既有 Caddy HTTPS。使用主机网络是为了保持按网卡拓扑检查的现有流量保护稳定。
 
 `aistudio-api.service` 是产品的 Docker Compose 启动单元，替换旧 Python 单元；`ExecStartPre` 继续执行既有流量门禁。Docker 守护进程、SSM、HTTPS 证书和流量计数独立维护，发布不重置它们。

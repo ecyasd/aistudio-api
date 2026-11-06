@@ -366,6 +366,12 @@ async def openai_models(state: RuntimeState = Depends(get_runtime_state)):
     }
 
 
+@router.get("/auth/check")
+async def model_auth_check():
+    """Deployment can verify dynamic key auth without contacting Google."""
+    return {"authenticated": True}
+
+
 @router.post("/chat/completions")
 async def chat_completions(
     req: ChatRequest, client: AIStudioClient = Depends(get_client)

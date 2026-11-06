@@ -11,3 +11,4 @@
 - 整合工作在开发分支完成；发布与代码回滚保留所有运行数据。架构入口见 `docs/ARCHITECTURE.md`，控制台与协议适配见 `docs/CONSOLE.md`。
 
 - 生产使用环境变量与 Docker Compose，按 `deploy/README.md` 的固定目录持久化配置、账号、WAA 状态、请求元数据与轮转日志，默认开启。master 经 Linux 检查与 amd64 镜像验证后由 GitHub OIDC/SSM 自动发布；不在服务器现场构建，不引入多平台发布。
+- 发布鉴权检查使用 `/v1/auth/check`，不通过模型目录或生成接口验证密钥；模型目录可能访问 Google。动态密钥从当前管理配置读取，不依赖只在首次初始化有效的 bootstrap 密钥。
