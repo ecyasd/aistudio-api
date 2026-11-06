@@ -95,7 +95,7 @@ async def test_streaming_gateway_split_utf8_chunks():
                 "嗨！我是你的酒馆工程搭档。平时在这套工作区里，一起搞的事情挺多的：🎉🚀"
             )
             chunk_data = [
-                [[[[[None, text_content]], "model"]]],
+                [[[[[None, text_content]], "model"], 1]],
                 None,
                 [5, None, 19],
                 None,

@@ -20,9 +20,6 @@ waa:
       X-User-Agent: grpc-web-javascript/0.1
 logging:
   level: INFO
-  dump_requests: false
-  dump_to_file: false
-  dump_dir: dumps
 rotator:
   max_retries: 5
   strategy: sticky

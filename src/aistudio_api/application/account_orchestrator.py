@@ -249,6 +249,14 @@ async def ensure_active_account(attempt: int, model: str | None = None) -> None:
     ):
         await try_switch_account(model=model, failed_account_id=current.id)
 
+    # Restore a persisted selection lazily on an actual generation request.
+    client = runtime_state.client
+    selected = account_svc.get_active_account() if account_svc else None
+    if client and account_svc and selected and client.session.active_context is None:
+        auth_path = account_svc.get_account_auth_path(selected.id)
+        if auth_path:
+            await client.switch_auth(str(auth_path))
+
 
 def record_rotator_event(
     event: str,

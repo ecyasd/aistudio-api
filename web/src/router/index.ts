@@ -4,8 +4,12 @@ const LoginView = () => import('@/views/LoginView.vue')
 const DashboardView = () => import('@/views/DashboardView.vue')
 const AccountsView = () => import('@/views/AccountsView.vue')
 const SettingsView = () => import('@/views/SettingsView.vue')
+const RequestsView = () => import('@/views/RequestsView.vue')
+const LogsView = () => import('@/views/LogsView.vue')
 
 const routes: RouteRecordRaw[] = [
+  { path: '/requests', name: 'requests', component: RequestsView, meta: { title: '请求' } },
+  { path: '/logs', name: 'logs', component: LogsView, meta: { title: '日志' } },
   {
     path: '/login',
     name: 'login',

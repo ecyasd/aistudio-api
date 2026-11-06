@@ -23,9 +23,6 @@ waa:
 # 服务端日志与请求转储调试配置
 logging:
   level: INFO
-  dump_requests: false
-  dump_to_file: false
-  dump_dir: dumps
 
 rotator:
   max_retries: 5

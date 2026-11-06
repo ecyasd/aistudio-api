@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import aclosing
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 from aistudio_api.config import DEFAULT_TEXT_MODEL
@@ -40,7 +42,17 @@ class AIStudioClient:
 
         self._session = GatewaySession()
         self._streaming_gateway = StreamingGateway(session=self._session)
-        self.last_prepared_request: PreparedRequest | None = None
+        self._prepared: ContextVar[PreparedRequest | None] = ContextVar(
+            "prepared_request", default=None
+        )
+
+    @property
+    def last_prepared_request(self) -> PreparedRequest | None:
+        return self._prepared.get()
+
+    @last_prepared_request.setter
+    def last_prepared_request(self, value: PreparedRequest | None) -> None:
+        self._prepared.set(value)
 
     @property
     def session(self) -> GatewaySession:
@@ -166,11 +178,14 @@ class AIStudioClient:
             max_tokens=max_tokens,
             generation_config_overrides=generation_config_overrides,
         )
-        async for event in self._streaming_gateway.stream_chat(
-            request=effective_prep,
-            model=model,
-        ):
-            yield event
+        async with aclosing(
+            self._streaming_gateway.stream_chat(
+                request=effective_prep,
+                model=model,
+            )
+        ) as events:
+            async for event in events:
+                yield event
 
     async def generate_content(
         self,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import yaml
 from fastapi import APIRouter, Depends, HTTPException
@@ -21,6 +21,7 @@ from aistudio_api.infrastructure.gateway.model_defaults import (
     _resolve_config_path,
     invalidate_config_cache,
 )
+from aistudio_api.infrastructure.utils.common import atomic_write_text
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 logger = get_logger("routes.system")
@@ -262,11 +263,7 @@ async def get_system_config() -> dict[str, object]:
     """获取系统运行配置与 config.yaml 内容。"""
     from aistudio_api.config import settings
     from aistudio_api.infrastructure.utils.logger import (
-        get_dump_dir,
         get_log_level,
-        is_debug_env_active,
-        is_dump_requests_enabled,
-        is_dump_to_file_enabled,
     )
 
     config_yaml_path = _resolve_config_path(None)
@@ -287,10 +284,6 @@ async def get_system_config() -> dict[str, object]:
         "auth_enabled": settings.auth_enabled,
         "yaml_content": yaml_content,
         "log_level": get_log_level(),
-        "dump_requests": is_dump_requests_enabled(),
-        "debug_env_active": is_debug_env_active(),
-        "dump_to_file": is_dump_to_file_enabled(),
-        "dump_dir": str(get_dump_dir()),
     }
 
 
@@ -306,27 +299,24 @@ async def update_config_yaml(req: ConfigYamlUpdateRequest) -> dict[str, object]:
         raise HTTPException(400, detail=f"YAML 语法格式错误: {e}") from e
     config_yaml_path = _resolve_config_path(None)
     try:
-        config_yaml_path.write_text(req.yaml_content, encoding="utf-8")
+        previous = yaml.safe_load(config_yaml_path.read_text(encoding="utf-8")) or {}
+        parsed = parsed or {}
+        parsed["api_keys"] = previous.get("api_keys", [])
+        atomic_write_text(
+            config_yaml_path,
+            yaml.safe_dump(parsed, allow_unicode=True, sort_keys=False),
+        )
         invalidate_config_cache()
 
         if isinstance(parsed, dict) and "logging" in parsed:
             raw_logging = parsed["logging"]
             if isinstance(raw_logging, dict):
                 from aistudio_api.infrastructure.utils.logger import (
-                    set_dump_dir,
-                    set_dump_requests,
-                    set_dump_to_file,
                     set_log_level,
                 )
 
                 if "level" in raw_logging:
                     set_log_level(str(raw_logging["level"]))
-                if "dump_requests" in raw_logging:
-                    set_dump_requests(bool(raw_logging["dump_requests"]))
-                if "dump_to_file" in raw_logging:
-                    set_dump_to_file(bool(raw_logging["dump_to_file"]))
-                if "dump_dir" in raw_logging:
-                    set_dump_dir(str(raw_logging["dump_dir"]))
         logger.info("配置文件 config.yaml 已更新并重新加载")
         return {"ok": True, "message": "配置已保存并重载"}
     except Exception as e:
@@ -462,61 +452,20 @@ async def test_signer_server(req: TestSignerServerRequest) -> dict[str, object]:
 
 
 class LoggingConfigRequest(BaseModel):
-    level: str | None = None
-    dump_requests: bool | None = None
-    dump_to_file: bool | None = None
-    dump_dir: str | None = None
+    level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 
 @protected_router.put("/config/logging")
 async def update_logging_config(req: LoggingConfigRequest) -> dict[str, object]:
-    """更新系统日志级别与请求转储配置，并持久化到 config.yaml。"""
+    """Persist and apply the runtime log level."""
     from aistudio_api.infrastructure.gateway.model_defaults import (
         update_configured_logging_settings,
     )
-    from aistudio_api.infrastructure.utils.logger import (
-        get_dump_dir,
-        get_log_level,
-        is_debug_env_active,
-        is_dump_requests_enabled,
-        is_dump_to_file_enabled,
-        set_dump_dir,
-        set_dump_requests,
-        set_dump_to_file,
-        set_log_level,
-    )
+    from aistudio_api.infrastructure.utils.logger import get_log_level, set_log_level
 
-    if req.level is not None:
-        set_log_level(req.level)
-    if req.dump_requests is not None:
-        set_dump_requests(req.dump_requests)
-    if req.dump_to_file is not None:
-        set_dump_to_file(req.dump_to_file)
-    if req.dump_dir is not None:
-        set_dump_dir(req.dump_dir)
-
-    update_configured_logging_settings(
-        level=req.level,
-        dump_requests=req.dump_requests,
-        dump_to_file=req.dump_to_file,
-        dump_dir=req.dump_dir,
-    )
-    logger.info(
-        "日志配置已更新: 级别=%s, 请求转储=%s, 文件转储=%s, 目录=%s",
-        req.level,
-        req.dump_requests,
-        req.dump_to_file,
-        req.dump_dir,
-    )
-
-    return {
-        "ok": True,
-        "log_level": get_log_level(),
-        "dump_requests": is_dump_requests_enabled(),
-        "debug_env_active": is_debug_env_active(),
-        "dump_to_file": is_dump_to_file_enabled(),
-        "dump_dir": str(get_dump_dir()),
-    }
+    update_configured_logging_settings(level=req.level)
+    set_log_level(req.level)
+    return {"ok": True, "log_level": get_log_level()}
 
 
 # ========== API Key 备注与密钥管理 ==========
@@ -595,8 +544,10 @@ async def create_api_key(req: CreateApiKeyRequest) -> ApiKeyItemModel:
     new_list.append({"name": name, "key": new_key, "created_at": created_at})
     parsed["api_keys"] = new_list
 
-    config_path.write_text(
-        yaml.dump(parsed, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    atomic_write_text(
+        config_path,
+        yaml.dump(parsed, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
     )
     invalidate_config_cache()
 
@@ -638,8 +589,10 @@ async def delete_api_key(key_value: str) -> dict[str, bool]:
         raise HTTPException(404, detail="未找到该 API Key")
 
     parsed["api_keys"] = new_list
-    config_path.write_text(
-        yaml.dump(parsed, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    atomic_write_text(
+        config_path,
+        yaml.dump(parsed, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
     )
     invalidate_config_cache()
 
@@ -687,8 +640,10 @@ async def update_api_key_name(
         raise HTTPException(404, detail="未找到该 API Key")
 
     parsed["api_keys"] = new_list
-    config_path.write_text(
-        yaml.dump(parsed, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    atomic_write_text(
+        config_path,
+        yaml.dump(parsed, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
     )
     invalidate_config_cache()
     logger.info("更新 API Key 备注: 前缀=%s, 备注=%s", key_value[:8] + "...", new_name)

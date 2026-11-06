@@ -36,25 +36,6 @@ def _load_web_password() -> str | None:
     return os.getenv("AISTUDIO_WEB_PASSWORD") or os.getenv("AISTUDIO_ADMIN_PASSWORD")
 
 
-def _load_dump_requests_env() -> bool:
-    """检查 DEBUG / AISTUDIO_DEBUG 环境变量是否启用请求转储。
-
-    注意：此环境变量专用于触发请求详细信息转储 (Dump)，不影响日志输出级别。
-    """
-    val = _load_env("DEBUG", "AISTUDIO_DEBUG", "AISTUDIO_DUMP_REQUESTS")
-    if val is None:
-        return False
-    return val.strip().lower() in ("1", "true", "yes", "on", "dump", "y", "t")
-
-
-def _load_dump_to_file_env() -> bool:
-    """检查 AISTUDIO_DUMP_FILE / AISTUDIO_DUMP_TO_FILE 环境变量是否启用将请求转储持久化保存到文件。"""
-    val = _load_env("AISTUDIO_DUMP_FILE", "AISTUDIO_DUMP_TO_FILE")
-    if val is None:
-        return False
-    return val.strip().lower() in ("1", "true", "yes", "on", "dump", "y", "t")
-
-
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_DATA_DIR = _PROJECT_ROOT / "data"
 _DEFAULT_CONFIG_PATH = _PROJECT_ROOT / "config.yaml"
@@ -212,9 +193,6 @@ class Settings:
     config_file: str = str(resolve_config_file())
     persist_stats: bool = _load_bool_env("AISTUDIO_PERSIST_STATS", default=True)
     persist_rotator: bool = _load_bool_env("AISTUDIO_PERSIST_ROTATOR", default=True)
-    dump_requests: bool = _load_dump_requests_env()
-    dump_to_file: bool = _load_dump_to_file_env()
-    dump_dir: str = os.getenv("AISTUDIO_DUMP_DIR", str(_PROJECT_ROOT / "dumps"))
     log_level: str = "INFO"
 
     @property

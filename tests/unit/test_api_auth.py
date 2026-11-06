@@ -8,6 +8,14 @@ from aistudio_api.api.dependencies import require_api_key, require_web_auth
 from aistudio_api.config import settings
 
 
+@pytest.fixture(autouse=True)
+def synthetic_dynamic_keys(monkeypatch):
+    monkeypatch.setattr(
+        "aistudio_api.infrastructure.gateway.model_defaults.get_configured_api_keys",
+        lambda: set(settings.api_keys),
+    )
+
+
 def _build_client() -> httpx.AsyncClient:
     app = FastAPI()
 
@@ -21,12 +29,11 @@ def _build_client() -> httpx.AsyncClient:
 
 
 @pytest.mark.asyncio
-async def test_auth_is_disabled_when_no_api_key_is_configured(monkeypatch):
+async def test_empty_keys_deny_access(monkeypatch):
     monkeypatch.setattr(settings, "api_keys", frozenset())
     async with _build_client() as client:
         response = await client.get("/protected")
-        assert response.status_code == 200
-        assert response.json() == {"ok": True}
+        assert response.status_code == 401
 
 
 @pytest.mark.asyncio
@@ -99,11 +106,12 @@ def test_dependencies_timing_safe_auth(monkeypatch):
         require_web_auth(req_bad)
     assert exc_info.value.status_code == 401
 
-    # require_api_key matching admin web_password
+    # The independent management password cannot authorize inference.
     req_admin_api = MagicMock(spec=Request)
     req_admin_api.headers = {"x-api-key": "super_secret_admin_pass"}
     req_admin_api.query_params = {}
-    require_api_key(req_admin_api)
+    with pytest.raises(HTTPException):
+        require_api_key(req_admin_api)
 
     # Empty web_password guard
     monkeypatch.setattr(settings, "web_password", "")

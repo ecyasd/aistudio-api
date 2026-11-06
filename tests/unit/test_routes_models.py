@@ -2,18 +2,26 @@ import httpx
 import pytest
 
 from aistudio_api.api.app import app
-from aistudio_api.config import settings
+
+
+@pytest.fixture(autouse=True)
+def synthetic_model_keys(monkeypatch):
+    monkeypatch.setattr(
+        "aistudio_api.infrastructure.gateway.model_defaults.get_configured_api_keys",
+        lambda: {"test-key", "my-key"},
+    )
 
 
 def _build_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": "Bearer test-key"},
     )
 
 
 @pytest.mark.asyncio
 async def test_list_models_returns_gemini_format(monkeypatch):
-    monkeypatch.setattr(settings, "api_keys", frozenset())
     async with _build_client() as client:
         response = await client.get("/v1beta/models")
         assert response.status_code == 200
@@ -31,7 +39,6 @@ async def test_list_models_returns_gemini_format(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_single_model_returns_model_object(monkeypatch):
-    monkeypatch.setattr(settings, "api_keys", frozenset())
     async with _build_client() as client:
         response = await client.get("/v1beta/models/gemini-3.7-flash")
         assert response.status_code == 200
@@ -42,19 +49,18 @@ async def test_get_single_model_returns_model_object(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_v1_models_endpoint_is_removed(monkeypatch):
-    monkeypatch.setattr(settings, "api_keys", frozenset())
+async def test_v1_models_returns_openai_format(monkeypatch):
     async with _build_client() as client:
         response = await client.get("/v1/models")
-        assert response.status_code == 404
+        assert response.status_code == 200
+        assert response.json()["object"] == "list"
 
 
 @pytest.mark.asyncio
 async def test_models_endpoint_accepts_query_param_key(monkeypatch):
-    monkeypatch.setattr(settings, "api_keys", frozenset({"my-key"}))
     async with _build_client() as client:
         # Unauthorized without key
-        res_unauth = await client.get("/v1beta/models")
+        res_unauth = await client.get("/v1beta/models", headers={"Authorization": ""})
         assert res_unauth.status_code == 401
 
         # Authorized with ?key=
@@ -65,7 +71,6 @@ async def test_models_endpoint_accepts_query_param_key(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_single_model_not_found_returns_404(monkeypatch):
-    monkeypatch.setattr(settings, "api_keys", frozenset())
     async with _build_client() as client:
         response = await client.get("/v1beta/models/non-existent-unknown-model-12345")
         assert response.status_code == 404

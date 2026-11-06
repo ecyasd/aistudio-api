@@ -20,7 +20,6 @@ from pathlib import Path
 
 from aistudio_api.infrastructure.gateway.model_defaults import (
     get_active_waa_server,
-    switch_active_waa_server,
 )
 from aistudio_api.infrastructure.utils.logger import get_logger
 
@@ -97,8 +96,8 @@ def ensure_signer_ready() -> None:
         try:
             _daemon_proc = subprocess.Popen(
                 cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=None,
+                stderr=None,
                 cwd=str(bin_path.parent.parent),
                 preexec_fn=_set_parent_death_signal,
             )
@@ -117,7 +116,7 @@ def ensure_signer_ready() -> None:
     logger.warning(
         "本地 WAA 签名服务未就绪且未找到可执行文件，自动平滑切换至远程签名节点 (remote_spinsnow)"
     )
-    switch_active_waa_server("remote_spinsnow")
+    raise RuntimeError("Local WAA signer is not ready; remote fallback is disabled")
 
 
 def stop_signer_daemon() -> None:

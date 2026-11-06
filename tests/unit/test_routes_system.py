@@ -6,11 +6,19 @@ import httpx
 import pytest
 
 from aistudio_api.api.app import app
+from aistudio_api.config import settings
+
+
+@pytest.fixture(autouse=True)
+def synthetic_management_password(monkeypatch):
+    monkeypatch.setattr(settings, "web_password", "test-admin")
 
 
 def _client() -> httpx.AsyncClient:
     return httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": "Bearer test-admin"},
     )
 
 

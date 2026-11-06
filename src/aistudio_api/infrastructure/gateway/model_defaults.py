@@ -10,6 +10,7 @@ from pathlib import Path
 import yaml
 
 from aistudio_api.config import resolve_config_file
+from aistudio_api.infrastructure.utils.common import atomic_write_text
 
 from .wire_types import (
     AistudioImageOutputMode,
@@ -681,9 +682,6 @@ def get_configured_logging_settings(
 
 def update_configured_logging_settings(
     level: str | None = None,
-    dump_requests: bool | None = None,
-    dump_to_file: bool | None = None,
-    dump_dir: str | None = None,
     config_path: str | os.PathLike[str] | None = None,
 ) -> dict[str, object]:
     """更新 config.yaml 中的 logging 设置并刷新缓存。"""
@@ -699,15 +697,9 @@ def update_configured_logging_settings(
     logging_dict = dict(raw_logging) if isinstance(raw_logging, dict) else {}
     if level is not None:
         logging_dict["level"] = level.strip().upper()
-    if dump_requests is not None:
-        logging_dict["dump_requests"] = dump_requests
-    if dump_to_file is not None:
-        logging_dict["dump_to_file"] = dump_to_file
-    if dump_dir is not None:
-        logging_dict["dump_dir"] = dump_dir
-
     parsed["logging"] = logging_dict
-    resolved_path.write_text(
+    atomic_write_text(
+        resolved_path,
         yaml.dump(parsed, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
@@ -910,7 +902,8 @@ def switch_active_waa_server(
     waa_dict["active_server"] = target_id
     parsed["waa"] = waa_dict
 
-    resolved_path.write_text(
+    atomic_write_text(
+        resolved_path,
         yaml.dump(parsed, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
@@ -954,7 +947,8 @@ def upsert_waa_server(
 
     waa_dict["servers"] = servers
     parsed["waa"] = waa_dict
-    resolved_path.write_text(
+    atomic_write_text(
+        resolved_path,
         yaml.dump(parsed, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
@@ -997,7 +991,8 @@ def delete_waa_server(
         raw_waa["active_server"] = str(new_servers[0].get("id") or "")
 
     parsed["waa"] = raw_waa
-    resolved_path.write_text(
+    atomic_write_text(
+        resolved_path,
         yaml.dump(parsed, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )

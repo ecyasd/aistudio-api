@@ -10,6 +10,19 @@ import time
 from pathlib import Path
 
 
+def atomic_write_text(path: Path | str, text: str, *, encoding: str = "utf-8") -> None:
+    """Replace a text configuration without exposing a partially written file."""
+    target_path = Path(path).resolve()
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target_path.with_suffix(f".tmp.{os.getpid()}_{time.time_ns()}")
+    try:
+        temporary.write_text(text, encoding=encoding)
+        temporary.replace(target_path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
+
+
 def atomic_write_json(path: Path | str, data: object, *, compact: bool = False) -> None:
     """原子写入 JSON 文件（写唯一临时文件后原子替换，防止写穿或损坏）。"""
     target_path = Path(path).resolve()

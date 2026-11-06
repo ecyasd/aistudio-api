@@ -16,6 +16,14 @@ from aistudio_api.domain.errors import UsageLimitExceeded
 from aistudio_api.domain.models import Candidate, ModelOutput
 
 
+@pytest.fixture(autouse=True)
+def synthetic_generation_key(monkeypatch):
+    monkeypatch.setattr(
+        "aistudio_api.infrastructure.gateway.model_defaults.get_configured_api_keys",
+        lambda: {"test-key"},
+    )
+
+
 @pytest.fixture
 def mock_client() -> MagicMock:
     return MagicMock()
@@ -91,6 +99,8 @@ async def test_genai_sdk_aio_streaming(mock_client: MagicMock) -> None:
                 "total_tokens": 20,
             },
         )
+
+        yield ("finish_reason", 1)
 
     mock_client.stream_generate_content = fake_stream
     app.dependency_overrides[get_client] = lambda: mock_client

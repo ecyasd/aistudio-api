@@ -16,6 +16,15 @@ __pycache__
 dist
 build
 .pytest_cache
+.venv
+web/node_modules
+**/*.tsbuildinfo
+waa-signer/.deps
+waa-signer/bin
+data
+data2
+dumps
+private
 
 # Environment (use .env.example as reference, mount .env at runtime)
 .env

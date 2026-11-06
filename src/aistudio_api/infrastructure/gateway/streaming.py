@@ -170,9 +170,10 @@ class StreamingGateway:
             raise TransportError(
                 "stream ended before any data arrived (connection truncated)"
             )
-        if latest_finish_reason is not None:
-            yield ("finish_reason", latest_finish_reason)
-        else:
-            yield ("finish_reason", 1)
+        if latest_finish_reason is None:
+            raise TransportError(
+                "Upstream stream ended without a terminal finish reason"
+            )
+        yield ("finish_reason", latest_finish_reason)
         yield ("usage", latest_usage)
         yield ("done", None)

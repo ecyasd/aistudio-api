@@ -4,11 +4,11 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "bun --bun vite",
-    "build": "bun --bun x vue-tsc -b && bun --bun vite build",
-    "type-check": "bun --bun x vue-tsc -b",
-    "lint": "bun --bun x eslint src --max-warnings 0",
-    "preview": "bun --bun vite preview"
+    "dev": "vite",
+    "build": "vue-tsc -b && vite build",
+    "type-check": "vue-tsc -b",
+    "lint": "eslint src --max-warnings 0",
+    "preview": "vite preview"
   },
   "dependencies": {
     "lucide-vue-next": "^0.475.0",
@@ -19,8 +19,6 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@rollup/rollup-android-arm64": "^4.65.0",
-    "@rollup/rollup-linux-arm64-gnu": "^4.63.4",
     "@tailwindcss/vite": "^4.0.0",
     "@types/node": "^22.13.5",
     "@types/yaml": "^1.9.7",

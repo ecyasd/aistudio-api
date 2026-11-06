@@ -71,7 +71,7 @@ onMounted(() => {
           {{ config?.log_level || 'INFO' }}
         </div>
         <div class="text-[11px] text-gray-400 mt-1">
-          报文持久化: {{ config?.dump_to_file ? '已启用' : '未启用' }}
+          诊断记录: 有界脱敏元数据
         </div>
       </div>
 

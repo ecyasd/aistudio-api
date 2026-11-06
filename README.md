@@ -1,3 +1,5 @@
+> 本 Fork 基于 `feat/browserless-waa-engine`，面向 SillyTavern 提供独立日志、请求页面及 OpenAI Chat Completions 适配。定制接口、鉴权和启动说明以 [docs/CONSOLE.md](docs/CONSOLE.md) 为准；下方保留上游说明。
+
 # aistudio-api
 
 <p align="center">

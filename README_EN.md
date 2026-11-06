@@ -1,3 +1,5 @@
+> This fork adds a SillyTavern console and OpenAI Chat Completions on the browserless WAA branch. See [docs/CONSOLE.md](docs/CONSOLE.md) for the fork-specific setup and contracts. Upstream documentation follows.
+
 # aistudio-api
 
 <p align="center">

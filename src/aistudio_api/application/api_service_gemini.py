@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from contextlib import aclosing
 
 from fastapi import HTTPException
 from fastapi.exceptions import RequestValidationError
@@ -42,6 +43,7 @@ from aistudio_api.infrastructure.gateway.client import (
     AIStudioClient,
     PreparedRequest,
 )
+from aistudio_api.infrastructure.utils import telemetry
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 logger = get_logger("api.gemini")
@@ -248,7 +250,7 @@ async def handle_attempt_exception(
         ) from exc
 
     if isinstance(exc, SessionExpiredError):
-        logger.warning("账号登录已失效，被重定向到登录页: %s", exc)
+        logger.warning("账号登录已失效")
         if not has_yielded_data and await try_switch_account(
             model=target_model,
             failed_account_id=failed_id,
@@ -265,7 +267,7 @@ async def handle_attempt_exception(
         ) from exc
 
     if isinstance(exc, AuthError):
-        logger.warning("账号权限被拒绝 (HTTP 403): %s", exc)
+        logger.warning("账号权限被拒绝 (HTTP 403)")
         record_rotator_event("auth_error", model=target_model)
 
         raise HTTPException(
@@ -311,18 +313,16 @@ async def handle_attempt_exception(
         and attempt < MAX_RETRIES - 1
     ):
         logger.warning(
-            "上游偶发 404 方法未找到，立即重试: 尝试=%d/%d, 错误=%s",
+            "上游偶发 404 方法未找到，立即重试: 尝试=%d/%d",
             attempt + 1,
             MAX_RETRIES,
-            clean_upstream_error_message(str(exc)),
         )
         return True
     if is_transport_error(exc):
         logger.warning(
-            "网关传输或签名异常，切换账号重试: 尝试=%d/%d, 错误=%s",
+            "网关传输或签名异常，切换账号重试: 尝试=%d/%d",
             attempt + 1,
             MAX_RETRIES,
-            exc,
         )
         if not has_yielded_data and await try_switch_account(
             model=target_model, failed_account_id=failed_id
@@ -332,7 +332,7 @@ async def handle_attempt_exception(
         if isinstance(exc, TransportError):
             runtime_state.record(target_model, "errors")
             record_rotator_event("error", model=target_model)
-            logger.warning("上游服务传输中断 (502): %s", exc)
+            logger.warning("上游服务传输中断 (502)")
             raise HTTPException(
                 502, detail={"message": str(exc), "type": "upstream_error"}
             ) from exc
@@ -346,9 +346,7 @@ async def handle_attempt_exception(
             if status_code == 404
             else "upstream_error"
         )
-        logger.warning(
-            "上游返回请求错误: status=%d, message=%s", status_code, clean_msg
-        )
+        logger.warning("上游返回请求错误: status=%d", status_code)
         raise HTTPException(
             status_code, detail={"message": clean_msg, "type": error_type}
         ) from exc
@@ -356,15 +354,14 @@ async def handle_attempt_exception(
     if isinstance(exc, AistudioError):
         runtime_state.record(target_model, "errors")
         record_rotator_event("error", model=target_model)
-        logger.warning("服务端处理异常: %s", exc)
+        logger.warning("服务端处理异常")
         raise HTTPException(
             500, detail={"message": str(exc), "type": "server_error"}
         ) from exc
 
     runtime_state.record(target_model, "errors")
     record_rotator_event("error", model=target_model)
-    logger.error("请求处理发生未捕获异常: %s", exc)
-    logger.debug("异常堆栈详情:", exc_info=True)
+    logger.error("请求处理发生未捕获异常")
     raise HTTPException(
         500, detail={"message": str(exc), "type": "server_error"}
     ) from exc
@@ -377,6 +374,8 @@ async def handle_gemini_generate_content(
     *,
     stream: bool,
 ):
+    telemetry.bind_request(model_path, stream)
+    client.last_prepared_request = None
     if stream:
         return _build_gemini_streaming_response(
             client=client, req=req, model_path=model_path
@@ -387,6 +386,7 @@ async def handle_gemini_generate_content(
     total_attempts = MAX_RETRIES + AUTH_403_MAX_RETRIES
 
     for attempt in range(total_attempts):
+        telemetry.attempt_start()
         await ensure_active_account(attempt, model=model_path)
         normalized = None
         try:
@@ -398,6 +398,7 @@ async def handle_gemini_generate_content(
                 attempt + 1,
                 total_attempts,
             )
+            telemetry.upstream_start()
             output = await client.generate_content(
                 model=normalized.model,
                 contents=normalized.contents,
@@ -417,6 +418,9 @@ async def handle_gemini_generate_content(
             final_fr = to_gemini_finish_reason(
                 output.candidates[0].finish_reason if output.candidates else None
             )
+            telemetry.observe_part("body", output.text)
+            telemetry.observe_part("thinking", output.thinking)
+            telemetry.result(output.usage, final_fr)
             record_rotator_event("success", model=normalized.model, usage=output.usage)
             runtime_state.record(
                 normalized.model,
@@ -492,7 +496,7 @@ def format_sse_event(
     thought_signature: str | None = None,
 ) -> str | None:
     """Format a single Gemini streaming event into SSE chunk string."""
-    if not text:
+    if not text and not thought_signature:
         return None
 
     parts: list[dict[str, object]] = []
@@ -611,7 +615,7 @@ def _build_gemini_streaming_response(
                 len(req.contents),
             )
             final_usage: dict[str, object] | None = None
-            final_finish_reason: str = "STOP"
+            final_finish_reason: str | None = None
             latest_response_id: str | None = None
             buffered_thought_sig: str | None = None
             stream_completed = False
@@ -622,63 +626,73 @@ def _build_gemini_streaming_response(
                 has_yielded_data = False
                 last_stream_error = None
                 final_usage = None
-                final_finish_reason = "STOP"
+                final_finish_reason = None
                 latest_response_id = None
                 buffered_thought_sig = None
+                telemetry.attempt_start()
                 await ensure_active_account(stream_attempt, model=model_path)
                 normalized = normalize_gemini_request(req, model_path)
                 try:
-                    async for event_type, text in client.stream_generate_content(
-                        model=normalized.model,
-                        contents=normalized.contents,
-                        system_instruction_content=normalized.system_instruction,
-                        tools=normalized.tools,
-                        tool_config=normalized.tool_config,
-                        safety_settings=normalized.safety_settings,
-                        temperature=normalized.temperature,
-                        top_p=normalized.top_p,
-                        top_k=normalized.top_k,
-                        max_tokens=normalized.max_tokens,
-                        generation_config_overrides=normalized.generation_config_overrides,
-                        prepared=auth_manager.current_prepared,
-                    ):
-                        if event_type == "usage":
-                            final_usage = text if isinstance(text, dict) else None
-                        elif event_type == "finish_reason":
-                            if text not in (None, 0, 22):
-                                final_finish_reason = (
-                                    to_gemini_finish_reason(text)
-                                    if isinstance(text, int)
-                                    else str(text)
-                                )
-                        elif event_type == "response_id":
-                            latest_response_id = str(text)
-                        elif event_type == "thought_signature":
-                            buffered_thought_sig = str(text)
-                        else:
-                            chunk = format_sse_event(
-                                event_type,
-                                text,
-                                model_version=normalized.model,
-                                response_id=latest_response_id,
-                                thought_signature=buffered_thought_sig,
-                            )
-                            buffered_thought_sig = None
-                            if chunk:
-                                if not has_yielded_data:
-                                    ttft_ms = (
-                                        time.perf_counter() - stream_start_time
-                                    ) * 1000
-                                    logger.info(
-                                        "流式响应开始推送: model=%s, 首包耗时=%.1fms",
-                                        normalized.model,
-                                        ttft_ms,
+                    telemetry.upstream_start()
+                    async with aclosing(
+                        client.stream_generate_content(
+                            model=normalized.model,
+                            contents=normalized.contents,
+                            system_instruction_content=normalized.system_instruction,
+                            tools=normalized.tools,
+                            tool_config=normalized.tool_config,
+                            safety_settings=normalized.safety_settings,
+                            temperature=normalized.temperature,
+                            top_p=normalized.top_p,
+                            top_k=normalized.top_k,
+                            max_tokens=normalized.max_tokens,
+                            generation_config_overrides=normalized.generation_config_overrides,
+                            prepared=auth_manager.current_prepared,
+                        )
+                    ) as upstream_events:
+                        async for event_type, text in upstream_events:
+                            telemetry.observe_part(event_type, text)
+                            if event_type == "usage":
+                                final_usage = text if isinstance(text, dict) else None
+                            elif event_type == "finish_reason":
+                                if text not in (None, 0, 22):
+                                    final_finish_reason = (
+                                        to_gemini_finish_reason(text)
+                                        if isinstance(text, int)
+                                        else str(text)
                                     )
-                                has_yielded_data = True
-                                yield chunk
-                    auth_manager.current_prepared = None
-                    stream_completed = True
-                    break
+                            elif event_type == "response_id":
+                                latest_response_id = str(text)
+                            elif event_type == "thought_signature":
+                                buffered_thought_sig = str(text)
+                            else:
+                                chunk = format_sse_event(
+                                    event_type,
+                                    text,
+                                    model_version=normalized.model,
+                                    response_id=latest_response_id,
+                                    thought_signature=buffered_thought_sig,
+                                )
+                                buffered_thought_sig = None
+                                if chunk:
+                                    if not has_yielded_data:
+                                        ttft_ms = (
+                                            time.perf_counter() - stream_start_time
+                                        ) * 1000
+                                        logger.info(
+                                            "流式响应开始推送: model=%s, 首包耗时=%.1fms",
+                                            normalized.model,
+                                            ttft_ms,
+                                        )
+                                    has_yielded_data = True
+                                    yield chunk
+                        if final_finish_reason is None:
+                            raise TransportError(
+                                "Upstream stream ended without a terminal finish reason"
+                            )
+                        auth_manager.current_prepared = None
+                        stream_completed = True
+                        break
                 except Exception as exc:
                     last_stream_error = exc
                     if isinstance(exc, AuthError) and not has_yielded_data:
@@ -703,7 +717,10 @@ def _build_gemini_streaming_response(
 
             if not stream_completed and last_stream_error is not None:
                 raise last_stream_error
+            if not stream_completed or final_finish_reason is None:
+                raise TransportError("Upstream stream did not complete")
             target_model = normalized.model if normalized else model_path
+            telemetry.result(final_usage, final_finish_reason)
             record_rotator_event("success", model=target_model, usage=final_usage)
             if normalized is not None:
                 runtime_state.record(
@@ -723,6 +740,12 @@ def _build_gemini_streaming_response(
                 pt,
                 ct,
             )
+            if buffered_thought_sig:
+                signature_event = format_sse_event(
+                    "body", "", thought_signature=buffered_thought_sig
+                )
+                if signature_event:
+                    yield signature_event
             yield format_sse_usage(
                 final_usage,
                 finish_reason=final_finish_reason,
@@ -730,7 +753,10 @@ def _build_gemini_streaming_response(
                 response_id=latest_response_id,
             )
         except Exception as exc:
-            logger.warning("流式生成异常: model=%s, error=%s", model_path, exc)
+            logger.warning(
+                "流式生成失败: status=%d", classify_gemini_error_payload(exc)[0]
+            )
+            telemetry.failed(classify_gemini_error_payload(exc)[0])
             yield format_sse_error(exc)
 
     return StreamingResponse(

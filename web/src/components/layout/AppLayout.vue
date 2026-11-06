@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import { Menu } from 'lucide-vue-next'
 import { useRoute } from 'vue-router'
 import Sidebar from './Sidebar.vue'
-import Topbar from './Topbar.vue'
 import TokenSettingsModal from '@/components/modals/TokenSettingsModal.vue'
 import ToastContainer from '@/components/ui/ToastContainer.vue'
 import { useAccountsStore } from '@/stores/accounts.ts'
@@ -41,7 +41,7 @@ async function handleRefresh() {
 </script>
 
 <template>
-  <div class="min-h-screen bg-gray-50 flex">
+  <div class="console-shell flex">
     <ToastContainer />
 
     <!-- Sidebar -->
@@ -52,16 +52,30 @@ async function handleRefresh() {
     />
 
     <!-- Main Content Area -->
-    <div class="flex-1 lg:pl-64 flex flex-col min-w-0">
-      <Topbar
-        :title="currentTitle"
-        :refreshing="refreshing"
-        @toggle-sidebar="sidebarOpen = !sidebarOpen"
-        @open-token-modal="tokenModalOpen = true"
-        @refresh="handleRefresh"
-      />
-
-      <main class="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto">
+    <div class="console-main flex flex-col">
+      <header class="console-topbar">
+        <button
+          type="button"
+          class="console-button console-mobile-menu"
+          aria-label="打开导航"
+          :aria-expanded="sidebarOpen"
+          @click="sidebarOpen = !sidebarOpen"
+        >
+          <Menu :size="18" />
+        </button>
+        <span>控制台 / {{ currentTitle }}</span>
+        <button
+          v-if="!['requests', 'logs'].includes(String(route.name))"
+          type="button"
+          class="console-button"
+          :disabled="refreshing"
+          @click="handleRefresh"
+        >
+          刷新
+        </button>
+        <span>SILLYTAVERN · API CONSOLE</span>
+      </header>
+      <main class="console-content w-full flex-1">
         <slot />
       </main>
     </div>
