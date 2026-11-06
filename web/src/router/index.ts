@@ -6,8 +6,10 @@ const AccountsView = () => import('@/views/AccountsView.vue')
 const SettingsView = () => import('@/views/SettingsView.vue')
 const RequestsView = () => import('@/views/RequestsView.vue')
 const LogsView = () => import('@/views/LogsView.vue')
+const UsageView = () => import('@/views/UsageView.vue')
 
 const routes: RouteRecordRaw[] = [
+  { path: '/usage', name: 'usage', component: UsageView, meta: { title: '用量统计' } },
   { path: '/requests', name: 'requests', component: RequestsView, meta: { title: '请求' } },
   { path: '/logs', name: 'logs', component: LogsView, meta: { title: '日志' } },
   {

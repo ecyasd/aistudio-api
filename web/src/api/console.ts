@@ -3,6 +3,8 @@ import { request } from './client'
 export interface RequestRecord {
   id: string
   protocol: 'gemini' | 'openai'
+  channel?: 'playground' | 'assistant'
+  engine?: 'browserless' | 'browser'
   started_at: number
   model: string | null
   stream: boolean
@@ -17,6 +19,15 @@ export interface RequestRecord {
   timings: Record<string, number>
   usage: Record<string, number>
   stages: { event: string; elapsed_ms: number }[]
+}
+
+export interface CooldownRecord {
+  id: string
+  account_id: string
+  account_label: string
+  model: string
+  remaining: number
+  reason: string
 }
 
 export interface LogRecord {
@@ -34,6 +45,8 @@ export interface LogRecord {
 export const stateLabels: Record<RequestRecord['state'], string> = {
   queued: '准备中', running: '进行中', completed: '已完成', failed: '失败', cancelled: '已取消',
 }
+export const channelLabel = (value: string | undefined) => value === 'assistant' ? 'Build 代码助手' : 'PG'
+export const engineLabel = (value: string | undefined) => value === 'browser' ? '有浏览器' : '无浏览器'
 export const stageLabels: Record<string, string> = {
   received: '接收请求', preparing: '准备账号', upstream: '上游调用', retry: '重试',
   first_thought: '首个思考', first_body: '首个正文', completed: '完成', failed: '失败', cancelled: '取消',

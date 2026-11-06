@@ -256,6 +256,21 @@ async def ensure_active_account(attempt: int, model: str | None = None) -> None:
         auth_path = account_svc.get_account_auth_path(selected.id)
         if auth_path:
             await client.switch_auth(str(auth_path))
+            if client.session.active_context:
+                client.session.active_context.account_id = selected.id
+
+
+def request_account_id() -> str | None:
+    """Use the request's frozen account after another channel switches the pool."""
+    from aistudio_api.infrastructure.gateway.session import SessionContext
+
+    client = runtime_state.client
+    context = client.session.request_context if client else None
+    if isinstance(context, SessionContext) and context.account_id:
+        return context.account_id
+    service = runtime_state.account_service
+    active = service.get_active_account() if service else None
+    return active.id if active else None
 
 
 def record_rotator_event(
@@ -265,23 +280,23 @@ def record_rotator_event(
 ) -> None:
     """记录调度器事件（成功、限流、错误、鉴权异常）。"""
     rotator = runtime_state.rotator
-    account_service = runtime_state.account_service
-    account = account_service.get_active_account() if account_service else None
-    if not rotator or account is None:
+    account_id = request_account_id()
+    if not rotator or account_id is None:
         return
     if event == "success":
-        rotator.record_success(account.id, model=model, usage=usage)
+        rotator.record_success(account_id, model=model, usage=usage)
     elif event == "rate_limited":
-        rotator.record_rate_limited(account.id, model=model)
+        rotator.record_rate_limited(account_id, model=model)
     elif event == "auth_error":
-        rotator.record_auth_error(account.id, model=model)
+        rotator.record_auth_error(account_id, model=model)
     elif event == "error":
-        rotator.record_error(account.id, model=model)
+        rotator.record_error(account_id, model=model)
 
 
 __all__ = [
     "MAX_RETRIES",
     "ensure_active_account",
     "record_rotator_event",
+    "request_account_id",
     "try_switch_account",
 ]

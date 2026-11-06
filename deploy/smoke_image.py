@@ -1,5 +1,6 @@
 """Image checks run with Docker networking disabled; never call a model."""
 
+import asyncio
 import json
 import os
 import urllib.error
@@ -25,6 +26,24 @@ assert request("/v1/models", os.environ["AISTUDIO_WEB_PASSWORD"])[0] == 401
 assert request("/v1/models", os.environ["AISTUDIO_BOOTSTRAP_API_KEY"])[0] == 200
 with urllib.request.urlopen("http://127.0.0.1:8081/health", timeout=5) as response:
     assert response.status == 200
+
+
+async def check_browser():
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as driver:
+        browser = await driver.chromium.launch(
+            executable_path="/opt/cloakbrowser/chrome",
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = await browser.new_page()
+        await page.goto("data:text/html,<title>offline engine check</title>")
+        assert await page.title() == "offline engine check"
+        await browser.close()
+
+
+asyncio.run(check_browser())
 print(
     json.dumps(
         {

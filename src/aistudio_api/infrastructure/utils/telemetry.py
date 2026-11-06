@@ -42,6 +42,8 @@ _EVENTS = {
 class Observation:
     id: str
     protocol: str
+    channel: str = "playground"
+    engine: str = "browserless"
     started_at: float = field(default_factory=time.time)
     began: float = field(default_factory=time.monotonic)
     model: str | None = None
@@ -63,6 +65,8 @@ class Observation:
         return {
             "id": self.id,
             "protocol": self.protocol,
+            "channel": self.channel,
+            "engine": self.engine,
             "started_at": self.started_at,
             "model": self.model,
             "stream": self.stream,
@@ -81,6 +85,7 @@ class Observation:
 
 
 active: dict[str, Observation] = {}
+restarting = False
 completed: deque[Observation] = deque(maxlen=MAX_COMPLETED)
 logs: deque[dict[str, object]] = deque(maxlen=MAX_LOGS)
 current: ContextVar[Observation | None] = ContextVar(
@@ -136,6 +141,10 @@ def bind_request(model: str, stream: bool) -> None:
     if item := current.get():
         clean = model.removeprefix("models/")
         item.model = clean if _MODEL.fullmatch(clean) else None
+        item.channel = "assistant" if clean.endswith("-build") else "playground"
+        from aistudio_api.infrastructure.runtime_options import active_options
+
+        item.engine = active_options().engine
         item.stream = stream
 
 
@@ -229,7 +238,7 @@ class ObservationMiddleware:
         if scope["type"] != "http" or scope.get("method") != "POST" or not generation:
             await self.app(scope, receive, send)
             return
-        if len(active) >= MAX_ACTIVE:
+        if restarting or len(active) >= MAX_ACTIVE:
             await JSONResponse(
                 {"error": {"message": "Request capacity reached"}}, status_code=503
             )(scope, receive, send)
@@ -283,7 +292,15 @@ class ObservationMiddleware:
                 await queue.put(message)
 
         async def serve() -> None:
-            await self.app(scope, queue.get, observed_send)
+            from aistudio_api.infrastructure.runtime_options import active_options
+
+            if active_options().engine == "browser":
+                from aistudio_api.infrastructure.browser.runtime import request_scope
+
+                async with request_scope():
+                    await self.app(scope, queue.get, observed_send)
+            else:
+                await self.app(scope, queue.get, observed_send)
 
         item.task = asyncio.create_task(serve())
         reader = asyncio.create_task(pump())

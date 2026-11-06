@@ -1,13 +1,28 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, shallowRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Activity, RefreshCw, Search, Square, ArrowUpRight, Inbox } from 'lucide-vue-next'
 import { useConsoleFeed } from '@/composables/useConsoleFeed'
-import { cancelRequest, clock, duration, stageLabels, stateLabels, type RequestRecord } from '@/api/console'
+import { cancelRequest, clock, duration, stageLabels, stateLabels, channelLabel, type RequestRecord, type CooldownRecord } from '@/api/console'
+import { systemApi } from '@/api/system'
+import { request } from '@/api/client'
 
 const route = useRoute()
 const router = useRouter()
 const { items, error, loading, live, updated, refresh } = useConsoleFeed<RequestRecord>('/api/console/requests')
+const cooldownFeed = useConsoleFeed<CooldownRecord>('/api/console/cooldowns')
+watch(live, value => { cooldownFeed.live.value = value })
+const cooldownModel = ref('')
+const cooldownModels = computed(() => [...new Set(cooldownFeed.items.value.map(item => item.model))].sort())
+const cooldowns = computed(() => cooldownFeed.items.value.filter(item => !cooldownModel.value || item.model === cooldownModel.value))
+const clearing = ref('')
+async function clearCooldown(item: CooldownRecord) {
+  clearing.value = item.id; actionError.value = ''
+  try { await systemApi.clearCooldown({ account_id: item.account_id, model: item.model === '*' ? undefined : item.model }); await cooldownFeed.refresh() }
+  catch (cause) { actionError.value = cause instanceof Error ? cause.message : '清除冷却失败' }
+  finally { clearing.value = '' }
+}
+async function refreshAll() { await Promise.all([refresh(), cooldownFeed.refresh()]) }
 const filter = (name: string) => computed({
   get: () => typeof route.query[name] === 'string' ? route.query[name] as string : '',
   set: (value: string) => { void router.replace({ query: { ...route.query, [name]: value || undefined } }) },
@@ -17,12 +32,22 @@ const model = filter('model')
 const state = filter('state')
 const selectedId = filter('id')
 const models = computed(() => [...new Set(items.value.map(item => item.model).filter((value): value is string => !!value))].sort())
-const visible = computed(() => items.value.filter(item =>
+const visible = computed(() => items.value.filter(item => !['running', 'queued'].includes(item.state) &&
   (!model.value || item.model === model.value) && (!state.value || item.state === state.value) &&
   (!search.value || `${item.id} ${item.model ?? ''} ${item.protocol}`.toLowerCase().includes(search.value.toLowerCase())),
 ))
-const selected = computed(() => items.value.find(item => item.id === selectedId.value))
+const historicalDetail = shallowRef<RequestRecord>()
+const selected = computed(() => items.value.find(item => item.id === selectedId.value) ?? (historicalDetail.value?.id === selectedId.value ? historicalDetail.value : undefined))
+watch(selectedId, async (id, _previous, cleanup) => {
+  historicalDetail.value = undefined
+  if (!id) return
+  const controller = new AbortController()
+  cleanup(() => controller.abort())
+  try { historicalDetail.value = await request<RequestRecord>(`/api/console/requests/${encodeURIComponent(id)}`, { signal: controller.signal }) }
+  catch { /* Recent records may still contain the live snapshot. */ }
+}, { immediate: true })
 const active = computed(() => items.value.filter(item => ['running', 'queued'].includes(item.state)).length)
+const currentRequests = computed(() => items.value.filter(item => ['running', 'queued'].includes(item.state) && (!model.value || item.model === model.value)))
 const failures = computed(() => items.value.filter(item => item.state === 'failed').length)
 const tokenCount = computed(() => items.value.reduce((sum, item) => sum + (item.usage.total_tokens ?? 0), 0))
 const cancelling = ref('')
@@ -42,7 +67,7 @@ async function cancel(item: RequestRecord) {
       <div>
         <div class="eyebrow">
           OBSERVABILITY / REQUESTS
-        </div><h1>请求</h1><p>从接收到结束，看清每一次生成。</p>
+        </div><h1>请求管理</h1><p>查看当前请求与账号冷却，跟进每次生成的状态。</p>
       </div>
       <div class="feed-actions">
         <span
@@ -61,7 +86,7 @@ async function cancel(item: RequestRecord) {
           type="button"
           class="console-button"
           :disabled="loading"
-          @click="refresh"
+          @click="refreshAll"
         >
           <RefreshCw
             :size="15"
@@ -83,8 +108,100 @@ async function cancel(item: RequestRecord) {
     >
       {{ actionError || error }}<span v-if="error"> · 当前保留上次成功读取的数据</span>
     </div>
+    <div class="request-live-grid">
+      <article class="console-panel">
+        <div class="panel-heading">
+          <h2>冷却状态 <small>{{ cooldowns.length }}</small></h2><select
+            v-model="cooldownModel"
+            aria-label="冷却模型"
+          >
+            <option value="">
+              全部模型
+            </option><option
+              v-for="item in cooldownModels"
+              :key="item"
+              :value="item"
+            >
+              {{ item === '*' ? '账号全局' : item }}
+            </option>
+          </select>
+        </div>
+        <p
+          v-if="cooldownFeed.error.value"
+          class="console-error"
+          role="alert"
+        >
+          {{ cooldownFeed.error.value }}
+        </p>
+        <div class="live-list">
+          <div
+            v-for="item in cooldowns"
+            :key="item.id"
+            class="live-row"
+          >
+            <div><strong>{{ item.model === '*' ? '账号全局' : item.model }}</strong><small>{{ item.account_label }} · {{ item.reason }}</small></div><span class="cooldown-time">{{ Math.ceil(item.remaining / 60) }} 分钟<small>剩余 {{ item.remaining }} 秒</small></span><button
+              type="button"
+              class="console-button"
+              :disabled="!!clearing"
+              :aria-label="`清除冷却 ${item.id}`"
+              @click="clearCooldown(item)"
+            >
+              解除
+            </button>
+          </div>
+        </div>
+        <div
+          v-if="!cooldowns.length"
+          class="console-empty compact-empty"
+        >
+          <h2>{{ cooldownFeed.loading.value ? '正在读取' : '没有冷却中的账号' }}</h2><p>发生限流后会显示模型与剩余时间。</p>
+        </div>
+      </article>
+      <article class="console-panel">
+        <div class="panel-heading">
+          <h2>当前请求 <small class="accent-text">{{ active }} 个进行中</small></h2><RouterLink
+            class="request-link"
+            to="/usage"
+          >用量统计 ↗</RouterLink>
+        </div>
+        <div class="live-list">
+          <div
+            v-for="item in currentRequests"
+            :key="item.id"
+            class="live-row"
+          >
+            <div>
+              <button
+                type="button"
+                class="request-link"
+                @click="selectedId = item.id"
+              >
+                {{ item.model ?? '准备请求' }}
+              </button><small>{{ item.protocol }} · {{ channelLabel(item.channel) }} · {{ stateLabels[item.state] }} · {{ item.id.slice(-8) }}</small>
+            </div><span class="tabular">{{ duration(item.duration_ms) }}</span><button
+              type="button"
+              class="stop-button"
+              :disabled="!!cancelling"
+              :aria-label="`停止请求 ${item.id}`"
+              @click="cancel(item)"
+            >
+              <Square :size="12" />停止
+            </button>
+          </div>
+        </div>
+        <div
+          v-if="!currentRequests.length"
+          class="console-empty compact-empty"
+        >
+          <h2>暂无进行中的请求</h2><p>酒馆发起生成后自动显示，可在这里停止。</p>
+        </div>
+      </article>
+    </div>
     <div class="request-workspace">
       <article class="console-panel">
+        <div class="panel-heading">
+          <h2>最近请求记录</h2><small>点击时间查看阶段详情</small>
+        </div>
         <div class="console-toolbar">
           <label class="console-search"><Search :size="16" /><input
             v-model="search"
@@ -111,11 +228,11 @@ async function cancel(item: RequestRecord) {
             <option value="">
               全部状态
             </option><option
-              v-for="(label, value) in stateLabels"
+              v-for="value in ['completed', 'failed', 'cancelled'] as const"
               :key="value"
               :value="value"
             >
-              {{ label }}
+              {{ stateLabels[value] }}
             </option>
           </select>
           <span class="muted-text">{{ visible.length }} 条</span>

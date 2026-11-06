@@ -116,6 +116,7 @@ class StatsResponse(BaseModel):
 
 class GeminiModelResponse(BaseModel):
     name: str
+    channels: list[str] = ["playground"]
     version: str | None = "001"
     displayName: str | None = None
     description: str | None = None

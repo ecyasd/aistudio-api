@@ -30,6 +30,45 @@ from aistudio_api.infrastructure.gateway.session import (
 
 
 @pytest.mark.asyncio
+async def test_cross_channel_statistics_keep_request_owned_account(monkeypatch):
+    from aistudio_api.api.state import runtime_state
+    from aistudio_api.application.account_orchestrator import record_rotator_event
+
+    client = AIStudioClient()
+    first = SessionContext(account_id="account-a", cookies={"SID": "fixture-a"})
+    second = SessionContext(account_id="account-b", cookies={"SID": "fixture-b"})
+    rotator = MagicMock()
+    service = MagicMock()
+    service.get_active_account.return_value = MagicMock(id="account-b")
+    monkeypatch.setattr(runtime_state, "client", client)
+    monkeypatch.setattr(runtime_state, "account_service", service)
+    monkeypatch.setattr(runtime_state, "rotator", rotator)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def pg():
+        client.session.set_ready_context(first)
+        await client.session.ensure_ready()
+        entered.set()
+        await release.wait()
+        record_rotator_event("success", model="gemini-fixture")
+
+    task = asyncio.create_task(pg())
+    await entered.wait()
+    client.session.set_ready_context(second)
+    await client.session.ensure_ready()
+    record_rotator_event("rate_limited", model="gemini-fixture-build")
+    release.set()
+    await task
+    rotator.record_success.assert_called_once_with(
+        "account-a", model="gemini-fixture", usage=None
+    )
+    rotator.record_rate_limited.assert_called_once_with(
+        "account-b", model="gemini-fixture-build"
+    )
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_prepare_request_concurrency():
     """并发构建请求时，每次请求均实时生成全新的 WAA 快照签名。"""
     mock_session = MagicMock(spec=GatewaySession)
@@ -117,8 +156,12 @@ async def test_account_stats_pacific_midnight_reset():
 
 
 @pytest.mark.asyncio
-async def test_account_stats_clear_cooldown_resets_counter():
+async def test_account_stats_clear_cooldown_resets_counter(monkeypatch):
     """测试手动清除冷却会重置 429 次数计数器，不会在下一次 429 时直接秒锁至午夜。"""
+    monkeypatch.setattr(
+        "aistudio_api.application.account_rotator.get_seconds_until_pacific_midnight",
+        lambda: 3600,
+    )
     stats = AccountStats(account_id="acc_1")
     # 连续 3 次 429 触发当日锁定
     stats.record_rate_limited(model="gemini-2.5-pro")

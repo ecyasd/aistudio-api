@@ -1,7 +1,9 @@
 # Browserless API 协作规则
 
 - 后端以 DeconstructedCube/aistudio-api 的 feat/browserless-waa-engine 为基础；沿用现有 application、gateway 和 WAA 实现。协议适配器共用同一生成流程，定制能力只保留一个实现。
-- 管理界面以 AIS2 的独立日志页、请求页与筛选交互为参考；主要服务 SillyTavern，Gemini 与 OpenAI Chat Completions 是对外协议。
+- 管理界面以 AIS2 的用量统计、请求管理和独立日志页为参考；主要服务 SillyTavern，Gemini 与 OpenAI Chat Completions 是对外协议。
+- PG 与 Build 写代码助手同时提供；普通模型走 PG，`-build` 后缀模型走 `assistant`，不把代码助手混同于 Build 应用代理。跨通道允许并发，账号上下文与取消资源归请求所有，冷却按完整模型 ID 隔离。
+- 默认使用无浏览器引擎，保留可选 CloakBrowser 引擎；切换在重启后生效。浏览器只在真实请求时启动，不在启动、部署或验证中探测 Google 会话。
 - 管理接口仅接受独立 Bearer 管理密码；模型接口使用动态调用密钥，空密钥拒绝。测试和文档使用虚构凭据。
 - 请求诊断只记录有界元数据与固定事件，不保存提示词、正文、思考、签名、Cookie 或原始异常。活动请求和结束记录分别有界，取消与失败不能记为成功。
 - 账号归属、签名顺序、流式背压、取消与资源释放沿用上游链路；修改这些行为须补离线回归。启动不主动探测 Google 账号或发起推理。

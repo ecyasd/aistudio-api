@@ -23,6 +23,7 @@ from aistudio_api.application.account_orchestrator import (
     MAX_RETRIES,
     ensure_active_account,
     record_rotator_event,
+    request_account_id,
     try_switch_account,
 )
 from aistudio_api.application.chat_service import (
@@ -100,9 +101,7 @@ class Auth403RetryManager:
         # 3. 最后 1 次 403: 切号故障转移 (Failover switch account)
         if self.count == 5:
             self.current_prepared = None
-            account_svc = runtime_state.account_service
-            active_acc = account_svc.get_active_account() if account_svc else None
-            failed_id = active_acc.id if active_acc else None
+            failed_id = request_account_id()
             if await try_switch_account(model=model, failed_account_id=failed_id):
                 logger.warning(
                     "遭遇 403 权限异常，重放与重签均未恢复，已切换至备用账号: model=%s",
@@ -240,9 +239,7 @@ async def handle_attempt_exception(
     Returns True if the operation should be retried, or raises HTTPException / re-raises.
     """
     target_model = normalized_model or model_path
-    account_svc = runtime_state.account_service
-    active_acc = account_svc.get_active_account() if account_svc else None
-    failed_id = active_acc.id if active_acc else None
+    failed_id = request_account_id()
 
     if isinstance(exc, ValueError):
         raise HTTPException(
@@ -412,6 +409,15 @@ async def handle_gemini_generate_content(
                 max_tokens=normalized.max_tokens,
                 generation_config_overrides=normalized.generation_config_overrides,
                 prepared=auth_manager.current_prepared,
+                **(
+                    {
+                        "assistant_request": req.model_dump(
+                            by_alias=True, exclude_none=True
+                        )
+                    }
+                    if normalized.model.endswith("-build")
+                    else {}
+                ),
             )
             auth_manager.current_prepared = None
 
@@ -648,6 +654,15 @@ def _build_gemini_streaming_response(
                             max_tokens=normalized.max_tokens,
                             generation_config_overrides=normalized.generation_config_overrides,
                             prepared=auth_manager.current_prepared,
+                            **(
+                                {
+                                    "assistant_request": req.model_dump(
+                                        by_alias=True, exclude_none=True
+                                    )
+                                }
+                                if normalized.model.endswith("-build")
+                                else {}
+                            ),
                         )
                     ) as upstream_events:
                         async for event_type, text in upstream_events:

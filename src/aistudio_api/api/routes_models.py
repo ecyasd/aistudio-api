@@ -60,6 +60,7 @@ def _to_gemini_model(model_data: Mapping[str, object]) -> GeminiModelResponse:
     )
     return GeminiModelResponse(
         name=name,
+        channels=["assistant"] if clean_id.endswith("-build") else ["playground"],
         version=version,
         displayName=display_name,
         description=description,

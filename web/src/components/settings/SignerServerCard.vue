@@ -189,14 +189,14 @@ onMounted(() => {
         <div class="flex items-center gap-2">
           <KeyRound class="w-5 h-5 text-indigo-600" />
           <h3 class="text-base font-bold text-gray-900 tracking-tight">
-            WAA 证明签名服务与特征绑定
+            无浏览器 WAA 签名服务
           </h3>
           <span class="px-2 py-0.5 text-[11px] font-semibold bg-gray-100 text-gray-700 rounded-md">
             纯手动切换
           </span>
         </div>
         <p class="text-xs text-gray-500">
-          管理与切换 WAA 签名服务节点。各签名节点底层环境（SpiderMonkey / NodeVM 等）不同，已绑定各自特征 User-Agent，切换时外层请求头将自动精确对齐，防 403 鉴权拦截。
+          无浏览器引擎使用此处选择的签名节点；有浏览器引擎直接在本机 CloakBrowser 中签名。
         </p>
       </div>
       <button

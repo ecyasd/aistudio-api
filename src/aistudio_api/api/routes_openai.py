@@ -359,6 +359,7 @@ async def openai_models(state: RuntimeState = Depends(get_runtime_state)):
                 "object": "model",
                 "created": 0,
                 "owned_by": "google",
+                "channels": item.channels,
             }
             for item in models.models
         ],
